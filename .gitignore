@@ -140,3 +140,4 @@ chart*.py
 
 # except manually
 IDEA.py
+.DS_Store

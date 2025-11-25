@@ -1,17 +1,18 @@
-from api.Kiwoom import *
+from api.Kiwoom import Kiwoom
 from util.make_up_universe import *
 from util.db_helper import *
 from util.time_helper import *
 from util.notifier import *
 import math
 import traceback
+import threading
 
 
-class RSIStrategy(QThread):
-    def __init__(self):
-        QThread.__init__(self)
+class RSIStrategy(threading.Thread):
+    def __init__(self, kiwoom):
+        threading.Thread.__init__(self)
         self.strategy_name = "RSIStrategy"
-        self.kiwoom = Kiwoom()
+        self.kiwoom = kiwoom
 
         # 유니버스 정보를 담을 딕셔너리
         self.universe = {}
@@ -181,11 +182,10 @@ class RSIStrategy(QThread):
 
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
-        # 임의의 fid를 하나 전달하기 위한 코드(아무 값의 fid라도 하나 이상 전달해야 정보를 얻어올 수 있음)
-        fids = get_fid("체결시간")
-
-        # 장운영구분을 확인하고 싶으면 사용할 코드
-        # self.kiwoom.set_real_reg("1000", "", get_fid("장운영구분"), "0")
+        # In the new REST & WebSocket API, we don't need to specify FIDs for real-time registration.
+        # The subscription is based on the 'type' of data (e.g., '0B' for execution).
+        # The `fids` parameter is kept for compatibility but ignored in the new Kiwoom class.
+        fids = "" # This is no longer used in the new Kiwoom class.
 
         # universe 딕셔너리의 key값들은 종목코드들을 의미
         codes = self.universe.keys()

@@ -1,350 +1,483 @@
-from PyQt5.QAxContainer import *
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
+import requests
+import json
+import datetime
 import time
 import pandas as pd
 from util.const import *
+import asyncio
+import websockets
+import threading
 
 
-class Kiwoom(QAxWidget):
-    def __init__(self):
-        super().__init__()
-        self._make_kiwoom_instance()
-        self._set_signal_slots()
-        self._comm_connect()
+class Kiwoom:
+    def __init__(self, appkey, secretkey, mock=False):
+        self.mock = mock
+        if mock:
+            self.base_url = "https://mockapi.kiwoom.com"
+            self.socket_url = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
+        else:
+            self.base_url = "https://api.kiwoom.com"
+            self.socket_url = "wss://api.kiwoom.com:10000/api/dostk/websocket"
 
-        self.account_number = self.get_account_number()
-
-        self.tr_event_loop = QEventLoop()
+        self.appkey = appkey
+        self.secretkey = secretkey
+        self.access_token = None
+        self.token_expires_in = None
 
         self.order = {}
         self.balance = {}
         self.universe_realtime_transaction_info = {}
 
-    def _make_kiwoom_instance(self):
-        self.setControl("KHOPENAPI.KHOpenAPICtrl.1")
+        # WebSocket attributes
+        self.websocket = None
+        self.is_websocket_connected = False
+        self.websocket_thread = None
+        self.asyncio_loop = None
 
-    def _set_signal_slots(self):
-        """API로 보내는 요청들을 받아올 slot을 등록하는 함수"""
-        # 로그인 응답의 결과를 _on_login_connect을 통해 받도록 설정
-        self.OnEventConnect.connect(self._login_slot)
+        self._authenticate()
+        self._start_websocket_thread()
 
-        # TR의 응답 결과를 _on_receive_tr_data를 통해 받도록 설정
-        self.OnReceiveTrData.connect(self._on_receive_tr_data)
-
-        # TR/주문 메시지를 _on_receive_msg을 통해 받도록 설정
-        self.OnReceiveMsg.connect(self._on_receive_msg)
-
-        # 주문 접수/체결 결과를 _on_chejan_slot을 통해 받도록 설정
-        self.OnReceiveChejanData.connect(self._on_chejan_slot)
-
-        # 실시간 체결 데이터를 _on_receive_real_data을 통해 받도록 설정
-        self.OnReceiveRealData.connect(self._on_receive_real_data)
-
-    def _login_slot(self, err_code):
-        if err_code == 0:
-            print("connected")
+    def _authenticate(self):
+        """
+        Get access token.
+        """
+        url = f"{self.base_url}/oauth2/token"
+        headers = {"content-type": "application/json"}
+        data = {
+            "grant_type": "client_credentials",
+            "appkey": self.appkey,
+            "secretkey": self.secretkey
+        }
+        res = requests.post(url, headers=headers, data=json.dumps(data))
+        if res.status_code == 200:
+            self.access_token = res.json()["access_token"]
+            self.token_expires_in = datetime.datetime.now() + datetime.timedelta(seconds=res.json()["expires_in"])
+            print("Authentication successful.")
         else:
-            print("not connected")
+            print(f"Authentication failed: {res.text}")
+            self.access_token = None
 
-        self.login_event_loop.exit()
+    def _request(self, path, tr_id, params, method="POST", extra_headers=None):
+        """
+        A wrapper for making API requests.
+        """
+        # TODO: Add token refresh logic
+        # if self.token_expires_in is None or self.token_expires_in < datetime.datetime.now():
+        #     self._authenticate()
 
-    def _comm_connect(self):
-        self.dynamicCall("CommConnect()")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.access_token}",
+            "appkey": self.appkey,
+            "secretkey": self.secretkey,
+            "tr_id": tr_id
+        }
 
-        self.login_event_loop = QEventLoop()
-        self.login_event_loop.exec_()
+        if extra_headers:
+            headers.update(extra_headers)
 
-    def get_account_number(self, tag="ACCNO"):
-        account_list = self.dynamicCall("GetLoginInfo(QString)", tag)  # tag로 전달한 요청에 대한 응답을 받아옴
-        account_number = account_list.split(';')[0]
-        print(account_number, account_list)
-        return account_number
+        url = f"{self.base_url}{path}"
+
+        if method == "POST":
+            res = requests.post(url, headers=headers, data=json.dumps(params))
+        else: # GET
+            res = requests.get(url, headers=headers, params=params)
+
+        if res.status_code == 200:
+            return res.json(), res.headers # Return headers for pagination
+        else:
+            print(f"Request failed: {res.text}")
+            return None, None
+
+
 
     def get_code_list_by_market(self, market_type):
-        code_list = self.dynamicCall("GetCodeListByMarket(QString)", market_type)
-        code_list = code_list.split(';')[:-1]
+        """
+        Retrieves a list of stock codes and names for a given market type.
+        market_type: '0' (KOSPI), '10' (KOSDAQ), etc.
+        """
+        path = "/api/dostk/stkinfo"
+        tr_id = "ka10099"
+        params = {"mrkt_tp": market_type}
+
+        res_data = self._request(path=path, tr_id=tr_id, params=params, method="POST")
+
+        code_list = []
+        if res_data and isinstance(res_data, dict) and "list" in res_data:
+            for item in res_data["list"]:
+                code_list.append({"code": item["code"], "name": item["name"]})
+        else:
+            print(f"Failed to retrieve code list for market {market_type} or unexpected response format: {res_data}")
+
         return code_list
 
     def get_master_code_name(self, code):
-        code_name = self.dynamicCall("GetMasterCodeName(QString)", code)
-        return code_name
+        """
+        Retrieves the name of a stock given its code.
+        """
+        path = "/api/dostk/stkinfo"
+        tr_id = "ka10100"
+        params = {"stk_cd": code}
+
+        res_data = self._request(path=path, tr_id=tr_id, params=params, method="POST")
+
+        if res_data and isinstance(res_data, dict) and "name" in res_data:
+            return res_data["name"]
+        else:
+            print(f"Failed to retrieve stock name for code {code} or unexpected response format: {res_data}")
+            return None
 
     def get_price_data(self, code):
-        self.dynamicCall("SetInputValue(QString, QString)", "종목코드", code)
-        self.dynamicCall("SetInputValue(QString, QString)", "수정주가구분", "1")
-        self.dynamicCall("CommRqData(QString, QString, int, QString)", "opt10081_req", "opt10081", 0, "0001")
+        """
+        Retrieves historical daily OHLCV data for a specific stock.
+        """
+        path = "/api/dostk/chart"
+        tr_id = "ka10081"
+        all_ohlcv_data = {
+            'date': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []
+        }
+        
+        cont_yn = "Y"
+        next_key = ""
 
-        self.tr_event_loop.exec_()
+        while cont_yn == "Y":
+            params = {
+                "stk_cd": code,
+                "base_dt": datetime.date.today().strftime("%Y%m%d"), # Start from today
+                "upd_stkpc_tp": "1" # Adjusted stock price
+            }
+            extra_headers = {}
+            if next_key:
+                extra_headers["next-key"] = next_key
+            
+            res_data, res_headers = self._request(path=path, tr_id=tr_id, params=params, method="POST", extra_headers=extra_headers)
 
-        ohlcv = self.tr_data
-
-        while self.has_next_tr_data:
-            self.dynamicCall("SetInputValue(QString, QString)", "종목코드", code)
-            self.dynamicCall("SetInputValue(QString, QString)", "수정주가구분", "1")
-            self.dynamicCall("CommRqData(QString, QString, int, QString)", "opt10081_req", "opt10081", 2, "0001")
-            self.tr_event_loop.exec_()
-
-            for key, val in self.tr_data.items():
-                ohlcv[key] += val
-
-        df = pd.DataFrame(ohlcv, columns=['open', 'high', 'low', 'close', 'volume'], index=ohlcv['date'])
-
+            if res_data and isinstance(res_data, dict) and "stk_dt_pole_chart_qry" in res_data:
+                for item in res_data["stk_dt_pole_chart_qry"]:
+                    all_ohlcv_data['date'].append(item['dt'])
+                    all_ohlcv_data['open'].append(int(item['open_pric']))
+                    all_ohlcv_data['high'].append(int(item['high_pric']))
+                    all_ohlcv_data['low'].append(int(item['low_pric']))
+                    all_ohlcv_data['close'].append(int(item['cur_prc']))
+                    all_ohlcv_data['volume'].append(int(item['trde_qty']))
+                
+                cont_yn = res_headers.get("cont-yn", "N")
+                next_key = res_headers.get("next-key", "")
+            else:
+                print(f"Failed to retrieve price data for code {code} or unexpected response format: {res_data}")
+                break
+        
+        df = pd.DataFrame(all_ohlcv_data, columns=['open', 'high', 'low', 'close', 'volume'], index=all_ohlcv_data['date'])
+        
         return df[::-1]
 
-    def _on_receive_tr_data(self, screen_no, rqname, trcode, record_name, next, unused1, unused2, unused3, unused4):
-        "TR조회의 응답 결과를 얻어오는 함수"
-        print("[Kiwoom] _on_receive_tr_data is called {} / {} / {}".format(screen_no, rqname, trcode))
-        tr_data_cnt = self.dynamicCall("GetRepeatCnt(QString, QString)", trcode, rqname)
-
-        if next == '2':
-            self.has_next_tr_data = True
-        else:
-            self.has_next_tr_data = False
-
-        if rqname == "opt10081_req":
-            ohlcv = {'date': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []}
-
-            for i in range(tr_data_cnt):
-                date = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "일자")
-                open = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "시가")
-                high = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "고가")
-                low = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "저가")
-                close = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "현재가")
-                volume = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "거래량")
-
-                ohlcv['date'].append(date.strip())
-                ohlcv['open'].append(int(open))
-                ohlcv['high'].append(int(high))
-                ohlcv['low'].append(int(low))
-                ohlcv['close'].append(int(close))
-                ohlcv['volume'].append(int(volume))
-
-            self.tr_data = ohlcv
-
-        elif rqname == "opw00001_req":
-            deposit = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, 0, "주문가능금액")
-            self.tr_data = int(deposit)
-            print(self.tr_data)
-
-        elif rqname == "opt10075_req":
-            for i in range(tr_data_cnt):
-                code = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "종목코드")
-                code_name = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "종목명")
-                order_number = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "주문번호")
-                order_status = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "주문상태")
-                order_quantity = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "주문수량")
-                order_price = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "주문가격")
-                current_price = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "현재가")
-                order_type = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "주문구분")
-                left_quantity = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "미체결수량")
-                executed_quantity = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "체결량")
-                ordered_at = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "시간")
-                fee = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "당일매매수수료")
-                tax = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "당일매매세금")
-
-                # 데이터 형변환 및 가공
-                code = code.strip()
-                code_name = code_name.strip()
-                order_number = str(int(order_number.strip()))
-                order_status = order_status.strip()
-                order_quantity = int(order_quantity.strip())
-                order_price = int(order_price.strip())
-
-                current_price = int(current_price.strip().lstrip('+').lstrip('-'))
-                order_type = order_type.strip().lstrip('+').lstrip('-')  # +매수,-매도처럼 +,- 제거
-                left_quantity = int(left_quantity.strip())
-                executed_quantity = int(executed_quantity.strip())
-                ordered_at = ordered_at.strip()
-                fee = int(fee)
-                tax = int(tax)
-
-                # code를 key값으로 한 딕셔너리 변환
-                self.order[code] = {
-                    '종목코드': code,
-                    '종목명': code_name,
-                    '주문번호': order_number,
-                    '주문상태': order_status,
-                    '주문수량': order_quantity,
-                    '주문가격': order_price,
-                    '현재가': current_price,
-                    '주문구분': order_type,
-                    '미체결수량': left_quantity,
-                    '체결량': executed_quantity,
-                    '주문시간': ordered_at,
-                    '당일매매수수료': fee,
-                    '당일매매세금': tax
-                }
-
-            self.tr_data = self.order
-
-        elif rqname == "opw00018_req":
-            for i in range(tr_data_cnt):
-                code = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "종목번호")
-                code_name = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "종목명")
-                quantity = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "보유수량")
-                purchase_price = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "매입가")
-                return_rate = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "수익률(%)")
-                current_price = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i, "현재가")
-                total_purchase_price = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i,"매입금액")
-                available_quantity = self.dynamicCall("GetCommData(QString, QString, int, QString", trcode, rqname, i,"매매가능수량")
-
-                # 데이터 형변환 및 가공
-                code = code.strip()[1:]
-                code_name = code_name.strip()
-                quantity = int(quantity)
-                purchase_price = int(purchase_price)
-                return_rate = float(return_rate)
-                current_price = int(current_price)
-                total_purchase_price = int(total_purchase_price)
-                available_quantity = int(available_quantity)
-
-                # code를 key값으로 한 딕셔너리 변환
-                self.balance[code] = {
-                    '종목명': code_name,
-                    '보유수량': quantity,
-                    '매입가': purchase_price,
-                    '수익률': return_rate,
-                    '현재가': current_price,
-                    '매입금액': total_purchase_price,
-                    '매매가능수량': available_quantity
-                }
-
-            self.tr_data = self.balance
-
-        self.tr_event_loop.exit()
-        time.sleep(0.5)
-
     def get_deposit(self):
-        self.dynamicCall("SetInputValue(QString, QString)", "계좌번호", self.account_number)
-        self.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
-        self.dynamicCall("SetInputValue(QString, QString)", "조회구분", "2")
-        self.dynamicCall("CommRqData(QString, QString, int, QString)", "opw00001_req", "opw00001", 0, "0002")
+        """
+        Retrieves the orderable deposit amount using the Kiwoom REST API (kt00001).
+        """
+        path = "/api/dostk/acnt"
+        tr_id = "kt00001"
+        params = {"qry_tp": "3"} # 3 for Estimated Inquiry
 
-        self.tr_event_loop.exec_()
-        return self.tr_data
+        res_data, _ = self._request(path=path, tr_id=tr_id, params=params, method="POST")
+
+        deposit = 0
+        if res_data and isinstance(res_data, dict) and "ord_alow_amt" in res_data:
+            deposit = int(res_data["ord_alow_amt"])
+        else:
+            print(f"Failed to retrieve deposit or unexpected response format: {res_data}")
+
+        return deposit
 
     def send_order(self, rqname, screen_no, order_type, code, order_quantity, order_price, order_classification, origin_order_number=""):
-        order_result = self.dynamicCall("SendOrder(QString, QString, QString, int, QString, int, int, QString, QString)",[rqname, screen_no, self.account_number, order_type, code, order_quantity, order_price,order_classification, origin_order_number])
-        return order_result
+        """
+        Sends a buy or sell order using the Kiwoom REST API.
+        rqname, screen_no are not directly used in REST API, kept for compatibility.
+        order_type: 0 for Buy, 1 for Sell (from original Kiwoom API)
+        order_classification: '00' for limit order (지정가), '03' for market order (시장가)
+        """
+        path = "/api/dostk/ordr"
+        
+        tr_id_map = {
+            0: "kt10000", # Buy order
+            1: "kt10001"  # Sell order
+            # TODO: Add kt10002 for amend, kt10003 for cancel
+        }
+        tr_id = tr_id_map.get(order_type)
+        if not tr_id:
+            print(f"Unsupported order_type: {order_type}")
+            return None
 
-    def _on_receive_msg(self, screen_no, rqname, trcode, msg):
-        print("[Kiwoom] _on_receive_msg is called {} / {} / {} / {}".format(screen_no, rqname, trcode, msg))
+        # Map order_classification to trde_tp
+        trde_tp_map = {
+            "00": "0", # 지정가 (Limit order) -> 보통
+            "03": "3"  # 시장가 (Market order)
+            # Add other mappings if needed
+        }
+        trde_tp = trde_tp_map.get(order_classification)
+        if not trde_tp:
+            print(f"Unsupported order_classification: {order_classification}")
+            return None
 
-    def _on_chejan_slot(self, s_gubun, n_item_cnt, s_fid_list):
-        print("[Kiwoom] _on_chejan_slot is called {} / {} / {}".format(s_gubun, n_item_cnt, s_fid_list))
+        # ord_uv should be empty for market orders
+        order_uv_param = str(order_price) if trde_tp != "3" else ""
 
-        # 9201;9203;9205;9001;912;913;302;900;901;처럼 전달되는 fid 리스트를 ';' 기준으로 구분함
-        for fid in s_fid_list.split(";"):
-            if fid in FID_CODES:
-                # 9001-종목코드 얻어오기, 종목코드는 A007700처럼 앞자리에 문자가 오기 때문에 앞자리를 제거함
-                code = self.dynamicCall("GetChejanData(int)", '9001')[1:]
+        params = {
+            "dmst_stex_tp": "KRX", # Hardcode to KRX for now
+            "stk_cd": code,
+            "ord_qty": str(order_quantity),
+            "ord_uv": order_uv_param,
+            "trde_tp": trde_tp,
+            "cond_uv": "" # Not handled in original signature
+        }
 
-                # fid를 이용해 data를 얻어오기(ex: fid:9203를 전달하면 주문번호를 수신해 data에 저장됨)
-                data = self.dynamicCall("GetChejanData(int)", fid)
+        res_data, _ = self._request(path=path, tr_id=tr_id, params=params, method="POST")
 
-                # 데이터에 +,-가 붙어있는 경우 (ex: +매수, -매도) 제거
-                data = data.strip().lstrip('+').lstrip('-')
-
-                # 수신한 데이터는 전부 문자형인데 문자형 중에 숫자인 항목들(ex:매수가)은 숫자로 변형이 필요함
-                if data.isdigit():
-                    data = int(data)
-
-                # fid 코드에 해당하는 항목(item_name)을 찾음(ex: fid=9201 > item_name=계좌번호)
-                item_name = FID_CODES[fid]
-
-                # 얻어온 데이터를 출력(ex: 주문가격 : 37600)
-                print("{}: {}".format(item_name, data))
-
-                # 접수/체결(s_gubun=0)이면 self.order, 잔고이동이면 self.balance에 값을 저장
-                if int(s_gubun) == 0:
-                    # 아직 order에 종목코드가 없다면 신규 생성하는 과정
-                    if code not in self.order.keys():
-                        self.order[code] = {}
-
-                    # order 딕셔너리에 데이터 저장
-                    self.order[code].update({item_name: data})
-                elif int(s_gubun) == 1:
-                    # 아직 balance에 종목코드가 없다면 신규 생성하는 과정
-                    if code not in self.balance.keys():
-                        self.balance[code] = {}
-
-                    # order 딕셔너리에 데이터 저장
-                    self.balance[code].update({item_name: data})
-
-        # s_gubun값에 따라 저장한 결과를 출력
-        if int(s_gubun) == 0:
-            print("* 주문 출력(self.order)")
-            print(self.order)
-        elif int(s_gubun) == 1:
-            print("* 잔고 출력(self.balance)")
-            print(self.balance)
+        if res_data and isinstance(res_data, dict) and "ord_no" in res_data:
+            print(f"Order successful. Order number: {res_data['ord_no']}")
+            # Update self.order with the new order details (simplified for now)
+            self.order[res_data['ord_no']] = {
+                '종목코드': code,
+                '주문수량': order_quantity,
+                '주문가격': order_price,
+                '주문구분': order_type,
+                '주문번호': res_data['ord_no'],
+                '주문상태': '접수' # Assuming initial state is '접수'
+            }
+            return res_data['ord_no']
+        else:
+            print(f"Order failed for code {code} or unexpected response: {res_data}")
+            return None
 
     def get_order(self):
-        self.dynamicCall("SetInputValue(QString, QString)", "계좌번호", self.account_number)
-        self.dynamicCall("SetInputValue(QString, QString)", "전체종목구분", "0")
-        self.dynamicCall("SetInputValue(QString, QString)", "체결구분", "0")  # 0:전체, 1:미체결, 2:체결
-        self.dynamicCall("SetInputValue(QString, QString)", "매매구분", "0")  # 0:전체, 1:매도, 2:매수
-        self.dynamicCall("CommRqData(QString, QString, int, QString)", "opt10075_req", "opt10075", 0, "0002")
+        """
+        Retrieves a list of unexecuted orders using the Kiwoom REST API (ka10075).
+        """
+        path = "/api/dostk/acnt"
+        tr_id = "ka10075"
+        
+        all_unexecuted_orders = []
+        cont_yn = "Y"
+        next_key = ""
 
-        self.tr_event_loop.exec_()
-        return self.tr_data
+        while cont_yn == "Y":
+            params = {
+                "all_stk_tp": "0", # 0: 전체, 1: 종목 (All stocks)
+                "trde_tp": "0",    # 0: 전체, 1: 매도, 2: 매수 (All trade types)
+                "stk_cd": "",      # Empty for all stocks
+                "stex_tp": "0"     # 0: 통합, 1: KRX, 2: NXT (Integrated exchange)
+            }
+            extra_headers = {}
+            if next_key:
+                extra_headers["next-key"] = next_key
+            
+            res_data, res_headers = self._request(path=path, tr_id=tr_id, params=params, method="POST", extra_headers=extra_headers)
+
+            if res_data and isinstance(res_data, dict) and "oso" in res_data:
+                for item in res_data["oso"]:
+                    # Map relevant fields to a consistent structure, similar to original self.order
+                    # This mapping needs careful verification against actual API response.
+                    order_info = {
+                        '종목코드': item.get('stk_cd', '').strip(),
+                        '종목명': item.get('stk_nm', '').strip(),
+                        '주문번호': item.get('ord_no', '').strip(),
+                        '주문상태': item.get('ord_stt', '').strip(),
+                        '주문수량': int(item.get('ord_qty', '0')),
+                        '주문가격': int(item.get('ord_pric', '0')),
+                        '현재가': int(item.get('cur_prc', '0').replace('+', '').replace('-', '')), # Remove signs
+                        '주문구분': item.get('io_tp_nm', '').strip(),
+                        '미체결수량': int(item.get('oso_qty', '0')),
+                        '체결량': int(item.get('cntr_qty', '0')),
+                        '주문시간': item.get('tm', '').strip(),
+                        '당일매매수수료': int(item.get('tdy_trde_cmsn', '0')),
+                        '당일매매세금': int(item.get('tdy_trde_tax', '0'))
+                    }
+                    all_unexecuted_orders.append(order_info)
+                
+                cont_yn = res_headers.get("cont-yn", "N")
+                next_key = res_headers.get("next-key", "")
+            else:
+                print(f"Failed to retrieve unexecuted orders or unexpected response format: {res_data}")
+                break
+        
+        # Update self.order for consistency, though it's primarily for real-time updates
+        # For now, this will just contain the last fetched unexecuted orders.
+        self.order = {order['종목코드']: order for order in all_unexecuted_orders}
+
+        return all_unexecuted_orders
 
     def get_balance(self):
-        self.dynamicCall("SetInputValue(QString, QString)", "계좌번호", self.account_number)
-        self.dynamicCall("SetInputValue(QString, QString)", "비밀번호입력매체구분", "00")
-        self.dynamicCall("SetInputValue(QString, QString)", "조회구분", "1")
-        self.dynamicCall("CommRqData(QString, QString, int, QString)", "opw00018_req", "opw00018", 0, "0002")
+        """
+        Retrieves account balance and holdings using the Kiwoom REST API (kt00018).
+        """
+        path = "/api/dostk/acnt"
+        tr_id = "kt00018"
+        
+        all_holdings = []
+        cont_yn = "Y"
+        next_key = ""
 
-        self.tr_event_loop.exec_()
-        return self.tr_data
+        while cont_yn == "Y":
+            params = {
+                "qry_tp": "1",        # 1: 합산 (Combined), 2: 개별 (Individual)
+                "dmst_stex_tp": "KRX" # KRX: 한국거래소, NXT: 넥스트트레이드
+            }
+            extra_headers = {}
+            if next_key:
+                extra_headers["next-key"] = next_key
+            
+            res_data, res_headers = self._request(path=path, tr_id=tr_id, params=params, method="POST", extra_headers=extra_headers)
+
+            if res_data and isinstance(res_data, dict) and "acnt_evlt_remn_indv_tot" in res_data:
+                for item in res_data["acnt_evlt_remn_indv_tot"]:
+                    # Map relevant fields to a consistent structure, similar to original self.balance
+                    # This mapping needs careful verification against actual API response.
+                    holding_info = {
+                        '종목명': item.get('stk_nm', '').strip(),
+                        '보유수량': int(item.get('rmnd_qty', '0')),
+                        '매입가': int(item.get('pur_pric', '0')),
+                        '수익률': float(item.get('prft_rt', '0.0')),
+                        '현재가': int(item.get('cur_prc', '0')),
+                        '매입금액': int(item.get('pur_amt', '0')),
+                        '매매가능수량': int(item.get('trde_able_qty', '0'))
+                    }
+                    all_holdings.append((item.get('stk_cd', '').strip(), holding_info)) # Store with code for keying
+                
+                cont_yn = res_headers.get("cont-yn", "N")
+                next_key = res_headers.get("next-key", "")
+            else:
+                print(f"Failed to retrieve balance or unexpected response format: {res_data}")
+                break
+        
+        # Update self.balance for consistency
+        self.balance = {code: info for code, info in all_holdings}
+
+        return self.balance
 
     def set_real_reg(self, str_screen_no, str_code_list, str_fid_list, str_opt_type):
-        self.dynamicCall("SetRealReg(QString, QString, QString, QString)", str_screen_no, str_code_list, str_fid_list, str_opt_type)
-        time.sleep(0.5)
+        """
+        Registers for real-time data using WebSocket.
+        str_screen_no, str_fid_list are not used, but kept for compatibility.
+        str_opt_type maps to refresh.
+        """
+        codes = str_code_list.split(';')
+        
+        # In REST API, FID list is not needed, we subscribe by stock code and type (e.g., '0B' for execution)
+        # Let's assume we always want execution data, so type is '0B'.
+        
+        subscription_data = [{
+            'item': codes,
+            'type': ['0B'] # Assuming we always subscribe to '주식체결'
+        }]
+
+        message = {
+            'trnm': 'REG',
+            'grp_no': '1', # Using a default group number
+            'refresh': str_opt_type, # '0' or '1'
+            'data': subscription_data
+        }
+        
+        if self.is_websocket_connected and self.asyncio_loop:
+            asyncio.run_coroutine_threadsafe(self._send_websocket_message(message), self.asyncio_loop)
+            print(f"Real-time registration sent for codes: {str_code_list}")
+        else:
+            print("WebSocket is not connected. Cannot register for real-time data.")
 
     def _on_receive_real_data(self, s_code, real_type, real_data):
-        if real_type == "장시작시간":
-            pass
-
-        elif real_type == "주식체결":
-            signed_at = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid("체결시간"))
-
-            close = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid("현재가"))
-            close = abs(int(close))
-
-            high = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid('고가'))
-            high = abs(int(high))
-
-            open = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid('시가'))
-            open = abs(int(open))
-
-            low = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid('저가'))
-            low = abs(int(low))
-
-            top_priority_ask = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid('(최우선)매도호가'))
-            top_priority_ask = abs(int(top_priority_ask))
-
-            top_priority_bid = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid('(최우선)매수호가'))
-            top_priority_bid = abs(int(top_priority_bid))
-
-            accum_volume = self.dynamicCall("GetCommRealData(QString, int)", s_code, get_fid('누적거래량'))
-            accum_volume = abs(int(accum_volume))
-
-            # print(s_code, signed_at, close, high, open, low, top_priority_ask, top_priority_bid, accum_volume)
-
-            # universe_realtime_transaction_info 딕셔너리에 종목코드가 키값으로 존재하지 않는다면 생성(해당 종목 실시간 데이터 최초 수신시)
+        """
+        This method is now called from the WebSocket message handler.
+        real_type is '0B' for execution data.
+        real_data is a dictionary of FIDs and values.
+        """
+        if real_type == "0B": # 주식체결
             if s_code not in self.universe_realtime_transaction_info:
-                self.universe_realtime_transaction_info.update({s_code: {}})
-
-            # 최초 수신 이후 계속 수신되는 데이터는 update를 이용해서 값 갱신
+                self.universe_realtime_transaction_info[s_code] = {}
+            
+            # Map FIDs from string to integer keys for consistency with original const.py if needed,
+            # but for now let's use string keys as received.
             self.universe_realtime_transaction_info[s_code].update({
-                "체결시간": signed_at,
-                "시가": open,
-                "고가": high,
-                "저가": low,
-                "현재가": close,
-                "(최우선)매도호가": top_priority_ask,
-                "(최우선)매수호가": top_priority_bid,
-                "누적거래량": accum_volume
+                "체결시간": real_data.get('20'),
+                "현재가": int(real_data.get('10', '0').replace('+', '').replace('-', '')),
+                "고가": int(real_data.get('17', '0').replace('+', '').replace('-', '')),
+                "시가": int(real_data.get('16', '0').replace('+', '').replace('-', '')),
+                "저가": int(real_data.get('18', '0').replace('+', '').replace('-', '')),
+                "(최우선)매도호가": int(real_data.get('27', '0').replace('+', '').replace('-', '')),
+                "(최우선)매수호가": int(real_data.get('28', '0').replace('+', '').replace('-', '')),
+                "누적거래량": int(real_data.get('13', '0'))
             })
+            # print(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
+        # Add other real_type handlers if needed
+
+    def _start_websocket_thread(self):
+        """Starts the WebSocket connection in a separate thread."""
+        self.websocket_thread = threading.Thread(target=self._run_websocket_loop)
+        self.websocket_thread.daemon = True
+        self.websocket_thread.start()
+
+    def _run_websocket_loop(self):
+        """Runs the asyncio event loop for the WebSocket."""
+        self.asyncio_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.asyncio_loop)
+        self.asyncio_loop.run_until_complete(self._connect_websocket())
+
+    async def _connect_websocket(self):
+        """Connects to the WebSocket and handles messages."""
+        try:
+            async with websockets.connect(self.socket_url) as websocket:
+                self.websocket = websocket
+                self.is_websocket_connected = True
+                print("WebSocket connected.")
+                await self._send_websocket_message({
+                    'trnm': 'LOGIN',
+                    'token': self.access_token
+                })
+
+                while self.is_websocket_connected:
+                    try:
+                        message = await self.websocket.recv()
+                        await self._handle_websocket_message(message)
+                    except websockets.ConnectionClosed:
+                        print("WebSocket connection closed.")
+                        self.is_websocket_connected = False
+                        break
+        except Exception as e:
+            print(f"WebSocket connection error: {e}")
+            self.is_websocket_connected = False
+
+    async def _send_websocket_message(self, message):
+        """Sends a message to the WebSocket server."""
+        if self.is_websocket_connected and self.websocket:
+            if not isinstance(message, str):
+                message = json.dumps(message)
+            await self.websocket.send(message)
+
+    async def _handle_websocket_message(self, message):
+        """Handles incoming WebSocket messages."""
+        try:
+            data = json.loads(message)
+            if data.get('trnm') == 'LOGIN':
+                if data.get('return_code') == 0:
+                    print("WebSocket login successful.")
+                else:
+                    print(f"WebSocket login failed: {data.get('return_msg')}")
+                    await self.disconnect()
+            elif data.get('trnm') == 'PING':
+                await self._send_websocket_message(data)
+            elif data.get('trnm') == 'REAL':
+                real_data = data.get('data', [])
+                for item in real_data:
+                    self._on_receive_real_data(item.get('item'), item.get('type'), item.get('values'))
+            else:
+                print(f"Received unknown WebSocket message: {data}")
+        except json.JSONDecodeError:
+            print(f"Failed to decode WebSocket message: {message}")
+        except Exception as e:
+            print(f"Error handling WebSocket message: {e}")
+
+    def disconnect(self):
+        """Disconnects from the WebSocket."""
+        if self.is_websocket_connected and self.asyncio_loop:
+            self.is_websocket_connected = False
+            self.asyncio_loop.call_soon_threadsafe(asyncio.create_task, self.websocket.close())
+        if self.websocket_thread:
+            self.websocket_thread.join()
