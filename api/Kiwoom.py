@@ -50,8 +50,11 @@ class Kiwoom:
         }
         res = requests.post(url, headers=headers, data=json.dumps(data))
         if res.status_code == 200:
-            self.access_token = res.json()["access_token"]
-            self.token_expires_in = datetime.datetime.now() + datetime.timedelta(seconds=res.json()["expires_in"])
+            response_data = res.json()
+            if return_code := response_data.get("return_code") != "0":
+                print(response_data.get("return_msg"))
+            self.access_token = response_data["token"]
+            self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S')
             print("Authentication successful.")
         else:
             print(f"Authentication failed: {res.text}")
@@ -62,15 +65,15 @@ class Kiwoom:
         A wrapper for making API requests.
         """
         # TODO: Add token refresh logic
-        # if self.token_expires_in is None or self.token_expires_in < datetime.datetime.now():
-        #     self._authenticate()
+        if self.token_expires_in is None or self.token_expires_in < datetime.datetime.now():
+            self._authenticate()
 
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.access_token}",
-            "appkey": self.appkey,
-            "secretkey": self.secretkey,
-            "tr_id": tr_id
+            # "appkey": self.appkey,
+            # "secretkey": self.secretkey,
+            "api-id": tr_id
         }
 
         if extra_headers:
@@ -446,6 +449,8 @@ class Kiwoom:
 
     async def _send_websocket_message(self, message):
         """Sends a message to the WebSocket server."""
+        if not self.is_websocket_connected:
+            await self._connect_websocket()
         if self.is_websocket_connected and self.websocket:
             if not isinstance(message, str):
                 message = json.dumps(message)
@@ -463,6 +468,11 @@ class Kiwoom:
                     await self.disconnect()
             elif data.get('trnm') == 'PING':
                 await self._send_websocket_message(data)
+
+            elif data.get('trnm') == 'REG':
+                print(f"Real-time registration response: {data}")
+            elif data.get('trnm') == 'REMOVE':
+                print(f"Real-time removal response: {data}")
             elif data.get('trnm') == 'REAL':
                 real_data = data.get('data', [])
                 for item in real_data:
