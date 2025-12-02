@@ -450,6 +450,7 @@ class Kiwoom:
     async def _send_websocket_message(self, message):
         """Sends a message to the WebSocket server."""
         if not self.is_websocket_connected:
+            print("WebSocket is not connected. reconnecting...")
             await self._connect_websocket()
         if self.is_websocket_connected and self.websocket:
             if not isinstance(message, str):
