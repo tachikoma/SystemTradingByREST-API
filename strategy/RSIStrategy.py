@@ -1,3 +1,4 @@
+import time
 from api.Kiwoom import Kiwoom
 from util.make_up_universe import *
 from util.db_helper import *
@@ -51,7 +52,7 @@ class RSIStrategy(threading.Thread):
         except Exception as e:
             print(traceback.format_exc())
             # LINE 메시지를 보내는 부분
-            send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
+            # send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
 
     def check_and_get_universe(self):
         """유니버스가 존재하는지 확인하고 없으면 생성하는 함수"""
@@ -178,7 +179,7 @@ class RSIStrategy(threading.Thread):
             except Exception as e:
                 print(traceback.format_exc())
                 # LINE 메시지를 보내는 부분
-                send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
+                # send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
 
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
@@ -257,7 +258,8 @@ class RSIStrategy(threading.Thread):
         # LINE 메시지를 보내는 부분
         message = "[{}]sell order is done! quantity:{}, ask:{}, order_result:{}".format(code, quantity, ask,
                                                                                         order_result)
-        send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
+        print(message)
+        # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
 
     def check_buy_signal_and_order(self, code):
         """매수 대상인지 확인하고 주문을 접수하는 함수"""
@@ -354,7 +356,8 @@ class RSIStrategy(threading.Thread):
             message = "[{}]buy order is done! quantity:{}, bid:{}, order_result:{}, deposit:{}, get_balance_count:{}, get_buy_order_count:{}, balance_len:{}".format(
                 code, quantity, bid, order_result, self.deposit, self.get_balance_count(), self.get_buy_order_count(),
                 len(self.kiwoom.balance))
-            send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
+            print(message)
+            # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
 
         # 매수신호가 없다면 종료
         else:
