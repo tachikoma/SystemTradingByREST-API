@@ -69,14 +69,15 @@ class RSIStrategy(threading.Thread):
             # KOSDAQ(10)에 상장된 모든 종목 코드를 가져와 kosdaq_code_list에 저장
             kosdaq_code_list = self.kiwoom.get_code_list_by_market("10")
 
-            for code in kospi_code_list + kosdaq_code_list:
+            for code_dict in kospi_code_list + kosdaq_code_list:
                 # 모든 종목 코드를 바탕으로 반복문 수행
-                code_name = self.kiwoom.get_master_code_name(code)
+                # time.sleep(0.5) # To avoid rate limiting
+                # TODO code_name = self.kiwoom.get_master_code_name(code_dict["code"])
+                code_name = code_dict["name"]
 
                 # 얻어온 종목명이 유니버스에 포함되어 있다면 딕셔너리에 추가
                 if code_name in universe_list:
-                    universe[code] = code_name
-
+                    universe[code_dict["code"]] = code_name
             # 코드, 종목명, 생성일자자를 열로 가지는 DaaFrame 생성
             universe_df = pd.DataFrame({
                 'code': universe.keys(),
@@ -131,6 +132,12 @@ class RSIStrategy(threading.Thread):
 
                 # (3), (4) 케이스: 장 시작 전이거나 장 중인 경우 데이터베이스에 저장된 데이터 조회
                 else:
+                    if not check_table_exist(self.strategy_name, code):
+                        # API를 이용해 조회한 가격 데이터 price_df에 저장
+                        price_df = self.kiwoom.get_price_data(code)
+                        # 코드를 테이블 이름으로 해서 데이터베이스에 저장
+                        insert_df_to_db(self.strategy_name, code, price_df)
+                    
                     sql = "select * from `{}`".format(code)
                     cur = execute_sql(self.strategy_name, sql)
                     cols = [column[0] for column in cur.description]
