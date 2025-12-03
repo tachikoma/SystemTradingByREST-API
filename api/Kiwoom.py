@@ -60,7 +60,7 @@ class Kiwoom:
             print(f"Authentication failed: {res.text}")
             self.access_token = None
 
-    def _request(self, path, tr_id, params, method="POST", extra_headers=None):
+    def _request(self, path, api_id, params, method="POST", extra_headers=None):
         """
         A wrapper for making API requests.
         """
@@ -71,9 +71,7 @@ class Kiwoom:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.access_token}",
-            # "appkey": self.appkey,
-            # "secretkey": self.secretkey,
-            "api-id": tr_id
+            "api-id": api_id
         }
 
         if extra_headers:
@@ -100,10 +98,10 @@ class Kiwoom:
         market_type: '0' (KOSPI), '10' (KOSDAQ), etc.
         """
         path = "/api/dostk/stkinfo"
-        tr_id = "ka10099"
+        api_id = "ka10099"
         params = {"mrkt_tp": market_type}
 
-        res_data = self._request(path=path, tr_id=tr_id, params=params, method="POST")
+        res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST")
 
         code_list = []
         if res_data and isinstance(res_data, dict) and "list" in res_data:
@@ -119,10 +117,10 @@ class Kiwoom:
         Retrieves the name of a stock given its code.
         """
         path = "/api/dostk/stkinfo"
-        tr_id = "ka10100"
+        api_id = "ka10100"
         params = {"stk_cd": code}
 
-        res_data = self._request(path=path, tr_id=tr_id, params=params, method="POST")
+        res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST")
 
         if res_data and isinstance(res_data, dict) and "name" in res_data:
             return res_data["name"]
@@ -135,7 +133,7 @@ class Kiwoom:
         Retrieves historical daily OHLCV data for a specific stock.
         """
         path = "/api/dostk/chart"
-        tr_id = "ka10081"
+        api_id = "ka10081"
         all_ohlcv_data = {
             'date': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []
         }
@@ -143,6 +141,7 @@ class Kiwoom:
         cont_yn = "Y"
         next_key = ""
 
+        count = 0 
         while cont_yn == "Y":
             params = {
                 "stk_cd": code,
@@ -152,8 +151,9 @@ class Kiwoom:
             extra_headers = {}
             if next_key:
                 extra_headers["next-key"] = next_key
-            
-            res_data, res_headers = self._request(path=path, tr_id=tr_id, params=params, method="POST", extra_headers=extra_headers)
+
+            time.sleep(0.2) # To avoid rate limiting
+            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
 
             if res_data and isinstance(res_data, dict) and "stk_dt_pole_chart_qry" in res_data:
                 for item in res_data["stk_dt_pole_chart_qry"]:
@@ -166,6 +166,10 @@ class Kiwoom:
                 
                 cont_yn = res_headers.get("cont-yn", "N")
                 next_key = res_headers.get("next-key", "")
+                count += 1
+                if count > 0:  # Safety break to avoid infinite loop
+                    print(f"Breaking loop after 1 iterations for code {code}")
+                    break
             else:
                 print(f"Failed to retrieve price data for code {code} or unexpected response format: {res_data}")
                 break
@@ -179,10 +183,10 @@ class Kiwoom:
         Retrieves the orderable deposit amount using the Kiwoom REST API (kt00001).
         """
         path = "/api/dostk/acnt"
-        tr_id = "kt00001"
+        api_id = "kt00001"
         params = {"qry_tp": "3"} # 3 for Estimated Inquiry
 
-        res_data, _ = self._request(path=path, tr_id=tr_id, params=params, method="POST")
+        res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
 
         deposit = 0
         if res_data and isinstance(res_data, dict) and "ord_alow_amt" in res_data:
@@ -201,13 +205,13 @@ class Kiwoom:
         """
         path = "/api/dostk/ordr"
         
-        tr_id_map = {
+        api_id_map = {
             0: "kt10000", # Buy order
             1: "kt10001"  # Sell order
             # TODO: Add kt10002 for amend, kt10003 for cancel
         }
-        tr_id = tr_id_map.get(order_type)
-        if not tr_id:
+        api_id = api_id_map.get(order_type)
+        if not api_id:
             print(f"Unsupported order_type: {order_type}")
             return None
 
@@ -234,7 +238,7 @@ class Kiwoom:
             "cond_uv": "" # Not handled in original signature
         }
 
-        res_data, _ = self._request(path=path, tr_id=tr_id, params=params, method="POST")
+        res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
 
         if res_data and isinstance(res_data, dict) and "ord_no" in res_data:
             print(f"Order successful. Order number: {res_data['ord_no']}")
@@ -257,7 +261,7 @@ class Kiwoom:
         Retrieves a list of unexecuted orders using the Kiwoom REST API (ka10075).
         """
         path = "/api/dostk/acnt"
-        tr_id = "ka10075"
+        api_id = "ka10075"
         
         all_unexecuted_orders = []
         cont_yn = "Y"
@@ -274,7 +278,8 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
             
-            res_data, res_headers = self._request(path=path, tr_id=tr_id, params=params, method="POST", extra_headers=extra_headers)
+            time.sleep(0.2) # To avoid rate limiting
+            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
 
             if res_data and isinstance(res_data, dict) and "oso" in res_data:
                 for item in res_data["oso"]:
@@ -314,7 +319,7 @@ class Kiwoom:
         Retrieves account balance and holdings using the Kiwoom REST API (kt00018).
         """
         path = "/api/dostk/acnt"
-        tr_id = "kt00018"
+        api_id = "kt00018"
         
         all_holdings = []
         cont_yn = "Y"
@@ -329,7 +334,8 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
             
-            res_data, res_headers = self._request(path=path, tr_id=tr_id, params=params, method="POST", extra_headers=extra_headers)
+            time.sleep(0.2) # To avoid rate limiting
+            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
 
             if res_data and isinstance(res_data, dict) and "acnt_evlt_remn_indv_tot" in res_data:
                 for item in res_data["acnt_evlt_remn_indv_tot"]:
@@ -471,9 +477,15 @@ class Kiwoom:
                 await self._send_websocket_message(data)
 
             elif data.get('trnm') == 'REG':
-                print(f"Real-time registration response: {data}")
+                if data.get('return_code') == 0:
+                    print(f"Real-time registration successful.")
+                else:
+                    print(f"Real-time registration failed: {data}")
             elif data.get('trnm') == 'REMOVE':
-                print(f"Real-time removal response: {data}")
+                if data.get('return_code') == 0:
+                    print(f"Real-time removal successful.")
+                else:
+                    print(f"Real-time removal failed: {data}")
             elif data.get('trnm') == 'REAL':
                 real_data = data.get('data', [])
                 for item in real_data:
