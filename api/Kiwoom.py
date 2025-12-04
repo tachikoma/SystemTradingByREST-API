@@ -28,11 +28,11 @@ class Kiwoom:
         self.balance = {}
         self.universe_realtime_transaction_info = {}
 
-        # WebSocket attributes
         self.websocket = None
         self.is_websocket_connected = False
         self.websocket_thread = None
         self.asyncio_loop = None
+        self._websocket_stop_event = threading.Event()
 
         self._authenticate()
         self._start_websocket_thread()
@@ -112,37 +112,61 @@ class Kiwoom:
 
         return code_list
 
-    def get_master_code_name(self, code):
+    def get_master_code_name(self, code, max_retries=3, delay=1):
         """
-        Retrieves the name of a stock given its code.
+        Retrieves the name of a stock given its code, with retry on API rate limit.
         """
         path = "/api/dostk/stkinfo"
         api_id = "ka10100"
         params = {"stk_cd": code}
 
-        res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST")
-
-        if res_data and isinstance(res_data, dict) and "name" in res_data:
-            return res_data["name"]
-        else:
+        for attempt in range(max_retries):
+            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST")
+            if res_data and isinstance(res_data, dict) and "name" in res_data:
+                return res_data["name"]
+            # 리밋 초과 조건에만 재시도
+            if (
+                res_data is not None and
+                isinstance(res_data, dict) and
+                "return_code" in res_data and
+                res_data["return_code"] == 5 and
+                "허용된 요청 개수를 초과하였습니다" in res_data.get("return_msg", "")
+            ):
+                print(f"API rate limit exceeded (attempt {attempt+1}), retrying after {delay}s...")
+                time.sleep(delay)
+                continue
+            # 기타 실패는 즉시 종료
             print(f"Failed to retrieve stock name for code {code} or unexpected response format: {res_data}")
-            return None
+            break
+        print(f"All retries failed for code {code}.")
+        return None
 
-    def get_price_data(self, code):
+    def get_price_data(self, code, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
         """
         Retrieves historical daily OHLCV data for a specific stock.
+
+        Parameters:
+        - code: stock code
+        - cont_yn: continuation flag default
+        - max_loops: maximum number of pages to retrieve
+        - max_retries: per-page retry count when rate limit is hit
+        - retry_delay: delay (seconds) between retries on rate limit
+
+        The function retries an individual page request only when the API
+        responds with the rate-limit error (return_code == 5 and
+        return_msg contains the Korean rate-limit message). Other failures
+        stop the retrieval.
         """
         path = "/api/dostk/chart"
         api_id = "ka10081"
         all_ohlcv_data = {
             'date': [], 'open': [], 'high': [], 'low': [], 'close': [], 'volume': []
         }
-        
-        cont_yn = "Y"
-        next_key = ""
 
-        count = 0 
-        while cont_yn == "Y":
+        next_key = ""
+        first = True
+        loop_count = 0
+        while True:
             params = {
                 "stk_cd": code,
                 "base_dt": datetime.date.today().strftime("%Y%m%d"), # Start from today
@@ -152,30 +176,63 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
 
-            time.sleep(0.2) # To avoid rate limiting
-            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
+            # Per-page request with retries only on rate-limit responses
+            page_res = None
+            page_headers = None
+            for attempt in range(max_retries):
+                page_res, page_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
 
-            if res_data and isinstance(res_data, dict) and "stk_dt_pole_chart_qry" in res_data:
-                for item in res_data["stk_dt_pole_chart_qry"]:
-                    all_ohlcv_data['date'].append(item['dt'])
-                    all_ohlcv_data['open'].append(int(item['open_pric']))
-                    all_ohlcv_data['high'].append(int(item['high_pric']))
-                    all_ohlcv_data['low'].append(int(item['low_pric']))
-                    all_ohlcv_data['close'].append(int(item['cur_prc']))
-                    all_ohlcv_data['volume'].append(int(item['trde_qty']))
-                
-                cont_yn = res_headers.get("cont-yn", "N")
-                next_key = res_headers.get("next-key", "")
-                count += 1
-                if count > 0:  # Safety break to avoid infinite loop
-                    print(f"Breaking loop after 1 iterations for code {code}")
+                # Successful page response
+                if page_res and isinstance(page_res, dict) and "stk_dt_pole_chart_qry" in page_res:
                     break
-            else:
-                print(f"Failed to retrieve price data for code {code} or unexpected response format: {res_data}")
+
+                # Check for rate-limit response to decide retry
+                if (
+                    page_res is not None and
+                    isinstance(page_res, dict) and
+                    "return_code" in page_res and
+                    page_res.get("return_code") == 5 and
+                    "허용된 요청 개수를 초과하였습니다" in page_res.get("return_msg", "")
+                ):
+                    print(f"API rate limit exceeded for code {code} (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+
+                # Other failures: do not retry
+                print(f"Failed page request for code {code} (attempt {attempt+1}): {page_res}")
+                page_res = None
                 break
-        
+
+            # If page request ultimately failed, stop retrieval
+            if not page_res or not isinstance(page_res, dict) or "stk_dt_pole_chart_qry" not in page_res:
+                print(f"Stopping retrieval for code {code} due to page request failure.")
+                break
+
+            # Process received items
+            for item in page_res["stk_dt_pole_chart_qry"]:
+                all_ohlcv_data['date'].append(item['dt'])
+                all_ohlcv_data['open'].append(int(item['open_pric']))
+                all_ohlcv_data['high'].append(int(item['high_pric']))
+                all_ohlcv_data['low'].append(int(item['low_pric']))
+                all_ohlcv_data['close'].append(int(item['cur_prc']))
+                all_ohlcv_data['volume'].append(int(item['trde_qty']))
+
+            # Update continuation flags from headers
+            if page_headers:
+                cont_yn = page_headers.get("cont-yn", cont_yn)
+                next_key = page_headers.get("next-key", "")
+
+            # do-while 형태: 최소 1회 실행, cont_yn이 'Y'가 아니면 종료
+            if not first and cont_yn != "Y":
+                break
+            loop_count += 1
+            if loop_count >= max_loops:
+                print(f"Loop limit ({max_loops}) reached, breaking for code {code}")
+                break
+            first = False
+            time.sleep(0.2) # To avoid rate limiting
+
         df = pd.DataFrame(all_ohlcv_data, columns=['open', 'high', 'low', 'close', 'volume'], index=all_ohlcv_data['date'])
-        
         return df[::-1]
 
     def get_deposit(self):
@@ -256,7 +313,7 @@ class Kiwoom:
             print(f"Order failed for code {code} or unexpected response: {res_data}")
             return None
 
-    def get_order(self):
+    def get_order(self, cont_yn='N'):
         """
         Retrieves a list of unexecuted orders using the Kiwoom REST API (ka10075).
         """
@@ -264,10 +321,9 @@ class Kiwoom:
         api_id = "ka10075"
         
         all_unexecuted_orders = []
-        cont_yn = "Y"
         next_key = ""
-
-        while cont_yn == "Y":
+        first = True
+        while True:
             params = {
                 "all_stk_tp": "0", # 0: 전체, 1: 종목 (All stocks)
                 "trde_tp": "0",    # 0: 전체, 1: 매도, 2: 매수 (All trade types)
@@ -278,13 +334,10 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
             
-            time.sleep(0.2) # To avoid rate limiting
             res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
 
             if res_data and isinstance(res_data, dict) and "oso" in res_data:
                 for item in res_data["oso"]:
-                    # Map relevant fields to a consistent structure, similar to original self.order
-                    # This mapping needs careful verification against actual API response.
                     order_info = {
                         '종목코드': item.get('stk_cd', '').strip(),
                         '종목명': item.get('stk_nm', '').strip(),
@@ -301,20 +354,19 @@ class Kiwoom:
                         '당일매매세금': int(item.get('tdy_trde_tax', '0'))
                     }
                     all_unexecuted_orders.append(order_info)
-                
-                cont_yn = res_headers.get("cont-yn", "N")
+                cont_yn = res_headers.get("cont-yn", cont_yn)
                 next_key = res_headers.get("next-key", "")
             else:
                 print(f"Failed to retrieve unexecuted orders or unexpected response format: {res_data}")
                 break
-        
-        # Update self.order for consistency, though it's primarily for real-time updates
-        # For now, this will just contain the last fetched unexecuted orders.
+            if not first and cont_yn != "Y":
+                break
+            first = False
+            time.sleep(0.2) # To avoid rate limiting
         self.order = {order['종목코드']: order for order in all_unexecuted_orders}
-
         return all_unexecuted_orders
 
-    def get_balance(self):
+    def get_balance(self, cont_yn='N'):
         """
         Retrieves account balance and holdings using the Kiwoom REST API (kt00018).
         """
@@ -322,10 +374,9 @@ class Kiwoom:
         api_id = "kt00018"
         
         all_holdings = []
-        cont_yn = "Y"
         next_key = ""
-
-        while cont_yn == "Y":
+        first = True
+        while True:
             params = {
                 "qry_tp": "1",        # 1: 합산 (Combined), 2: 개별 (Individual)
                 "dmst_stex_tp": "KRX" # KRX: 한국거래소, NXT: 넥스트트레이드
@@ -334,13 +385,9 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
             
-            time.sleep(0.2) # To avoid rate limiting
             res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
-
             if res_data and isinstance(res_data, dict) and "acnt_evlt_remn_indv_tot" in res_data:
                 for item in res_data["acnt_evlt_remn_indv_tot"]:
-                    # Map relevant fields to a consistent structure, similar to original self.balance
-                    # This mapping needs careful verification against actual API response.
                     holding_info = {
                         '종목명': item.get('stk_nm', '').strip(),
                         '보유수량': int(item.get('rmnd_qty', '0')),
@@ -350,17 +397,17 @@ class Kiwoom:
                         '매입금액': int(item.get('pur_amt', '0')),
                         '매매가능수량': int(item.get('trde_able_qty', '0'))
                     }
-                    all_holdings.append((item.get('stk_cd', '').strip(), holding_info)) # Store with code for keying
-                
-                cont_yn = res_headers.get("cont-yn", "N")
+                    all_holdings.append((item.get('stk_cd', '').strip(), holding_info))
+                cont_yn = res_headers.get("cont-yn", cont_yn)
                 next_key = res_headers.get("next-key", "")
             else:
                 print(f"Failed to retrieve balance or unexpected response format: {res_data}")
                 break
-        
-        # Update self.balance for consistency
+            if not first and cont_yn != "Y":
+                break
+            first = False
+            time.sleep(0.2) # To avoid rate limiting
         self.balance = {code: info for code, info in all_holdings}
-
         return self.balance
 
     def set_real_reg(self, str_screen_no, str_code_list, str_fid_list, str_opt_type):
@@ -418,50 +465,108 @@ class Kiwoom:
         # Add other real_type handlers if needed
 
     def _start_websocket_thread(self):
-        """Starts the WebSocket connection in a separate thread."""
+        """Starts the WebSocket connection in a separate thread, ensures only one thread runs."""
+        if self.websocket_thread and self.websocket_thread.is_alive():
+            print("WebSocket thread already running.")
+            return
+        self._websocket_stop_event.clear()
         self.websocket_thread = threading.Thread(target=self._run_websocket_loop)
         self.websocket_thread.daemon = True
         self.websocket_thread.start()
 
     def _run_websocket_loop(self):
-        """Runs the asyncio event loop for the WebSocket."""
+        """Runs the asyncio event loop for the WebSocket. Handles stop event and loop reuse."""
         self.asyncio_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.asyncio_loop)
-        self.asyncio_loop.run_until_complete(self._connect_websocket())
-
-    async def _connect_websocket(self):
-        """Connects to the WebSocket and handles messages."""
         try:
-            async with websockets.connect(self.socket_url) as websocket:
-                self.websocket = websocket
-                self.is_websocket_connected = True
-                print("WebSocket connected.")
-                await self._send_websocket_message({
-                    'trnm': 'LOGIN',
-                    'token': self.access_token
-                })
-
-                while self.is_websocket_connected:
-                    try:
-                        message = await self.websocket.recv()
-                        await self._handle_websocket_message(message)
-                    except websockets.ConnectionClosed:
-                        print("WebSocket connection closed.")
-                        self.is_websocket_connected = False
-                        break
+            self.asyncio_loop.run_until_complete(self._websocket_main_loop())
         except Exception as e:
-            print(f"WebSocket connection error: {e}")
+            print(f"WebSocket loop error: {e}")
+        finally:
+            self.asyncio_loop.close()
+
+    async def _websocket_main_loop(self):
+        """Main loop for WebSocket connection: handles connect, reconnect, and message processing."""
+        while not self._websocket_stop_event.is_set():
+            try:
+                async with websockets.connect(self.socket_url) as websocket:
+                    self.websocket = websocket
+                    self.is_websocket_connected = True
+                    print("WebSocket connected.")
+                    await self._send_websocket_message({
+                        'trnm': 'LOGIN',
+                        'token': self.access_token
+                    })
+                    while self.is_websocket_connected and not self._websocket_stop_event.is_set():
+                        try:
+                            message = await self.websocket.recv()
+                            await self._handle_websocket_message(message)
+                        except websockets.ConnectionClosed:
+                            print("WebSocket connection closed.")
+                            self.is_websocket_connected = False
+                            break
+                # 연결이 끊어지면 재연결 대기 후 재시도
+                if not self._websocket_stop_event.is_set():
+                    print("Attempting to reconnect WebSocket in 2 seconds...")
+                    await asyncio.sleep(2)
+            except Exception as e:
+                print(f"WebSocket connection error: {e}")
+                self.is_websocket_connected = False
+                if not self._websocket_stop_event.is_set():
+                    print("Retrying WebSocket connection in 2 seconds...")
+                    await asyncio.sleep(2)
+        print("WebSocket loop stopped.")
+
+    async def _websocket_connect(self):
+        """
+        Connects to the WebSocket server once, without entering the main loop.
+        Used for single connection attempts (ex: reconnect in _send_websocket_message).
+        """
+        try:
+            self.websocket = await websockets.connect(self.socket_url)
+            self.is_websocket_connected = True
+            print("WebSocket connected (single connect).")
+            await self._send_websocket_message({
+                'trnm': 'LOGIN',
+                'token': self.access_token
+            })
+        except Exception as e:
+            print(f"WebSocket single connect error: {e}")
             self.is_websocket_connected = False
+            self.websocket = None
+
+    def stop_websocket(self):
+        """Stops the WebSocket thread and event loop safely."""
+        self._websocket_stop_event.set()
+        self.is_websocket_connected = False
+        if self.asyncio_loop:
+            self.asyncio_loop.call_soon_threadsafe(self.asyncio_loop.stop)
+        if self.websocket_thread and self.websocket_thread.is_alive():
+            self.websocket_thread.join(timeout=5)
+            print("WebSocket thread stopped.")
 
     async def _send_websocket_message(self, message):
-        """Sends a message to the WebSocket server."""
-        if not self.is_websocket_connected:
-            print("WebSocket is not connected. reconnecting...")
-            await self._connect_websocket()
-        if self.is_websocket_connected and self.websocket:
-            if not isinstance(message, str):
-                message = json.dumps(message)
-            await self.websocket.send(message)
+        """Sends a message to the WebSocket server. Handles reconnection if needed."""
+        if not isinstance(message, str):
+            message = json.dumps(message)
+        send_attempted = False
+        for attempt in range(2):  # 최대 2회 시도(재연결 포함)
+            if not self.is_websocket_connected or not self.websocket:
+                print("WebSocket is not connected. Reconnecting...")
+                await self._websocket_connect()
+            if self.is_websocket_connected and self.websocket:
+                try:
+                    await self.websocket.send(message)
+                    send_attempted = True
+                    break
+                except Exception as e:
+                    print(f"WebSocket send failed (attempt {attempt+1}): {e}")
+                    self.is_websocket_connected = False
+                    self.websocket = None
+            else:
+                print("WebSocket is still not connected after reconnect attempt.")
+        if not send_attempted:
+            print("Failed to send message via WebSocket after reconnection attempts.")
 
     async def _handle_websocket_message(self, message):
         """Handles incoming WebSocket messages."""
