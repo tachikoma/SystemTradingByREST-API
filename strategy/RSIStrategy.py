@@ -103,6 +103,7 @@ class RSIStrategy(threading.Thread):
         for idx, code in enumerate(self.universe.keys()):
             print("({}/{}) {}".format(idx + 1, len(self.universe), code))
 
+            time.sleep(0.2)  # To avoid rate limiting
             # (1)케이스: 일봉 데이터가 아예 없는지 확인(장 종료 이후)
             if check_transaction_closed() and not check_table_exist(self.strategy_name, code):
                 # API를 이용해 조회한 가격 데이터 price_df에 저장

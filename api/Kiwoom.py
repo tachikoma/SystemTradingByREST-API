@@ -8,6 +8,9 @@ import asyncio
 import websockets
 import threading
 
+# Rate limit message keyword used by Kiwoom API responses
+RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
+
 
 class Kiwoom:
     def __init__(self, appkey, secretkey, mock=False):
@@ -87,8 +90,8 @@ class Kiwoom:
         if res.status_code == 200:
             return res.json(), res.headers # Return headers for pagination
         else:
-            print(f"Request failed: {res.text}")
-            return None, None
+            print(f"Request failed: {res.text}, {res.headers}")
+            return res.json(), res.headers
 
 
 
@@ -130,7 +133,7 @@ class Kiwoom:
                 isinstance(res_data, dict) and
                 "return_code" in res_data and
                 res_data["return_code"] == 5 and
-                "허용된 요청 개수를 초과하였습니다" in res_data.get("return_msg", "")
+                RATE_LIMIT_MSG in res_data.get("return_msg", "")
             ):
                 print(f"API rate limit exceeded (attempt {attempt+1}), retrying after {delay}s...")
                 time.sleep(delay)
@@ -141,7 +144,7 @@ class Kiwoom:
         print(f"All retries failed for code {code}.")
         return None
 
-    def get_price_data(self, code, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
+    def get_price_data(self, code, cont_yn='N', max_loops=1, max_retries=3, retry_delay=1):
         """
         Retrieves historical daily OHLCV data for a specific stock.
 
@@ -192,7 +195,7 @@ class Kiwoom:
                     isinstance(page_res, dict) and
                     "return_code" in page_res and
                     page_res.get("return_code") == 5 and
-                    "허용된 요청 개수를 초과하였습니다" in page_res.get("return_msg", "")
+                    RATE_LIMIT_MSG in page_res.get("return_msg", "")
                 ):
                     print(f"API rate limit exceeded for code {code} (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
                     time.sleep(retry_delay)
@@ -313,7 +316,7 @@ class Kiwoom:
             print(f"Order failed for code {code} or unexpected response: {res_data}")
             return None
 
-    def get_order(self, cont_yn='N'):
+    def get_order(self, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
         """
         Retrieves a list of unexecuted orders using the Kiwoom REST API (ka10075).
         """
@@ -323,6 +326,7 @@ class Kiwoom:
         all_unexecuted_orders = []
         next_key = ""
         first = True
+        loop_count = 0
         while True:
             params = {
                 "all_stk_tp": "0", # 0: 전체, 1: 종목 (All stocks)
@@ -334,39 +338,68 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
             
-            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
+            # Per-page request with retries only on rate-limit responses
+            page_res = None
+            page_headers = None
+            for attempt in range(max_retries):
+                page_res, page_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
 
-            if res_data and isinstance(res_data, dict) and "oso" in res_data:
-                for item in res_data["oso"]:
-                    order_info = {
-                        '종목코드': item.get('stk_cd', '').strip(),
-                        '종목명': item.get('stk_nm', '').strip(),
-                        '주문번호': item.get('ord_no', '').strip(),
-                        '주문상태': item.get('ord_stt', '').strip(),
-                        '주문수량': int(item.get('ord_qty', '0')),
-                        '주문가격': int(item.get('ord_pric', '0')),
-                        '현재가': int(item.get('cur_prc', '0').replace('+', '').replace('-', '')), # Remove signs
-                        '주문구분': item.get('io_tp_nm', '').strip(),
-                        '미체결수량': int(item.get('oso_qty', '0')),
-                        '체결량': int(item.get('cntr_qty', '0')),
-                        '주문시간': item.get('tm', '').strip(),
-                        '당일매매수수료': int(item.get('tdy_trde_cmsn', '0')),
-                        '당일매매세금': int(item.get('tdy_trde_tax', '0'))
-                    }
-                    all_unexecuted_orders.append(order_info)
-                cont_yn = res_headers.get("cont-yn", cont_yn)
-                next_key = res_headers.get("next-key", "")
-            else:
-                print(f"Failed to retrieve unexecuted orders or unexpected response format: {res_data}")
+                if page_res and isinstance(page_res, dict) and "oso" in page_res:
+                    break
+
+                if (
+                    page_res is not None and
+                    isinstance(page_res, dict) and
+                    "return_code" in page_res and
+                    page_res.get("return_code") == 5 and
+                    RATE_LIMIT_MSG in page_res.get("return_msg", "")
+                ):
+                    print(f"API rate limit exceeded for get_order (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+
+                print(f"Failed page request for get_order (attempt {attempt+1}): {page_res}")
+                page_res = None
                 break
+
+            if not page_res or not isinstance(page_res, dict) or "oso" not in page_res:
+                print(f"Stopping retrieval of unexecuted orders due to page request failure.")
+                break
+
+            for item in page_res["oso"]:
+                order_info = {
+                    '종목코드': item.get('stk_cd', '').strip(),
+                    '종목명': item.get('stk_nm', '').strip(),
+                    '주문번호': item.get('ord_no', '').strip(),
+                    '주문상태': item.get('ord_stt', '').strip(),
+                    '주문수량': int(item.get('ord_qty', '0')),
+                    '주문가격': int(item.get('ord_pric', '0')),
+                    '현재가': int(item.get('cur_prc', '0').replace('+', '').replace('-', '')), # Remove signs
+                    '주문구분': item.get('io_tp_nm', '').strip(),
+                    '미체결수량': int(item.get('oso_qty', '0')),
+                    '체결량': int(item.get('cntr_qty', '0')),
+                    '주문시간': item.get('tm', '').strip(),
+                    '당일매매수수료': int(item.get('tdy_trde_cmsn', '0')),
+                    '당일매매세금': int(item.get('tdy_trde_tax', '0'))
+                }
+                all_unexecuted_orders.append(order_info)
+
+            # Update continuation flags from headers
+            if page_headers:
+                cont_yn = page_headers.get("cont-yn", cont_yn)
+                next_key = page_headers.get("next-key", "")
             if not first and cont_yn != "Y":
+                break
+            loop_count += 1
+            if loop_count >= max_loops:
+                print(f"Loop limit ({max_loops}) reached for get_order, breaking")
                 break
             first = False
             time.sleep(0.2) # To avoid rate limiting
         self.order = {order['종목코드']: order for order in all_unexecuted_orders}
         return all_unexecuted_orders
 
-    def get_balance(self, cont_yn='N'):
+    def get_balance(self, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
         """
         Retrieves account balance and holdings using the Kiwoom REST API (kt00018).
         """
@@ -376,6 +409,7 @@ class Kiwoom:
         all_holdings = []
         next_key = ""
         first = True
+        loop_count = 0
         while True:
             params = {
                 "qry_tp": "1",        # 1: 합산 (Combined), 2: 개별 (Individual)
@@ -385,25 +419,55 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
             
-            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
-            if res_data and isinstance(res_data, dict) and "acnt_evlt_remn_indv_tot" in res_data:
-                for item in res_data["acnt_evlt_remn_indv_tot"]:
-                    holding_info = {
-                        '종목명': item.get('stk_nm', '').strip(),
-                        '보유수량': int(item.get('rmnd_qty', '0')),
-                        '매입가': int(item.get('pur_pric', '0')),
-                        '수익률': float(item.get('prft_rt', '0.0')),
-                        '현재가': int(item.get('cur_prc', '0')),
-                        '매입금액': int(item.get('pur_amt', '0')),
-                        '매매가능수량': int(item.get('trde_able_qty', '0'))
-                    }
-                    all_holdings.append((item.get('stk_cd', '').strip(), holding_info))
-                cont_yn = res_headers.get("cont-yn", cont_yn)
-                next_key = res_headers.get("next-key", "")
-            else:
-                print(f"Failed to retrieve balance or unexpected response format: {res_data}")
+            # Per-page request with retries only on rate-limit responses
+            page_res = None
+            page_headers = None
+            for attempt in range(max_retries):
+                page_res, page_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
+
+                if page_res and isinstance(page_res, dict) and "acnt_evlt_remn_indv_tot" in page_res:
+                    break
+
+                if (
+                    page_res is not None and
+                    isinstance(page_res, dict) and
+                    "return_code" in page_res and
+                    page_res.get("return_code") == 5 and
+                    RATE_LIMIT_MSG in page_res.get("return_msg", "")
+                ):
+                    print(f"API rate limit exceeded for get_balance (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+
+                print(f"Failed page request for get_balance (attempt {attempt+1}): {page_res}")
+                page_res = None
                 break
+
+            if not page_res or not isinstance(page_res, dict) or "acnt_evlt_remn_indv_tot" not in page_res:
+                print(f"Stopping retrieval of balance due to page request failure.")
+                break
+
+            for item in page_res["acnt_evlt_remn_indv_tot"]:
+                holding_info = {
+                    '종목명': item.get('stk_nm', '').strip(),
+                    '보유수량': int(item.get('rmnd_qty', '0')),
+                    '매입가': int(item.get('pur_pric', '0')),
+                    '수익률': float(item.get('prft_rt', '0.0')),
+                    '현재가': int(item.get('cur_prc', '0')),
+                    '매입금액': int(item.get('pur_amt', '0')),
+                    '매매가능수량': int(item.get('trde_able_qty', '0'))
+                }
+                all_holdings.append((item.get('stk_cd', '').strip(), holding_info))
+
+            # Update continuation flags from headers
+            if page_headers:
+                cont_yn = page_headers.get("cont-yn", cont_yn)
+                next_key = page_headers.get("next-key", "")
             if not first and cont_yn != "Y":
+                break
+            loop_count += 1
+            if loop_count >= max_loops:
+                print(f"Loop limit ({max_loops}) reached for get_balance, breaking")
                 break
             first = False
             time.sleep(0.2) # To avoid rate limiting
@@ -461,7 +525,7 @@ class Kiwoom:
                 "(최우선)매수호가": int(real_data.get('28', '0').replace('+', '').replace('-', '')),
                 "누적거래량": int(real_data.get('13', '0'))
             })
-            # print(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
+            print(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
         # Add other real_type handlers if needed
 
     def _start_websocket_thread(self):
