@@ -54,7 +54,7 @@ class Kiwoom:
         res = requests.post(url, headers=headers, data=json.dumps(data))
         if res.status_code == 200:
             response_data = res.json()
-            if return_code := response_data.get("return_code") != "0":
+            if return_code := response_data.get("return_code") != 0:
                 print(response_data.get("return_msg"))
             self.access_token = response_data["token"]
             self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S')
