@@ -483,7 +483,7 @@ class Kiwoom:
         
         Args:
             str_code_list: ';'로 구분된 종목코드 문자열 (예: '005930;000660')
-            str_opt_type: '0' (기존 데이터 유지 후 추가) 또는 '1' (기존 데이터 삭제 후 추가). 기본값은 '0'
+            str_opt_type: '0' (기존 등록한 item/type은 해지 후 추가) 또는 '1' (기존 기존등록한 item/type은 유지 후 추가). 기본값은 '0'
         """
         codes = str_code_list.split(';')
         
@@ -493,7 +493,7 @@ class Kiwoom:
             'opt_type': str_opt_type
         }
         
-        # In REST API, FID list is not needed, we subscribe by stock code and type (e.g., '0B' for execution)
+        # In REST API, we subscribe by stock code and type (e.g., '0B' for execution)
         # Let's assume we always want execution data, so type is '0B'.
         
         subscription_data = [{
@@ -675,31 +675,51 @@ class Kiwoom:
         """Handles incoming WebSocket messages."""
         try:
             data = json.loads(message)
-            if data.get('trnm') == 'LOGIN':
+            trnm = data.get('trnm')
+            
+            if trnm == 'LOGIN':
                 if data.get('return_code') == 0:
                     print("WebSocket login successful.")
                 else:
                     print(f"WebSocket login failed: {data.get('return_msg')}")
                     await self.disconnect()
-            elif data.get('trnm') == 'PING':
+                    
+            elif trnm == 'PING':
+                # PING 메시지에 대한 PONG 응답
                 await self._send_websocket_message(data)
 
-            elif data.get('trnm') == 'REG':
+            elif trnm == 'REG':
                 if data.get('return_code') == 0:
                     print(f"Real-time registration successful.")
                 else:
                     print(f"Real-time registration failed: {data}")
-            elif data.get('trnm') == 'REMOVE':
+                    
+            elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
                     print(f"Real-time removal successful.")
                 else:
                     print(f"Real-time removal failed: {data}")
-            elif data.get('trnm') == 'REAL':
+                    
+            elif trnm == 'REAL':
+                # 실시간 체결 데이터 처리
                 real_data = data.get('data', [])
                 for item in real_data:
                     self._on_receive_real_data(item.get('item'), item.get('type'), item.get('values'))
+                    
+            elif trnm == 'SYSTEM':
+                # 시스템 공지/알림 메시지 처리 (거래정지, 시스템 점검 등)
+                code = data.get('code', '')
+                message_text = data.get('message', '')
+                # 필요시 중요한 시스템 메시지만 출력하도록 필터링
+                if code != 'R00000':  # R00000은 일반 공지
+                    print(f"[SYSTEM] {code}: {message_text}")
+                # else: 
+                #     print(f"[SYSTEM-INFO] {message_text}")  # 디버깅이 필요한 경우 주석 해제
+                    
             else:
-                print(f"Received unknown WebSocket message: {data}")
+                # 알 수 없는 메시지 타입 (디버깅용)
+                print(f"[DEBUG] Unknown message type '{trnm}': {data}")
+                
         except json.JSONDecodeError:
             print(f"Failed to decode WebSocket message: {message}")
         except Exception as e:
