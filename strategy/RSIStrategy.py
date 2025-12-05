@@ -153,6 +153,8 @@ class RSIStrategy(threading.Thread):
         """실질적 수행 역할을 하는 함수"""
         while self.is_init_success:
             try:
+                # 현재 한국 시간 확인
+                print(f"Korea time: {get_korea_time()}")
                 # (0)장중인지 확인
                 if not check_transaction_open():
                     print("장시간이 아니므로 5분간 대기합니다.")
