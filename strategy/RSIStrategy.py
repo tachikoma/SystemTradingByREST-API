@@ -191,19 +191,15 @@ class RSIStrategy(threading.Thread):
 
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
-        # In the new REST & WebSocket API, we don't need to specify FIDs for real-time registration.
-        # The subscription is based on the 'type' of data (e.g., '0B' for execution).
-        # The `fids` parameter is kept for compatibility but ignored in the new Kiwoom class.
-        fids = "" # This is no longer used in the new Kiwoom class.
-
+        
         # universe 딕셔너리의 key값들은 종목코드들을 의미
         codes = self.universe.keys()
 
         # 종목코드들을 ';'을 기준으로 묶어주는 작업
         codes = ";".join(map(str, codes))
 
-        # 화면번호 9999에 종목코드들의 실시간 체결정보 수신을 요청
-        self.kiwoom.set_real_reg("9999", codes, fids, "0")
+        # 종목코드들의 실시간 체결정보 수신을 요청
+        self.kiwoom.set_real_reg(codes, "0")
 
     def check_sell_signal(self, code):
         """매도대상인지 확인하는 함수"""

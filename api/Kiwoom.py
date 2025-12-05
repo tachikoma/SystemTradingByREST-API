@@ -36,6 +36,9 @@ class Kiwoom:
         self.websocket_thread = None
         self.asyncio_loop = None
         self._websocket_stop_event = threading.Event()
+        
+        # 실시간 데이터 등록 정보 저장 (재연결 시 사용)
+        self._real_reg_info = None
 
         self._authenticate()
         self._start_websocket_thread()
@@ -474,13 +477,21 @@ class Kiwoom:
         self.balance = {code: info for code, info in all_holdings}
         return self.balance
 
-    def set_real_reg(self, str_screen_no, str_code_list, str_fid_list, str_opt_type):
+    def set_real_reg(self, str_code_list, str_opt_type='0'):
         """
         Registers for real-time data using WebSocket.
-        str_screen_no, str_fid_list are not used, but kept for compatibility.
-        str_opt_type maps to refresh.
+        
+        Args:
+            str_code_list: ';'로 구분된 종목코드 문자열 (예: '005930;000660')
+            str_opt_type: '0' (기존 데이터 유지 후 추가) 또는 '1' (기존 데이터 삭제 후 추가). 기본값은 '0'
         """
         codes = str_code_list.split(';')
+        
+        # 등록 정보 저장 (재연결 시 사용)
+        self._real_reg_info = {
+            'code_list': str_code_list,
+            'opt_type': str_opt_type
+        }
         
         # In REST API, FID list is not needed, we subscribe by stock code and type (e.g., '0B' for execution)
         # Let's assume we always want execution data, so type is '0B'.
@@ -561,6 +572,10 @@ class Kiwoom:
                         'trnm': 'LOGIN',
                         'token': self.access_token
                     })
+                    
+                    # 재연결 시 이전에 등록했던 실시간 데이터 재등록
+                    await self._reregister_real_data()
+                    
                     while self.is_websocket_connected and not self._websocket_stop_event.is_set():
                         try:
                             message = await self.websocket.recv()
@@ -581,6 +596,28 @@ class Kiwoom:
                     await asyncio.sleep(2)
         print("WebSocket loop stopped.")
 
+    async def _reregister_real_data(self):
+        """WebSocket 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다."""
+        if self._real_reg_info:
+            print("Re-registering real-time data after reconnection...")
+            await asyncio.sleep(0.5)  # LOGIN 완료 대기
+            
+            codes = self._real_reg_info['code_list'].split(';')
+            subscription_data = [{
+                'item': codes,
+                'type': ['0B']
+            }]
+            
+            message = {
+                'trnm': 'REG',
+                'grp_no': '1',
+                'refresh': self._real_reg_info['opt_type'],
+                'data': subscription_data
+            }
+            
+            await self._send_websocket_message(message)
+            print(f"Real-time data re-registered for codes: {self._real_reg_info['code_list']}")
+
     async def _websocket_connect(self):
         """
         Connects to the WebSocket server once, without entering the main loop.
@@ -594,6 +631,8 @@ class Kiwoom:
                 'trnm': 'LOGIN',
                 'token': self.access_token
             })
+            # 재연결 시 실시간 데이터 재등록
+            await self._reregister_real_data()
         except Exception as e:
             print(f"WebSocket single connect error: {e}")
             self.is_websocket_connected = False
