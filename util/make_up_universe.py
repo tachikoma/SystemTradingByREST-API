@@ -130,8 +130,8 @@ def get_universe():
     # 필터링한 데이터프레임의 index 번호를 새로 매김
     df.reset_index(inplace=True, drop=True)
 
-    # 상위 200개만 추출
-    df = df.loc[:199]
+    # 상위 100개만 추출
+    df = df.loc[:99]
 
     # 유니버스 생성 결과를 엑셀 출력
     df.to_excel('universe.xlsx')
