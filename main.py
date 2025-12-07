@@ -2,19 +2,27 @@ import os
 import sys
 import time
 import threading
+from pathlib import Path
+from dotenv import load_dotenv
 from api.Kiwoom import Kiwoom
 from strategy.RSIStrategy import RSIStrategy
 
 if __name__ == '__main__':
-    # For security, it's recommended to use environment variables for API keys.
-    # Please set the following environment variables:
-    # export KIWOOM_APPKEY=your_app_key
-    # export KIWOOM_SECRETKEY=your_secret_key
+    # Load environment variables from .env file
+    # .env 파일에서 환경 변수를 로드합니다
+    env_path = Path(__file__).parent / '.env'
+    load_dotenv(dotenv_path=env_path)
+    
+    # Get API keys from environment variables
+    # 환경 변수에서 API 키를 가져옵니다
     appkey = os.environ.get('KIWOOM_APPKEY')
     secretkey = os.environ.get('KIWOOM_SECRETKEY')
 
     if not appkey or not secretkey:
-        print("Error: KIWOOM_APPKEY and KIWOOM_SECRETKEY environment variables are not set.")
+        print("Error: KIWOOM_APPKEY and KIWOOM_SECRETKEY are not set.")
+        print("Please create a .env file with the following content:")
+        print("  KIWOOM_APPKEY=your_app_key")
+        print("  KIWOOM_SECRETKEY=your_secret_key")
         sys.exit(1)
 
     # Set mock=True for mock trading

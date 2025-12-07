@@ -23,7 +23,28 @@
     이 명령어는 `pyproject.toml` 파일을 읽어 필요한 라이브러리를 가상 환경에 설치합니다.
 
 ## 설정
-애플리케이션을 실행하기 전에, 키움증권에서 발급받은 API 키를 환경 변수로 설정해야 합니다.
+
+### 1. API 키 설정
+애플리케이션을 실행하기 전에, 키움증권에서 발급받은 API 키를 `.env` 파일에 설정해야 합니다.
+
+1. `.env.example` 파일을 복사하여 `.env` 파일을 생성합니다:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. `.env` 파일을 열어 실제 API 키를 입력합니다:
+   ```env
+   KIWOOM_APPKEY=your_actual_app_key
+   KIWOOM_SECRETKEY=your_actual_secret_key
+   ```
+
+**⚠️ 보안 주의사항:**
+- `.env` 파일은 민감한 정보를 포함하므로 **절대 Git에 커밋하지 마세요**
+- `.env` 파일은 이미 `.gitignore`에 포함되어 있습니다
+- `.env.example` 파일만 버전 관리에 포함됩니다
+
+### 2. 대체 방법: 환경 변수 직접 설정
+필요한 경우, 환경 변수를 직접 설정할 수도 있습니다:
 
 **macOS/Linux:**
 ```bash
