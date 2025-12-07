@@ -3,12 +3,13 @@ from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 BASE_URL = 'https://finance.naver.com/sise/sise_market_sum.nhn?sosok='
 CODES = [0, 1]  # KOSPI:0, KOSDAQ:1
 START_PAGE = 1
 fields = []
-now = datetime.now()
+now = datetime.now(ZoneInfo("Asia/Seoul"))
 formattedDate = now.strftime("%Y%m%d")
 
 

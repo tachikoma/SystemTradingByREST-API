@@ -1,6 +1,7 @@
 import requests
 import json
 import datetime
+from zoneinfo import ZoneInfo
 import time
 import pandas as pd
 from util.const import *
@@ -71,7 +72,7 @@ class Kiwoom:
         A wrapper for making API requests.
         """
         # TODO: Add token refresh logic
-        if self.token_expires_in is None or self.token_expires_in < datetime.datetime.now():
+        if self.token_expires_in is None or self.token_expires_in < datetime.datetime.now(ZoneInfo("Asia/Seoul")):
             self._authenticate()
 
         headers = {

@@ -61,7 +61,7 @@ class RSIStrategy(threading.Thread):
             print(universe_list)
             universe = {}
             # 오늘 날짜를 20210101 형태로 지정
-            now = datetime.now().strftime("%Y%m%d")
+            now = get_korea_time().strftime("%Y%m%d")
 
             # KOSPI(0)에 상장된 모든 종목 코드를 가져와 kospi_code_list에 저장
             kospi_code_list = self.kiwoom.get_code_list_by_market("0")
@@ -123,7 +123,7 @@ class RSIStrategy(threading.Thread):
                     last_date = cur.fetchone()
 
                     # 오늘 날짜를 20210101 형태로 지정
-                    now = datetime.now().strftime("%Y%m%d")
+                    now = get_korea_time().strftime("%Y%m%d")
 
                     # 최근 저장 일자가 오늘이 아닌지 확인
                     if last_date[0] != now:
@@ -226,7 +226,7 @@ class RSIStrategy(threading.Thread):
         df = universe_item['price_df'].copy()
 
         # 과거 가격 데이터에 금일 날짜로 데이터 추가
-        df.loc[datetime.now().strftime('%Y%m%d')] = today_price_data
+        df.loc[get_korea_time().strftime('%Y%m%d')] = today_price_data
 
         # RSI(N) 계산
         period = 2  # 기준일 설정
@@ -294,7 +294,7 @@ class RSIStrategy(threading.Thread):
         df = universe_item['price_df'].copy()
 
         # 과거 가격 데이터에 금일 날짜로 데이터 추가
-        df.loc[datetime.now().strftime('%Y%m%d')] = today_price_data
+        df.loc[get_korea_time().strftime('%Y%m%d')] = today_price_data
 
         # RSI(N) 계산
         period = 2  # 기준일 설정
@@ -317,7 +317,7 @@ class RSIStrategy(threading.Thread):
         ma60 = df[-1:]['ma60'].values[0]
 
         # 2 거래일 전 날짜(index)를 구함
-        idx = df.index.get_loc(datetime.now().strftime('%Y%m%d')) - 2
+        idx = df.index.get_loc(get_korea_time().strftime('%Y%m%d')) - 2
 
         # 위 index로부터 2 거래일 전 종가를 얻어옴
         close_2days_ago = df.iloc[idx]['close']
