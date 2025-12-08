@@ -75,7 +75,12 @@ class Kiwoom:
             if return_code := response_data.get("return_code") != 0:
                 logger.warning(response_data.get("return_msg"))
             self.access_token = response_data["token"]
-            self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S')
+            # Make token_expires_in timezone-aware (Korea timezone) to match get_korea_time()
+            try:
+                self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S').replace(tzinfo=ZoneInfo("Asia/Seoul"))
+            except Exception:
+                # Fallback: set naive datetime if parsing fails, but prefer aware
+                self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S')
             logger.info("Authentication successful.")
         else:
             logger.error(f"Authentication failed: {res.text}")
