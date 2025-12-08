@@ -7,6 +7,9 @@ from util.notifier import *
 import math
 import traceback
 import threading
+from util.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class RSIStrategy(threading.Thread):
@@ -50,7 +53,7 @@ class RSIStrategy(threading.Thread):
             self.is_init_success = True
 
         except Exception as e:
-            print(traceback.format_exc())
+            logger.exception("Strategy init failed: %s", traceback.format_exc())
             # LINE 메시지를 보내는 부분
             # send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
 
@@ -58,7 +61,7 @@ class RSIStrategy(threading.Thread):
         """유니버스가 존재하는지 확인하고 없으면 생성하는 함수"""
         if not check_table_exist(self.strategy_name, 'universe'):
             universe_list = get_universe()
-            print(universe_list)
+            logger.debug("Universe list: %s", universe_list)
             universe = {}
             # 오늘 날짜를 20210101 형태로 지정
             now = get_korea_time().strftime("%Y%m%d")
@@ -96,12 +99,12 @@ class RSIStrategy(threading.Thread):
             self.universe[code] = {
                 'code_name': code_name
             }
-        print(self.universe)
+        logger.debug("Loaded universe with %d items", len(self.universe))
 
     def check_and_get_price_data(self):
         """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""
         for idx, code in enumerate(self.universe.keys()):
-            print("({}/{}) {}".format(idx + 1, len(self.universe), code))
+            logger.info("(%d/%d) %s", idx + 1, len(self.universe), code)
 
             time.sleep(0.2)  # To avoid rate limiting
             # (1)케이스: 일봉 데이터가 아예 없는지 확인(장 종료 이후)
@@ -154,10 +157,10 @@ class RSIStrategy(threading.Thread):
         while self.is_init_success:
             try:
                 # 현재 한국 시간 확인
-                print(f"Korea time: {get_korea_time()}")
+                logger.info("Korea time: %s", get_korea_time())
                 # (0)장중인지 확인
                 if not check_transaction_open():
-                    print("장시간이 아니므로 5분간 대기합니다.")
+                    logger.info("장시간이 아니므로 5분간 대기합니다.")
                     time.sleep(5 * 60)
                     continue
 
@@ -168,7 +171,7 @@ class RSIStrategy(threading.Thread):
                     # (1)접수한 주문이 있는지 확인
                     if code in self.kiwoom.order.keys():
                         # (2)주문이 있음
-                        print('접수 주문', self.kiwoom.order[code])
+                        logger.info('접수 주문 %s', self.kiwoom.order[code])
 
                         # (2.1) '미체결수량' 확인하여 미체결 종목인지 확인
                         if self.kiwoom.order[code]['미체결수량'] > 0:
@@ -176,7 +179,7 @@ class RSIStrategy(threading.Thread):
 
                     # (3)보유 종목인지 확인
                     elif code in self.kiwoom.balance.keys():
-                        print('보유 종목', self.kiwoom.balance[code])
+                        logger.info('보유 종목 %s', self.kiwoom.balance[code])
                         # (6)매도 대상 확인
                         if self.check_sell_signal(code):
                             # (7)매도 대상이면 매도 주문 접수
@@ -187,7 +190,7 @@ class RSIStrategy(threading.Thread):
                         self.check_buy_signal_and_order(code)
 
             except Exception as e:
-                print(traceback.format_exc())
+                logger.exception("Run loop exception: %s", traceback.format_exc())
                 # LINE 메시지를 보내는 부분
                 # send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
 
@@ -210,7 +213,7 @@ class RSIStrategy(threading.Thread):
         # (1)현재 체결정보가 존재하지 않는지 확인
         if code not in self.kiwoom.universe_realtime_transaction_info.keys():
             # 체결 정보가 없으면 더 이상 진행하지 않고 함수 종료
-            print("매도대상 확인 과정에서 아직 체결정보가 없습니다.")
+            logger.info("매도대상 확인 과정에서 아직 체결정보가 없습니다.")
             return
 
         # (2)실시간 체결 정보가 존재하면 현시점의 시가 / 고가 / 저가 / 현재가 / 누적 거래량이 저장되어 있음
@@ -264,7 +267,7 @@ class RSIStrategy(threading.Thread):
         # LINE 메시지를 보내는 부분
         message = "[{}]sell order is done! quantity:{}, ask:{}, order_result:{}".format(code, quantity, ask,
                                                                                         order_result)
-        print(message)
+        logger.info(message)
         # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
 
     def check_buy_signal_and_order(self, code):
@@ -278,7 +281,7 @@ class RSIStrategy(threading.Thread):
         # (1)현재 체결정보가 존재하지 않는지 확인
         if code not in self.kiwoom.universe_realtime_transaction_info.keys():
             # 존재하지 않다면 더이상 진행하지 않고 함수 종료
-            print("매수대상 확인 과정에서 아직 체결정보가 없습니다.")
+            logger.info("매수대상 확인 과정에서 아직 체결정보가 없습니다.")
             return
 
         # (2)실시간 체결 정보가 존재하면 현 시점의 시가 / 고가 / 저가 / 현재가 / 누적 거래량이 저장되어 있음
@@ -362,7 +365,7 @@ class RSIStrategy(threading.Thread):
             message = "[{}]buy order is done! quantity:{}, bid:{}, order_result:{}, deposit:{}, get_balance_count:{}, get_buy_order_count:{}, balance_len:{}".format(
                 code, quantity, bid, order_result, self.deposit, self.get_balance_count(), self.get_buy_order_count(),
                 len(self.kiwoom.balance))
-            print(message)
+            logger.info(message)
             # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
 
         # 매수신호가 없다면 종료

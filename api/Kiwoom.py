@@ -5,12 +5,18 @@ from zoneinfo import ZoneInfo
 import time
 import pandas as pd
 from util.const import *
+from util.time_helper import get_korea_time
 import asyncio
 import websockets
 import threading
+from util.logging_config import configure_logging, get_logger
+import logging
 
 # Rate limit message keyword used by Kiwoom API responses
 RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
+
+configure_logging()
+logger = get_logger('kiwoom')
 
 
 class Kiwoom:
@@ -43,6 +49,14 @@ class Kiwoom:
 
         self._authenticate()
         self._start_websocket_thread()
+        # websocket login retry counter
+        self._websocket_login_retries = 0
+        self._websocket_max_login_retries = 3
+        # websocket login state guards to avoid duplicate LOGIN packets
+        self._websocket_logged_in = False
+        self._websocket_login_sent = False
+        # `asyncio.Lock` will be created within the websocket event loop thread
+        self._login_send_lock = None
 
     def _authenticate(self):
         """
@@ -59,12 +73,12 @@ class Kiwoom:
         if res.status_code == 200:
             response_data = res.json()
             if return_code := response_data.get("return_code") != 0:
-                print(response_data.get("return_msg"))
+                logger.warning(response_data.get("return_msg"))
             self.access_token = response_data["token"]
             self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S')
-            print("Authentication successful.")
+            logger.info("Authentication successful.")
         else:
-            print(f"Authentication failed: {res.text}")
+            logger.error(f"Authentication failed: {res.text}")
             self.access_token = None
 
     def _request(self, path, api_id, params, method="POST", extra_headers=None):
@@ -72,7 +86,8 @@ class Kiwoom:
         A wrapper for making API requests.
         """
         # TODO: Add token refresh logic
-        if self.token_expires_in is None or self.token_expires_in < datetime.datetime.now(ZoneInfo("Asia/Seoul")):
+        # Use Korea timezone helper consistently
+        if self.token_expires_in is None or self.token_expires_in < get_korea_time():
             self._authenticate()
 
         headers = {
@@ -94,7 +109,7 @@ class Kiwoom:
         if res.status_code == 200:
             return res.json(), res.headers # Return headers for pagination
         else:
-            print(f"Request failed: {res.text}, {res.headers}")
+            logger.error(f"Request failed: {res.text}, {res.headers}")
             return res.json(), res.headers
 
 
@@ -115,7 +130,7 @@ class Kiwoom:
             for item in res_data["list"]:
                 code_list.append({"code": item["code"], "name": item["name"]})
         else:
-            print(f"Failed to retrieve code list for market {market_type} or unexpected response format: {res_data}")
+            logger.warning(f"Failed to retrieve code list for market {market_type} or unexpected response format: {res_data}")
 
         return code_list
 
@@ -139,13 +154,13 @@ class Kiwoom:
                 res_data["return_code"] == 5 and
                 RATE_LIMIT_MSG in res_data.get("return_msg", "")
             ):
-                print(f"API rate limit exceeded (attempt {attempt+1}), retrying after {delay}s...")
+                logger.warning(f"API rate limit exceeded (attempt {attempt+1}), retrying after {delay}s...")
                 time.sleep(delay)
                 continue
             # 기타 실패는 즉시 종료
-            print(f"Failed to retrieve stock name for code {code} or unexpected response format: {res_data}")
+            logger.warning(f"Failed to retrieve stock name for code {code} or unexpected response format: {res_data}")
             break
-        print(f"All retries failed for code {code}.")
+        logger.error(f"All retries failed for code {code}.")
         return None
 
     def get_price_data(self, code, cont_yn='N', max_loops=1, max_retries=3, retry_delay=1):
@@ -201,18 +216,18 @@ class Kiwoom:
                     page_res.get("return_code") == 5 and
                     RATE_LIMIT_MSG in page_res.get("return_msg", "")
                 ):
-                    print(f"API rate limit exceeded for code {code} (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                    logger.warning(f"API rate limit exceeded for code {code} (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
                     time.sleep(retry_delay)
                     continue
 
                 # Other failures: do not retry
-                print(f"Failed page request for code {code} (attempt {attempt+1}): {page_res}")
+                logger.error(f"Failed page request for code {code} (attempt {attempt+1}): {page_res}")
                 page_res = None
                 break
 
             # If page request ultimately failed, stop retrieval
             if not page_res or not isinstance(page_res, dict) or "stk_dt_pole_chart_qry" not in page_res:
-                print(f"Stopping retrieval for code {code} due to page request failure.")
+                logger.warning(f"Stopping retrieval for code {code} due to page request failure.")
                 break
 
             # Process received items
@@ -234,7 +249,7 @@ class Kiwoom:
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                print(f"Loop limit ({max_loops}) reached, breaking for code {code}")
+                logger.info(f"Loop limit ({max_loops}) reached, breaking for code {code}")
                 break
             first = False
             time.sleep(0.2) # To avoid rate limiting
@@ -256,7 +271,7 @@ class Kiwoom:
         if res_data and isinstance(res_data, dict) and "ord_alow_amt" in res_data:
             deposit = int(res_data["ord_alow_amt"])
         else:
-            print(f"Failed to retrieve deposit or unexpected response format: {res_data}")
+            logger.warning(f"Failed to retrieve deposit or unexpected response format: {res_data}")
 
         return deposit
 
@@ -276,7 +291,7 @@ class Kiwoom:
         }
         api_id = api_id_map.get(order_type)
         if not api_id:
-            print(f"Unsupported order_type: {order_type}")
+            logger.warning(f"Unsupported order_type: {order_type}")
             return None
 
         # Map order_classification to trde_tp
@@ -287,7 +302,7 @@ class Kiwoom:
         }
         trde_tp = trde_tp_map.get(order_classification)
         if not trde_tp:
-            print(f"Unsupported order_classification: {order_classification}")
+            logger.warning(f"Unsupported order_classification: {order_classification}")
             return None
 
         # ord_uv should be empty for market orders
@@ -305,7 +320,7 @@ class Kiwoom:
         res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
 
         if res_data and isinstance(res_data, dict) and "ord_no" in res_data:
-            print(f"Order successful. Order number: {res_data['ord_no']}")
+            logger.info(f"Order successful. Order number: {res_data['ord_no']}")
             # Update self.order with the new order details (simplified for now)
             self.order[res_data['ord_no']] = {
                 '종목코드': code,
@@ -317,7 +332,7 @@ class Kiwoom:
             }
             return res_data['ord_no']
         else:
-            print(f"Order failed for code {code} or unexpected response: {res_data}")
+            logger.error(f"Order failed for code {code} or unexpected response: {res_data}")
             return None
 
     def get_order(self, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
@@ -358,16 +373,16 @@ class Kiwoom:
                     page_res.get("return_code") == 5 and
                     RATE_LIMIT_MSG in page_res.get("return_msg", "")
                 ):
-                    print(f"API rate limit exceeded for get_order (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                    logger.warning(f"API rate limit exceeded for get_order (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
                     time.sleep(retry_delay)
                     continue
 
-                print(f"Failed page request for get_order (attempt {attempt+1}): {page_res}")
+                logger.error(f"Failed page request for get_order (attempt {attempt+1}): {page_res}")
                 page_res = None
                 break
 
             if not page_res or not isinstance(page_res, dict) or "oso" not in page_res:
-                print(f"Stopping retrieval of unexecuted orders due to page request failure.")
+                logger.warning(f"Stopping retrieval of unexecuted orders due to page request failure.")
                 break
 
             for item in page_res["oso"]:
@@ -396,7 +411,7 @@ class Kiwoom:
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                print(f"Loop limit ({max_loops}) reached for get_order, breaking")
+                logger.info(f"Loop limit ({max_loops}) reached for get_order, breaking")
                 break
             first = False
             time.sleep(0.2) # To avoid rate limiting
@@ -439,16 +454,16 @@ class Kiwoom:
                     page_res.get("return_code") == 5 and
                     RATE_LIMIT_MSG in page_res.get("return_msg", "")
                 ):
-                    print(f"API rate limit exceeded for get_balance (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                    logger.warning(f"API rate limit exceeded for get_balance (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
                     time.sleep(retry_delay)
                     continue
 
-                print(f"Failed page request for get_balance (attempt {attempt+1}): {page_res}")
+                logger.error(f"Failed page request for get_balance (attempt {attempt+1}): {page_res}")
                 page_res = None
                 break
 
             if not page_res or not isinstance(page_res, dict) or "acnt_evlt_remn_indv_tot" not in page_res:
-                print(f"Stopping retrieval of balance due to page request failure.")
+                logger.warning(f"Stopping retrieval of balance due to page request failure.")
                 break
 
             for item in page_res["acnt_evlt_remn_indv_tot"]:
@@ -471,7 +486,7 @@ class Kiwoom:
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                print(f"Loop limit ({max_loops}) reached for get_balance, breaking")
+                logger.info(f"Loop limit ({max_loops}) reached for get_balance, breaking")
                 break
             first = False
             time.sleep(0.2) # To avoid rate limiting
@@ -511,9 +526,9 @@ class Kiwoom:
         
         if self.is_websocket_connected and self.asyncio_loop:
             asyncio.run_coroutine_threadsafe(self._send_websocket_message(message), self.asyncio_loop)
-            print(f"Real-time registration sent for codes: {str_code_list}")
+            logger.info(f"Real-time registration sent for codes: {str_code_list}")
         else:
-            print("WebSocket is not connected. Cannot register for real-time data.")
+            logger.warning("WebSocket is not connected. Cannot register for real-time data.")
 
     def _on_receive_real_data(self, s_code, real_type, real_data):
         """
@@ -537,13 +552,13 @@ class Kiwoom:
                 "(최우선)매수호가": int(real_data.get('28', '0').replace('+', '').replace('-', '')),
                 "누적거래량": int(real_data.get('13', '0'))
             })
-            # TODO print(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
+            # TODO logger.debug(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
         # Add other real_type handlers if needed
 
     def _start_websocket_thread(self):
         """Starts the WebSocket connection in a separate thread, ensures only one thread runs."""
         if self.websocket_thread and self.websocket_thread.is_alive():
-            print("WebSocket thread already running.")
+            logger.info("WebSocket thread already running.")
             return
         self._websocket_stop_event.clear()
         self.websocket_thread = threading.Thread(target=self._run_websocket_loop)
@@ -554,10 +569,15 @@ class Kiwoom:
         """Runs the asyncio event loop for the WebSocket. Handles stop event and loop reuse."""
         self.asyncio_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.asyncio_loop)
+        # create asyncio primitives tied to this loop
+        try:
+            self._login_send_lock = asyncio.Lock()
+        except Exception:
+            self._login_send_lock = None
         try:
             self.asyncio_loop.run_until_complete(self._websocket_main_loop())
         except Exception as e:
-            print(f"WebSocket loop error: {e}")
+            logger.exception(f"WebSocket loop error: {e}")
         finally:
             self.asyncio_loop.close()
 
@@ -568,11 +588,30 @@ class Kiwoom:
                 async with websockets.connect(self.socket_url) as websocket:
                     self.websocket = websocket
                     self.is_websocket_connected = True
-                    print("WebSocket connected.")
-                    await self._send_websocket_message({
-                        'trnm': 'LOGIN',
-                        'token': self.access_token
-                    })
+                    logger.info("WebSocket connected.")
+                    # Ensure token is valid before attempting LOGIN
+                    try:
+                        await self._ensure_valid_token_async()
+                    except Exception as e:
+                        logger.warning(f"Token refresh before websocket login failed: {e}")
+                    # Send LOGIN directly on the main loop's connection path to avoid
+                    # racing with other code paths that may call `_send_websocket_message`.
+                    try:
+                        if self._login_send_lock is not None:
+                            async with self._login_send_lock:
+                                if not self._websocket_login_sent:
+                                    await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                    self._websocket_login_sent = True
+                                    # logged_in will be set when LOGIN response arrives in _handle_websocket_message
+                                    self._websocket_logged_in = False
+                        else:
+                            # fallback: send without lock
+                            if not self._websocket_login_sent:
+                                await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                self._websocket_login_sent = True
+                                self._websocket_logged_in = False
+                    except Exception as e:
+                        logger.exception(f"Failed to send LOGIN directly: {e}")
                     
                     # 재연결 시 이전에 등록했던 실시간 데이터 재등록
                     await self._reregister_real_data()
@@ -582,25 +621,30 @@ class Kiwoom:
                             message = await self.websocket.recv()
                             await self._handle_websocket_message(message)
                         except websockets.ConnectionClosed:
-                            print("WebSocket connection closed.")
+                            logger.info("WebSocket connection closed.")
                             self.is_websocket_connected = False
+                            # Reset login state on disconnect
+                            self._websocket_logged_in = False
+                            self._websocket_login_sent = False
                             break
                 # 연결이 끊어지면 재연결 대기 후 재시도
                 if not self._websocket_stop_event.is_set():
-                    print("Attempting to reconnect WebSocket in 2 seconds...")
+                    logger.info("Attempting to reconnect WebSocket in 2 seconds...")
                     await asyncio.sleep(2)
             except Exception as e:
-                print(f"WebSocket connection error: {e}")
+                logger.exception(f"WebSocket connection error: {e}")
                 self.is_websocket_connected = False
+                self._websocket_logged_in = False
+                self._websocket_login_sent = False
                 if not self._websocket_stop_event.is_set():
-                    print("Retrying WebSocket connection in 2 seconds...")
+                    logger.info("Retrying WebSocket connection in 2 seconds...")
                     await asyncio.sleep(2)
-        print("WebSocket loop stopped.")
+        logger.info("WebSocket loop stopped.")
 
     async def _reregister_real_data(self):
         """WebSocket 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다."""
         if self._real_reg_info:
-            print("Re-registering real-time data after reconnection...")
+            logger.info("Re-registering real-time data after reconnection...")
             await asyncio.sleep(0.5)  # LOGIN 완료 대기
             
             codes = self._real_reg_info['code_list'].split(';')
@@ -617,27 +661,39 @@ class Kiwoom:
             }
             
             await self._send_websocket_message(message)
-            print(f"Real-time data re-registered for codes: {self._real_reg_info['code_list']}")
+            logger.info(f"Real-time data re-registered for codes: {self._real_reg_info['code_list']}")
 
     async def _websocket_connect(self):
-        """
-        Connects to the WebSocket server once, without entering the main loop.
-        Used for single connection attempts (ex: reconnect in _send_websocket_message).
-        """
         try:
+            # Ensure token is valid before connecting
+            try:
+                await self._ensure_valid_token_async()
+            except Exception as e:
+                logger.warning(f"Token refresh before single websocket connect failed: {e}")
             self.websocket = await websockets.connect(self.socket_url)
             self.is_websocket_connected = True
-            print("WebSocket connected (single connect).")
-            await self._send_websocket_message({
-                'trnm': 'LOGIN',
-                'token': self.access_token
-            })
-            # 재연결 시 실시간 데이터 재등록
-            await self._reregister_real_data()
+            # Reset login flags - LOGIN must be performed after connect
+            self._websocket_logged_in = False
+            self._websocket_login_sent = False
+            logger.info("WebSocket connected (single connect).")
         except Exception as e:
-            print(f"WebSocket single connect error: {e}")
+            logger.error(f"WebSocket single connect error: {e}")
             self.is_websocket_connected = False
             self.websocket = None
+
+    async def _ensure_valid_token_async(self):
+        """Ensure `self.access_token` is valid; call blocking _authenticate in executor if expired.
+
+        This avoids blocking the asyncio event loop by running the synchronous
+        `_authenticate` in a threadpool.
+        """
+        # If token is missing or will expire in the next few seconds, refresh it.
+        try:
+            if self.token_expires_in is None or self.token_expires_in < (get_korea_time() + datetime.timedelta(seconds=5)):
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._authenticate)
+        except Exception as e:
+            logger.exception(f"Token refresh failed in _ensure_valid_token_async: {e}")
 
     def stop_websocket(self):
         """Stops the WebSocket thread and event loop safely."""
@@ -647,31 +703,59 @@ class Kiwoom:
             self.asyncio_loop.call_soon_threadsafe(self.asyncio_loop.stop)
         if self.websocket_thread and self.websocket_thread.is_alive():
             self.websocket_thread.join(timeout=5)
-            print("WebSocket thread stopped.")
+            logger.info("WebSocket thread stopped.")
 
     async def _send_websocket_message(self, message):
         """Sends a message to the WebSocket server. Handles reconnection if needed."""
+        # Ensure we have a JSON string and also keep a parsed object to inspect trnm
         if not isinstance(message, str):
             message = json.dumps(message)
+        try:
+            message_obj = json.loads(message)
+        except Exception:
+            message_obj = {}
         send_attempted = False
         for attempt in range(2):  # 최대 2회 시도(재연결 포함)
             if not self.is_websocket_connected or not self.websocket:
-                print("WebSocket is not connected. Reconnecting...")
+                logger.info("WebSocket is not connected. Reconnecting...")
                 await self._websocket_connect()
             if self.is_websocket_connected and self.websocket:
                 try:
+                    # If not logged in yet and this is not an explicit LOGIN message,
+                    # send LOGIN first (once) to avoid server rejecting other messages.
+                    trnm = message_obj.get('trnm') if isinstance(message_obj, dict) else None
+                    if trnm != 'LOGIN' and not self._websocket_logged_in:
+                        try:
+                            if self._login_send_lock is not None:
+                                async with self._login_send_lock:
+                                    if not self._websocket_login_sent:
+                                        await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                        self._websocket_login_sent = True
+                            else:
+                                if not self._websocket_login_sent:
+                                    await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                    self._websocket_login_sent = True
+                            # Wait up to ~1s for login to be confirmed
+                            for _ in range(10):
+                                if self._websocket_logged_in:
+                                    break
+                                await asyncio.sleep(0.1)
+                        except Exception as e:
+                            logger.warning(f"Pre-login send failed: {e}")
+
                     await self.websocket.send(message)
                     send_attempted = True
                     break
                 except Exception as e:
-                    print(f"WebSocket send failed (attempt {attempt+1}): {e}")
+                    logger.error(f"WebSocket send failed (attempt {attempt+1}): {e}")
                     self.is_websocket_connected = False
                     self.websocket = None
             else:
-                print("WebSocket is still not connected after reconnect attempt.")
+                logger.warning("WebSocket is still not connected after reconnect attempt.")
         if not send_attempted:
-            print("Failed to send message via WebSocket after reconnection attempts.")
-
+            logger.error("Failed to send message via WebSocket after reconnection attempts.")
+            # Reset login_sent so next connect will attempt login again
+            self._websocket_login_sent = False
     async def _handle_websocket_message(self, message):
         """Handles incoming WebSocket messages."""
         try:
@@ -680,10 +764,32 @@ class Kiwoom:
             
             if trnm == 'LOGIN':
                 if data.get('return_code') == 0:
-                    print("WebSocket login successful.")
+                    logger.info("WebSocket login successful.")
+                    # reset retry counter on success
+                    self._websocket_login_retries = 0
+                    # mark login success
+                    self._websocket_logged_in = True
+                    self._websocket_login_sent = True
                 else:
-                    print(f"WebSocket login failed: {data.get('return_msg')}")
-                    await self.disconnect()
+                    msg = str(data.get('return_msg', ''))
+                    logger.warning(f"WebSocket login failed: {msg}")
+                    # detect token-related failures and try re-authenticate + relogin
+                    lower = msg.lower()
+                    token_issue = (
+                        '토큰' in msg or '만료' in msg or '인증' in msg or 'expired' in lower or 'invalid token' in lower
+                    )
+                    if token_issue and self._websocket_login_retries < self._websocket_max_login_retries:
+                        self._websocket_login_retries += 1
+                        logger.info(f"Attempting to refresh token and re-login (attempt {self._websocket_login_retries})...")
+                        try:
+                            await self._ensure_valid_token_async()
+                            await asyncio.sleep(0.2)
+                            await self._send_websocket_message({'trnm': 'LOGIN', 'token': self.access_token})
+                        except Exception as e:
+                            logger.exception(f"Re-login attempt failed: {e}")
+                    else:
+                        # unrecoverable: disconnect
+                        await self.disconnect()
                     
             elif trnm == 'PING':
                 # PING 메시지에 대한 PONG 응답
@@ -691,15 +797,15 @@ class Kiwoom:
 
             elif trnm == 'REG':
                 if data.get('return_code') == 0:
-                    print(f"Real-time registration successful.")
+                    logger.info(f"Real-time registration successful.")
                 else:
-                    print(f"Real-time registration failed: {data}")
+                    logger.warning(f"Real-time registration failed: {data}")
                     
             elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
-                    print(f"Real-time removal successful.")
+                    logger.info(f"Real-time removal successful.")
                 else:
-                    print(f"Real-time removal failed: {data}")
+                    logger.warning(f"Real-time removal failed: {data}")
                     
             elif trnm == 'REAL':
                 # 실시간 체결 데이터 처리
@@ -713,18 +819,18 @@ class Kiwoom:
                 message_text = data.get('message', '')
                 # 필요시 중요한 시스템 메시지만 출력하도록 필터링
                 if code != 'R00000':  # R00000은 일반 공지
-                    print(f"[SYSTEM] {code}: {message_text}")
+                    logger.warning(f"[SYSTEM] {code}: {message_text}")
                 # else: 
                 #     print(f"[SYSTEM-INFO] {message_text}")  # 디버깅이 필요한 경우 주석 해제
                     
             else:
                 # 알 수 없는 메시지 타입 (디버깅용)
-                print(f"[DEBUG] Unknown message type '{trnm}': {data}")
+                logger.debug(f"[DEBUG] Unknown message type '{trnm}': {data}")
                 
         except json.JSONDecodeError:
-            print(f"Failed to decode WebSocket message: {message}")
+            logger.warning(f"Failed to decode WebSocket message: {message}")
         except Exception as e:
-            print(f"Error handling WebSocket message: {e}")
+            logger.exception(f"Error handling WebSocket message: {e}")
 
     def disconnect(self):
         """Disconnects from the WebSocket."""
@@ -733,3 +839,6 @@ class Kiwoom:
             self.asyncio_loop.call_soon_threadsafe(asyncio.create_task, self.websocket.close())
         if self.websocket_thread:
             self.websocket_thread.join()
+        # Reset login state
+        self._websocket_logged_in = False
+        self._websocket_login_sent = False

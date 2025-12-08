@@ -43,31 +43,88 @@
 - `.env` 파일은 이미 `.gitignore`에 포함되어 있습니다
 - `.env.example` 파일만 버전 관리에 포함됩니다
 
-### 2. 대체 방법: 환경 변수 직접 설정
-필요한 경우, 환경 변수를 직접 설정할 수도 있습니다:
+```markdown
+# 쉽게 따라 만드는 주식자동매매시스템 (REST API 버전)
 
-**macOS/Linux:**
+## 프로젝트 개요
+이 저장소는 키움 OpenAPI의 REST 및 WebSocket 인터페이스를 사용하는 자동매매(백테스트/실전) 도구입니다. 기존 ActiveX/COM 기반 접근을 REST로 대체하고, 운영성을 개선하기 위해 다음과 같은 변경을 적용했습니다.
+
+## 주요 구성
+- `main.py`: 애플리케이션 진입점
+- `api/Kiwoom.py`: Kiwoom REST + WebSocket 클라이언트 래퍼
+- `strategy/RSIStrategy.py`: 예시 매매 전략 (RSI 기반)
+- `util/`: 헬퍼 유틸리티들 (`time_helper.py`, `db_helper.py`, `logging_config.py` 등)
+
+## 최근 변경사항(요약)
+- REST 페이징 개선: `get_price_data`, `get_order`, `get_balance` 등에 `cont_yn` 파라미터를 추가하여 do-while 스타일로 첫 페이지를 반드시 조회하도록 변경함.
+- 페이징별 재시도: API의 과금·요청 한도(rate-limit) 응답(응답코드 `5` 및 메시지 `허용된 요청 개수를 초과하였습니다`)에 한해서만 페이지 단위 재시도 로직을 추가함.
+- WebSocket 안정화:
+    - 토큰 만료 감지 시 비동기 인증 갱신을 수행하여 메인 이벤트 루프를 블로킹하지 않음.
+    - 재접속 후 실시간 구독(re-register)을 자동으로 재등록함.
+    - 중복 `LOGIN` 전송 방지: 로그인 상태 플래그와 웹소켓 루프에 바인딩된 `asyncio.Lock`을 도입함.
+- 로깅 통합:
+    - `util/logging_config.py` 추가: 중앙 설정으로 `RotatingFileHandler`를 구성.
+    - 모듈별 `get_logger(__name__)` 사용으로 일관된 로깅 확보.
+    - 환경변수로 로그 디렉터리, 레벨 및 회전 정책을 제어하도록 지원(`.env.example`에 예시 추가).
+- 시간 처리: 모든 시간 판정에 `util.time_helper.get_korea_time()` 사용으로 한국 시간대 기준 일관성 유지.
+
+## 요구사항
+1. Python 3.11 이상
+2. 의존성 설치 (Poetry 권장):
 ```bash
-export KIWOOM_APPKEY=your_app_key
-export KIWOOM_SECRETKEY=your_secret_key
+poetry install
 ```
 
-**Windows (Command Prompt):**
-```cmd
-set KIWOOM_APPKEY=your_app_key
-set KIWOOM_SECRETKEY=your_secret_key
+## 설정
+1. `.env.example`을 복사하여 `.env`를 생성합니다:
+```bash
+cp .env.example .env
 ```
 
-**Windows (PowerShell):**
-```powershell
-$env:KIWOOM_APPKEY="your_app_key"
-$env:KIWOOM_SECRETKEY="your_secret_key"
-```
-`your_app_key`와 `your_secret_key`를 실제 키로 교체해주세요.
+2. `.env` 주요 항목 예시 (`.env.example` 참고):
+```env
+KIWOOM_APPKEY=your_app_key
+KIWOOM_SECRETKEY=your_secret_key
 
-## 실행 방법
-환경 변수를 설정한 후, 다음 명령어로 애플리케이션을 실행합니다.
+# Logging
+KIW_LOG_DIR=./logs
+KIW_LOG_LEVEL=INFO
+KIW_LOG_ROTATION_MAX_BYTES=10485760
+KIW_LOG_BACKUP_COUNT=5
+
+# Integration tests gate
+# RUN_INTEGRATION=0
+```
+
+환경 변수를 직접 설정해도 됩니다 (macOS/Linux 예시):
+```bash
+export KIWOOM_APPKEY=...
+export KIWOOM_SECRETKEY=...
+```
+
+## 실행
 ```bash
 poetry run python3.11 main.py
 ```
-애플리케이션을 중지하려면 `Ctrl+C`를 누르세요.
+
+## 동작 및 구현 상세 (실무 참고)
+ - 페이징 호출: `get_price_data(..., cont_yn='N')` 기본 동작은 첫 페이지를 가져오고, 이후 API 반환값에 따라 `cont_yn`을 사용해 다음 페이지를 반복 조회합니다. 내부적으로 do-while 형태를 흉내내며 `max_loops`, `max_retries`, `retry_delay`로 안전장치를 제공합니다.
+ - 재시도 조건: 페이지별 재시도는 오직 API의 rate-limit 응답(응답코드 `5` + 메시지 포함 여부)에서만 발생합니다.
+ - WebSocket: 장기 실행 환경에서의 안정성을 위해 다음을 적용했습니다:
+     - 토큰 갱신을 비동기(executor로 백그라운드 실행)로 처리하여 메시지 송수신 루프 차단 방지
+     - 로그인 동작은 플래그(`_websocket_logged_in`, `_websocket_login_sent`)와 `asyncio.Lock`으로 동기화하여 중복 로그인 메시지 전송을 방지
+     - 재접속 시 실시간 데이터(구독) 자동 재등록
+ - 로깅: `util/logging_config.configure_logging()`으로 초기화하면 환경변수에 따라 `RotatingFileHandler`가 자동으로 구성됩니다. 로그 파일 회전 및 보관 개수는 `KIW_LOG_ROTATION_MAX_BYTES`/`KIW_LOG_BACKUP_COUNT`로 제어됩니다.
+
+## 테스트
+ - 단위 테스트: `pytest` 사용. 일부 테스트는 REST 응답을 목(mock) 처리합니다.
+ - 통합 테스트: 실제 API 호출이 필요한 테스트는 `RUN_INTEGRATION=1`로 활성화하여 수동으로 실행합니다(안전상 기본은 비활성).
+
+## 추가 참고
+ - 민감한 정보는 `.env`에 두고 절대 커밋하지 마세요.
+ - 운영 환경에서 로그 디렉터리 권한 및 디스크 용량을 모니터링하세요 (로그 회전 설정이 있어도 장기간 미관리 시 디스크를 채울 수 있음).
+
+## 기여
+ - 버그 리포트 및 PR 환영합니다. 변경 시 간단한 설명과 재현 방법을 적어주시면 빠르게 리뷰하겠습니다.
+
+```
