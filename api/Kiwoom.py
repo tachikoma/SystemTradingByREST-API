@@ -557,7 +557,7 @@ class Kiwoom:
                 "(최우선)매수호가": int(real_data.get('28', '0').replace('+', '').replace('-', '')),
                 "누적거래량": int(real_data.get('13', '0'))
             })
-            # TODO logger.debug(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
+            logger.debug(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
         # Add other real_type handlers if needed
 
     def _start_websocket_thread(self):

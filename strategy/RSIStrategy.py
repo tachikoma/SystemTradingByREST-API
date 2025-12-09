@@ -165,7 +165,7 @@ class RSIStrategy(threading.Thread):
                     continue
 
                 for idx, code in enumerate(self.universe.keys()):
-                    # TODO print('[{}/{}_{}]'.format(idx + 1, len(self.universe), self.universe[code]['code_name']))
+                    logger.debug('[{}/{}_{}]'.format(idx + 1, len(self.universe), self.universe[code]['code_name']))
                     time.sleep(0.5)
 
                     # (1)접수한 주문이 있는지 확인
