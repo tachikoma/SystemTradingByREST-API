@@ -13,6 +13,16 @@ logger = get_logger(__name__)
 
 
 class RSIStrategy(threading.Thread):
+    # 전략 상수 정의
+    MAX_HOLDINGS = 10  # 최대 보유 종목 수
+    RSI_PERIOD = 2  # RSI 계산 기간
+    MA_SHORT = 20  # 단기 이동평균
+    MA_LONG = 60  # 장기 이동평균
+    RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
+    RSI_BUY_THRESHOLD = 5  # RSI 매수 기준
+    PRICE_DROP_THRESHOLD = -2  # 가격 하락 기준 (%)
+    FEE_RATE = 1.00015  # 거래 수수료율
+    
     def __init__(self, kiwoom):
         threading.Thread.__init__(self)
         self.strategy_name = "RSIStrategy"
@@ -62,7 +72,7 @@ class RSIStrategy(threading.Thread):
         if not check_table_exist(self.strategy_name, 'universe'):
             universe_list = get_universe()
             logger.debug("Universe list: %s", universe_list)
-            universe = {}
+            temp_universe = {}
             # 오늘 날짜를 20210101 형태로 지정
             now = get_korea_time().strftime("%Y%m%d")
 
@@ -80,26 +90,34 @@ class RSIStrategy(threading.Thread):
 
                 # 얻어온 종목명이 유니버스에 포함되어 있다면 딕셔너리에 추가
                 if code_name in universe_list:
-                    universe[code_dict["code"]] = code_name
+                    temp_universe[code_dict["code"]] = code_name
             # 코드, 종목명, 생성일자자를 열로 가지는 DaaFrame 생성
             universe_df = pd.DataFrame({
-                'code': universe.keys(),
-                'code_name': universe.values(),
-                'created_at': [now] * len(universe.keys())
+                'code': temp_universe.keys(),
+                'code_name': temp_universe.values(),
+                'created_at': [now] * len(temp_universe.keys())
             })
 
             # universe라는 테이블명으로 Dataframe을 DB에 저장함
             insert_df_to_db(self.strategy_name, 'universe', universe_df)
-
-        sql = "select * from universe"
-        cur = execute_sql(self.strategy_name, sql)
-        universe_list = cur.fetchall()
-        for item in universe_list:
-            idx, code, code_name, created_at = item
-            self.universe[code] = {
-                'code_name': code_name
-            }
-        logger.debug("Loaded universe with %d items", len(self.universe))
+            
+            # 생성한 데이터를 바로 self.universe에 저장 (불필요한 DB 읽기 방지)
+            for code, code_name in temp_universe.items():
+                self.universe[code] = {
+                    'code_name': code_name
+                }
+            logger.debug("Created and loaded universe with %d items", len(self.universe))
+        else:
+            # 기존 universe 테이블이 있으면 DB에서 로드
+            sql = "select * from universe"
+            cur = execute_sql(self.strategy_name, sql)
+            universe_list = cur.fetchall()
+            for item in universe_list:
+                idx, code, code_name, created_at = item
+                self.universe[code] = {
+                    'code_name': code_name
+                }
+            logger.debug("Loaded universe from DB with %d items", len(self.universe))
 
     def check_and_get_price_data(self):
         """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""
@@ -107,50 +125,42 @@ class RSIStrategy(threading.Thread):
             logger.info("(%d/%d) %s", idx + 1, len(self.universe), code)
 
             time.sleep(0.2)  # To avoid rate limiting
-            # (1)케이스: 일봉 데이터가 아예 없는지 확인(장 종료 이후)
-            if check_transaction_closed() and not check_table_exist(self.strategy_name, code):
-                # API를 이용해 조회한 가격 데이터 price_df에 저장
+            
+            # 테이블 존재 여부 확인
+            table_exists = check_table_exist(self.strategy_name, code)
+            
+            # 케이스 1: 테이블이 없으면 API로 조회 후 생성
+            if not table_exists:
                 price_df = self.kiwoom.get_price_data(code)
-                # 코드를 테이블 이름으로 해서 데이터베이스에 저장
                 insert_df_to_db(self.strategy_name, code, price_df)
-            else:
-                # (2), (3), (4) 케이스: 일봉 데이터가 있는 경우
-                # (2)케이스: 장이 종료된 경우 API를 이용해 얻어온 데이터를 저장
-                if check_transaction_closed():
-                    # 저장된 데이터의 가장 최근 일자를 조회
-                    sql = "select max(`{}`) from `{}`".format('index', code)
-
-                    cur = execute_sql(self.strategy_name, sql)
-
-                    # 일봉 데이터를 저장한 가장 최근 일자를 조회
-                    last_date = cur.fetchone()
-
-                    # 오늘 날짜를 20210101 형태로 지정
-                    now = get_korea_time().strftime("%Y%m%d")
-
-                    # 최근 저장 일자가 오늘이 아닌지 확인
-                    if last_date[0] != now:
-                        price_df = self.kiwoom.get_price_data(code)
-                        # 코드를 테이블 이름으로 해서 데이터베이스에 저장
-                        insert_df_to_db(self.strategy_name, code, price_df)
-
-                # (3), (4) 케이스: 장 시작 전이거나 장 중인 경우 데이터베이스에 저장된 데이터 조회
-                else:
-                    if not check_table_exist(self.strategy_name, code):
-                        # API를 이용해 조회한 가격 데이터 price_df에 저장
-                        price_df = self.kiwoom.get_price_data(code)
-                        # 코드를 테이블 이름으로 해서 데이터베이스에 저장
-                        insert_df_to_db(self.strategy_name, code, price_df)
-                    
-                    sql = "select * from `{}`".format(code)
-                    cur = execute_sql(self.strategy_name, sql)
-                    cols = [column[0] for column in cur.description]
-
-                    # 데이터베이스에서 조회한 데이터를 DataFrame으로 변환해서 저장
-                    price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
-                    price_df = price_df.set_index('index')
-                    # 가격 데이터를 self.universe에서 접근할 수 있도록 저장
+                self.universe[code]['price_df'] = price_df
+                logger.debug("Created price table for %s", code)
+                continue
+            
+            # 케이스 2: 장 종료 후 데이터 업데이트 필요한지 확인
+            if check_transaction_closed():
+                sql = "select max(`{}`) from `{}`".format('index', code)
+                cur = execute_sql(self.strategy_name, sql)
+                last_date = cur.fetchone()
+                now = get_korea_time().strftime("%Y%m%d")
+                
+                # 최근 저장 일자가 오늘이 아니면 업데이트
+                if last_date[0] != now:
+                    price_df = self.kiwoom.get_price_data(code)
+                    insert_df_to_db(self.strategy_name, code, price_df)
                     self.universe[code]['price_df'] = price_df
+                    logger.debug("Updated price data for %s", code)
+                    continue
+            
+            # 케이스 3: DB에서 기존 데이터 로드
+            sql = "select * from `{}`".format(code)
+            cur = execute_sql(self.strategy_name, sql)
+            cols = [column[0] for column in cur.description]
+            
+            price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
+            price_df = price_df.set_index('index')
+            self.universe[code]['price_df'] = price_df
+            logger.debug("Loaded price data from DB for %s", code)
 
     def run(self):
         """실질적 수행 역할을 하는 함수"""
@@ -175,7 +185,9 @@ class RSIStrategy(threading.Thread):
 
                         # (2.1) '미체결수량' 확인하여 미체결 종목인지 확인
                         if self.kiwoom.order[code]['미체결수량'] > 0:
-                            pass
+                            # 미체결 주문이 있으면 다음 종목으로 (현재는 자동 체결 대기)
+                            logger.debug('미체결 수량 존재: %d', self.kiwoom.order[code]['미체결수량'])
+                            continue
 
                     # (3)보유 종목인지 확인
                     elif code in self.kiwoom.balance.keys():
@@ -206,69 +218,148 @@ class RSIStrategy(threading.Thread):
         # 종목코드들의 실시간 체결정보 수신을 요청
         self.kiwoom.set_real_reg(codes, "0")
 
+    def calculate_rsi(self, code):
+        """RSI를 계산하는 공통 함수
+        
+        Args:
+            code: 종목 코드
+            
+        Returns:
+            tuple: (DataFrame with RSI, 현재가) 또는 (None, None) if error
+        """
+        universe_item = self.universe.get(code)
+        if not universe_item or 'price_df' not in universe_item:
+            logger.warning("Universe item or price_df not found for code: %s", code)
+            return None, None
+        
+        # 실시간 체결 정보 확인
+        if code not in self.kiwoom.universe_realtime_transaction_info.keys():
+            logger.debug("실시간 체결정보가 아직 없습니다: %s", code)
+            return None, None
+        
+        try:
+            # 실시간 체결 정보 가져오기
+            realtime_info = self.kiwoom.universe_realtime_transaction_info[code]
+            open_price = realtime_info['시가']
+            high = realtime_info['고가']
+            low = realtime_info['저가']
+            close = realtime_info['현재가']
+            volume = realtime_info['누적거래량']
+            
+            # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가하기 위해 리스트로 만듦
+            today_price_data = [open_price, high, low, close, volume]
+            
+            df = universe_item['price_df'].copy()
+            
+            # 과거 가격 데이터에 금일 날짜로 데이터 추가
+            df.loc[get_korea_time().strftime('%Y%m%d')] = today_price_data
+            
+            # RSI(N) 계산
+            date_index = df.index.astype('str')
+            # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 크면 증가분을 넣고, 감소했으면 0을 넣어줌
+            U = np.where(df['close'].diff(1) > 0, df['close'].diff(1), 0)
+            # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 작으면 감소분을 넣고, 증가했으면 0을 넣어줌
+            D = np.where(df['close'].diff(1) < 0, df['close'].diff(1) * (-1), 0)
+            AU = pd.DataFrame(U, index=date_index).rolling(window=self.RSI_PERIOD).mean()
+            AD = pd.DataFrame(D, index=date_index).rolling(window=self.RSI_PERIOD).mean()
+            
+            # ZeroDivisionError 방지: AD + AU가 0이 되지 않도록 체크
+            with np.errstate(divide='ignore', invalid='ignore'):
+                RSI = AU / (AD + AU) * 100
+                RSI = RSI.fillna(0)  # NaN을 0으로 대체
+            
+            df['RSI(2)'] = RSI
+            
+            return df, close
+            
+        except (KeyError, IndexError, ZeroDivisionError) as e:
+            logger.error("RSI 계산 중 오류 발생 (%s): %s", code, e)
+            return None, None
+        except Exception as e:
+            logger.error("RSI 계산 중 예상치 못한 오류 (%s): %s", code, e)
+            return None, None
+
     def check_sell_signal(self, code):
         """매도대상인지 확인하는 함수"""
-        universe_item = self.universe[code]
-
-        # (1)현재 체결정보가 존재하지 않는지 확인
-        if code not in self.kiwoom.universe_realtime_transaction_info.keys():
-            # 체결 정보가 없으면 더 이상 진행하지 않고 함수 종료
-            logger.info("매도대상 확인 과정에서 아직 체결정보가 없습니다.")
-            return
-
-        # (2)실시간 체결 정보가 존재하면 현시점의 시가 / 고가 / 저가 / 현재가 / 누적 거래량이 저장되어 있음
-        open = self.kiwoom.universe_realtime_transaction_info[code]['시가']
-        high = self.kiwoom.universe_realtime_transaction_info[code]['고가']
-        low = self.kiwoom.universe_realtime_transaction_info[code]['저가']
-        close = self.kiwoom.universe_realtime_transaction_info[code]['현재가']
-        volume = self.kiwoom.universe_realtime_transaction_info[code]['누적거래량']
-
-        # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가하기 위해 리스트로 만듦
-        today_price_data = [open, high, low, close, volume]
-
-        df = universe_item['price_df'].copy()
-
-        # 과거 가격 데이터에 금일 날짜로 데이터 추가
-        df.loc[get_korea_time().strftime('%Y%m%d')] = today_price_data
-
-        # RSI(N) 계산
-        period = 2  # 기준일 설정
-        date_index = df.index.astype('str')
-        # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 크면 증가분을 넣고, 감소했으면 0을 넣어줌
-        U = np.where(df['close'].diff(1) > 0, df['close'].diff(1), 0)
-        # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 작으면 감소분을 넣고, 증가했으면 0을 넣어줌
-        D = np.where(df['close'].diff(1) < 0, df['close'].diff(1) * (-1), 0)
-        AU = pd.DataFrame(U, index=date_index).rolling(window=period).mean()  # AU, period=2일 동안의 U의 평균
-        AD = pd.DataFrame(D, index=date_index).rolling(window=period).mean()  # AD, period=2일 동안의 D의 평균
-        RSI = AU / (AD + AU) * 100  # 0부터 1로 표현되는 RSI에 100을 곱함
-        df['RSI(2)'] = RSI
-
-        # 보유 종목의 매입가격 조회
-        purchase_price = self.kiwoom.balance[code]['매입가']
-        # 금일의 RSI(2) 구하기
-        rsi = df[-1:]['RSI(2)'].values[0]
-
-        # 매도 조건 두 가지를 모두 만족하면 True
-        if rsi > 80 and close > purchase_price:
-            return True
-        else:
+        # RSI 계산 (공통 함수 사용)
+        df, close = self.calculate_rsi(code)
+        
+        if df is None or close is None:
+            return False
+        
+        try:
+            # 보유 종목의 매입가격 조회
+            if code not in self.kiwoom.balance:
+                logger.warning("보유 종목이 아닙니다: %s", code)
+                return False
+            
+            purchase_price = self.kiwoom.balance[code]['매입가']
+            
+            # 금일의 RSI(2) 구하기
+            if len(df) == 0:
+                logger.warning("DataFrame이 비어있습니다: %s", code)
+                return False
+            
+            rsi = df[-1:]['RSI(2)'].values[0]
+            
+            # RSI가 NaN이거나 inf인지 체크
+            if np.isnan(rsi) or np.isinf(rsi):
+                logger.warning("RSI 값이 유효하지 않습니다 (%s): %s", code, rsi)
+                return False
+            
+            # 매도 조건 두 가지를 모두 만족하면 True
+            if rsi > self.RSI_SELL_THRESHOLD and close > purchase_price:
+                logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d)", 
+                           code, rsi, close, purchase_price)
+                return True
+            else:
+                return False
+                
+        except (KeyError, IndexError) as e:
+            logger.error("매도 신호 확인 중 오류 (%s): %s", code, e)
+            return False
+        except Exception as e:
+            logger.error("매도 신호 확인 중 예상치 못한 오류 (%s): %s", code, e)
             return False
 
     def order_sell(self, code):
         """매도 주문 접수 함수"""
-        # 보유 수량 확인(전량 매도 방식으로 보유한 수량을 모두 매도함)
-        quantity = self.kiwoom.balance[code]['보유수량']
+        try:
+            # 보유 수량 확인(전량 매도 방식으로 보유한 수량을 모두 매도함)
+            if code not in self.kiwoom.balance:
+                logger.error("보유하지 않은 종목입니다: %s", code)
+                return
+            
+            quantity = self.kiwoom.balance[code]['보유수량']
+            
+            if quantity <= 0:
+                logger.warning("보유 수량이 0 이하입니다 (%s): %d", code, quantity)
+                return
 
-        # 최우선 매도 호가 확인
-        ask = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매도호가']
+            # 최우선 매도 호가 확인 (에러 핸들링 추가)
+            if code not in self.kiwoom.universe_realtime_transaction_info:
+                logger.error("실시간 체결정보가 없습니다: %s", code)
+                return
+            
+            ask = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매도호가']
 
-        order_result = self.kiwoom.send_order('send_sell_order', '1001', 2, code, quantity, ask, '00')
+            order_result = self.kiwoom.send_order('send_sell_order', '1001', 2, code, quantity, ask, '00')
 
-        # LINE 메시지를 보내는 부분
-        message = "[{}]sell order is done! quantity:{}, ask:{}, order_result:{}".format(code, quantity, ask,
-                                                                                        order_result)
-        logger.info(message)
-        # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
+            # 주문 결과 확인
+            if order_result == 0:
+                # 매도 주문 성공 후 예수금 업데이트
+                self.update_deposit()
+                
+                message = "[{}]sell order is done! quantity:{}, ask:{}, order_result:{}".format(code, quantity, ask, order_result)
+                logger.info(message)
+            else:
+                logger.error("매도 주문 실패: code=%s, order_result=%s", code, order_result)
+            # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
+            
+        except KeyError as e:
+            logger.error("매도 주문 처리 중 키 오류 (%s): %s", code, e)
+        except Exception as e:
+            logger.error("매도 주문 처리 중 예상치 못한 오류 (%s): %s", code, e)
 
     def check_buy_signal_and_order(self, code):
         """매수 대상인지 확인하고 주문을 접수하는 함수"""
@@ -276,109 +367,134 @@ class RSIStrategy(threading.Thread):
         if not check_adjacent_transaction_closed():
             return False
 
-        universe_item = self.universe[code]
-
-        # (1)현재 체결정보가 존재하지 않는지 확인
-        if code not in self.kiwoom.universe_realtime_transaction_info.keys():
-            # 존재하지 않다면 더이상 진행하지 않고 함수 종료
-            logger.info("매수대상 확인 과정에서 아직 체결정보가 없습니다.")
-            return
-
-        # (2)실시간 체결 정보가 존재하면 현 시점의 시가 / 고가 / 저가 / 현재가 / 누적 거래량이 저장되어 있음
-        open = self.kiwoom.universe_realtime_transaction_info[code]['시가']
-        high = self.kiwoom.universe_realtime_transaction_info[code]['고가']
-        low = self.kiwoom.universe_realtime_transaction_info[code]['저가']
-        close = self.kiwoom.universe_realtime_transaction_info[code]['현재가']
-        volume = self.kiwoom.universe_realtime_transaction_info[code]['누적거래량']
-
-        # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가하기 위해 리스트로 만듦
-        today_price_data = [open, high, low, close, volume]
-
-        df = universe_item['price_df'].copy()
-
-        # 과거 가격 데이터에 금일 날짜로 데이터 추가
-        df.loc[get_korea_time().strftime('%Y%m%d')] = today_price_data
-
-        # RSI(N) 계산
-        period = 2  # 기준일 설정
-        date_index = df.index.astype('str')
-        # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 크면 증가분을 넣고, 감소했으면 0을 넣어줌
-        U = np.where(df['close'].diff(1) > 0, df['close'].diff(1), 0)
-        # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 작으면 감소분을 넣고, 증가했으면 0을 넣어줌
-        D = np.where(df['close'].diff(1) < 0, df['close'].diff(1) * (-1), 0)
-        AU = pd.DataFrame(U, index=date_index).rolling(window=period).mean()  # AU, period=2일 동안의 U의 평균
-        AD = pd.DataFrame(D, index=date_index).rolling(window=period).mean()  # AD, period=2일 동안의 D의 평균
-        RSI = AU / (AD + AU) * 100  # 0부터 1로 표현되는 RSI에 100을 곱함
-        df['RSI(2)'] = RSI
-
-        # 종가(close)를 기준으로 이동 평균 구하기
-        df['ma20'] = df['close'].rolling(window=20, min_periods=1).mean()
-        df['ma60'] = df['close'].rolling(window=60, min_periods=1).mean()
-
-        rsi = df[-1:]['RSI(2)'].values[0]
-        ma20 = df[-1:]['ma20'].values[0]
-        ma60 = df[-1:]['ma60'].values[0]
-
-        # 2 거래일 전 날짜(index)를 구함
-        idx = df.index.get_loc(get_korea_time().strftime('%Y%m%d')) - 2
-
-        # 위 index로부터 2 거래일 전 종가를 얻어옴
-        close_2days_ago = df.iloc[idx]['close']
-
-        # 2 거래일 전 종가와 현재가를 비교함
-        price_diff = (close - close_2days_ago) / close_2days_ago * 100
+        # RSI 계산 (공통 함수 사용)
+        df, close = self.calculate_rsi(code)
+        
+        if df is None or close is None:
+            return False
+        
+        try:
+            # DataFrame 길이 체크
+            if len(df) < 3:
+                logger.warning("데이터가 부족합니다 (%s): len=%d", code, len(df))
+                return False
+            
+            # 종가(close)를 기준으로 이동 평균 구하기
+            df['ma20'] = df['close'].rolling(window=self.MA_SHORT, min_periods=1).mean()
+            df['ma60'] = df['close'].rolling(window=self.MA_LONG, min_periods=1).mean()
+            
+            rsi = df[-1:]['RSI(2)'].values[0]
+            ma20 = df[-1:]['ma20'].values[0]
+            ma60 = df[-1:]['ma60'].values[0]
+            
+            # 값들이 유효한지 체크
+            if np.isnan(rsi) or np.isinf(rsi) or np.isnan(ma20) or np.isinf(ma20) or np.isnan(ma60) or np.isinf(ma60):
+                logger.warning("계산된 값이 유효하지 않습니다 (%s): rsi=%s, ma20=%s, ma60=%s", code, rsi, ma20, ma60)
+                return False
+            
+            # 2 거래일 전 날짜(index)를 구함
+            today_str = get_korea_time().strftime('%Y%m%d')
+            if today_str not in df.index:
+                logger.warning("오늘 날짜가 DataFrame에 없습니다 (%s): %s", code, today_str)
+                return False
+            
+            idx = df.index.get_loc(today_str) - 2
+            
+            # 인덱스가 유효한지 체크
+            if idx < 0 or idx >= len(df):
+                logger.warning("2 거래일 전 데이터 접근 불가 (%s): idx=%d, len=%d", code, idx, len(df))
+                return False
+            
+            # 위 index로부터 2 거래일 전 종가를 얻어옴
+            close_2days_ago = df.iloc[idx]['close']
+            
+            # 2 거래일 전 종가와 현재가를 비교함
+            if close_2days_ago == 0:
+                logger.warning("2 거래일 전 종가가 0입니다 (%s)", code)
+                return False
+            
+            price_diff = (close - close_2days_ago) / close_2days_ago * 100
+            
+        except (KeyError, IndexError) as e:
+            logger.error("매수 신호 확인 중 오류 (%s): %s", code, e)
+            return False
+        except Exception as e:
+            logger.error("매수 신호 확인 중 예상치 못한 오류 (%s): %s", code, e)
+            return False
 
         # (3)매수 신호 확인(조건에 부합하면 주문 접수)
-        if ma20 > ma60 and rsi < 5 and price_diff < -2:
-            # (4)이미 보유한 종목, 매수 주문 접수한 종목의 합이 보유 가능 최대치(10개)라면 더 이상 매수 불가하므로 종료
-            if (self.get_balance_count() + self.get_buy_order_count()) >= 10:
+        if ma20 > ma60 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD:
+            # (4)이미 보유한 종목, 매수 주문 접수한 종목의 합이 보유 가능 최대치라면 더 이상 매수 불가하므로 종료
+            if (self.get_balance_count() + self.get_buy_order_count()) >= self.MAX_HOLDINGS:
                 return
 
-            # (5)주문에 사용할 금액 계산(10은 최대 보유 종목 수로써 consts.py에 상수로 만들어 관리하는 것도 좋음)
-            budget = self.deposit / (10 - (self.get_balance_count() + self.get_buy_order_count()))
+            # (5)주문에 사용할 금액 계산
+            budget = self.deposit / (self.MAX_HOLDINGS - (self.get_balance_count() + self.get_buy_order_count()))
 
-            # 최우선 매도호가 확인
-            bid = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매수호가']
+            # 최우선 매수호가 확인 (에러 핸들링 추가)
+            try:
+                bid = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매수호가']
+            except KeyError:
+                logger.error("매수호가 정보를 가져올 수 없습니다: %s", code)
+                return
 
             # (6)주문 수량 계산(소수점은 제거하기 위해 버림)
             quantity = math.floor(budget / bid)
 
             # (7)주문 주식 수량이 1 미만이라면 매수 불가하므로 체크
             if quantity < 1:
+                logger.debug("주문 수량 부족 (quantity < 1): budget=%d, bid=%d", budget, bid)
                 return
 
-            # (8)현재 예수금에서 수수료를 곱한 실제 투입금액(주문 수량 * 주문 가격)을 제외해서 계산
+            # (8)예수금 충분한지 미리 체크 (수수료 포함)
             amount = quantity * bid
-            self.deposit = math.floor(self.deposit - amount * 1.00015)
-
-            # (8)예수금이 0보다 작아질 정도로 주문할 수는 없으므로 체크
-            if self.deposit < 0:
+            estimated_cost = math.floor(amount * self.FEE_RATE)
+            
+            if self.deposit < estimated_cost:
+                logger.warning("예수금 부족: deposit=%d, estimated_cost=%d", self.deposit, estimated_cost)
                 return
 
             # (9)계산을 바탕으로 지정가 매수 주문 접수
             order_result = self.kiwoom.send_order('send_buy_order', '1001', 1, code, quantity, bid, '00')
 
-            # _on_chejan_slot가 늦게 동작할 수도 있기 때문에 미리 약간의 정보를 넣어둠
-            self.kiwoom.order[code] = {'주문구분': '매수', '미체결수량': quantity}
-
-            # LINE 메시지를 보내는 부분
-            message = "[{}]buy order is done! quantity:{}, bid:{}, order_result:{}, deposit:{}, get_balance_count:{}, get_buy_order_count:{}, balance_len:{}".format(
-                code, quantity, bid, order_result, self.deposit, self.get_balance_count(), self.get_buy_order_count(),
-                len(self.kiwoom.balance))
-            logger.info(message)
+            # 주문 성공 시에만 예수금 차감
+            if order_result == 0:  # 주문 성공
+                self.deposit = self.deposit - estimated_cost
+                
+                # _on_chejan_slot가 늦게 동작할 수도 있기 때문에 미리 약간의 정보를 넣어둠
+                self.kiwoom.order[code] = {'주문구분': '매수', '미체결수량': quantity}
+                
+                # LINE 메시지를 보내는 부분
+                message = "[{}]buy order is done! quantity:{}, bid:{}, order_result:{}, deposit:{}, get_balance_count:{}, get_buy_order_count:{}, balance_len:{}".format(
+                    code, quantity, bid, order_result, self.deposit, self.get_balance_count(), self.get_buy_order_count(),
+                    len(self.kiwoom.balance))
+                logger.info(message)
+            else:
+                logger.error("매수 주문 실패: code=%s, order_result=%s", code, order_result)
             # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
 
         # 매수신호가 없다면 종료
         else:
             return
 
+    def update_deposit(self):
+        """실시간으로 예수금을 동기화하는 함수"""
+        try:
+            self.deposit = self.kiwoom.get_deposit()
+            logger.debug("예수금 업데이트: %d", self.deposit)
+        except Exception as e:
+            logger.error("예수금 업데이트 실패: %s", e)
+
     def get_balance_count(self):
         """매도 주문이 접수되지 않은 보유 종목 수를 계산하는 함수"""
         balance_count = len(self.kiwoom.balance)
-        # kiwoom balance에 존재하는 종목이 매도 주문 접수되었다면 보유 종목에서 제외시킴
+        # kiwoom balance에 존재하는 종목이 매도 주문 접수되었고 미체결수량이 있다면 아직 보유 중
+        # 미체결수량이 0이면 매도가 완료되었지만 아직 balance에서 제거 안된 상태
         for code in self.kiwoom.order.keys():
-            if code in self.kiwoom.balance and self.kiwoom.order[code]['주문구분'] == "매도" and self.kiwoom.order[code]['미체결수량'] == 0:
-                balance_count = balance_count - 1
+            if code in self.kiwoom.balance and self.kiwoom.order[code]['주문구분'] == "매도":
+                # 미체결수량이 0이면 매도 완료로 간주하고 제외
+                if self.kiwoom.order[code]['미체결수량'] == 0:
+                    balance_count = balance_count - 1
         return balance_count
 
     def get_buy_order_count(self):
