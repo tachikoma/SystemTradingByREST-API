@@ -70,6 +70,7 @@ class RSIStrategy(threading.Thread):
     def check_and_get_universe(self):
         """유니버스가 존재하는지 확인하고 없으면 생성하는 함수"""
         if not check_table_exist(self.strategy_name, 'universe'):
+            logger.info("Universe table does not exist. Creating new universe.")
             universe_list = get_universe()
             logger.info("Universe list: %s", universe_list)
             temp_universe = {}
@@ -106,7 +107,7 @@ class RSIStrategy(threading.Thread):
                 self.universe[code] = {
                     'code_name': code_name
                 }
-            logger.debug("Created and loaded universe with %d items", len(self.universe))
+            logger.info("Created and loaded universe with %d items", len(self.universe))
         else:
             # 기존 universe 테이블이 있으면 DB에서 로드
             sql = "select * from universe"
@@ -117,7 +118,7 @@ class RSIStrategy(threading.Thread):
                 self.universe[code] = {
                     'code_name': code_name
                 }
-            logger.debug("Loaded universe from DB with %d items", len(self.universe))
+            logger.info("Loaded universe from DB with %d items", len(self.universe))
 
     def check_and_get_price_data(self):
         """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""

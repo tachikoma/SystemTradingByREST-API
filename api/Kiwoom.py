@@ -254,7 +254,7 @@ class Kiwoom:
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                logger.info(f"Loop limit ({max_loops}) reached, breaking for code {code}")
+                logger.info(f"Loop limit ({max_loops}) reached get_price_data, breaking for code {code}")
                 break
             first = False
             time.sleep(0.2)  # 레이트 리밋 방지를 위해 대기
@@ -340,7 +340,7 @@ class Kiwoom:
             logger.error(f"Order failed for code {code} or unexpected response: {res_data}")
             return None
 
-    def get_order(self, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
+    def get_order(self, cont_yn='N', max_loops=200, max_retries=3, retry_delay=1):
         """
         REST API(ka10075)를 사용해 미체결 주문 목록을 조회합니다.
         """
@@ -423,7 +423,7 @@ class Kiwoom:
         self.order = {order['종목코드']: order for order in all_unexecuted_orders}
         return all_unexecuted_orders
 
-    def get_balance(self, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
+    def get_balance(self, cont_yn='N', max_loops=200, max_retries=3, retry_delay=1):
         """
         REST API(kt00018)를 사용해 계좌 잔액과 보유 종목(포지션)을 조회합니다.
         """
@@ -481,7 +481,7 @@ class Kiwoom:
                     '매입금액': int(item.get('pur_amt', '0')),
                     '매매가능수량': int(item.get('trde_able_qty', '0'))
                 }
-                all_holdings.append((item.get('stk_cd', '').strip(), holding_info))
+                all_holdings.append((item.get('stk_cd', '').lstrip('A').rstrip(), holding_info))
 
             # 헤더에서 연속 조회 관련 플래그를 갱신합니다
             if page_headers:
