@@ -23,7 +23,7 @@ from util.db_helper import execute_sql, check_table_exist
 from util.logging_config import configure_logging, get_logger
 
 # 로깅 설정
-configure_logging()
+configure_logging(file_name='backtest.log')
 logger = get_logger(__name__)
 
 # 한글 폰트 설정 (matplotlib)
