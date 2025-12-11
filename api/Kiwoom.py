@@ -61,7 +61,7 @@ class Kiwoom:
 
     def _authenticate(self):
         """
-        Get access token.
+        액세스 토큰을 요청하여 설정합니다.
         """
         url = f"{self.base_url}/oauth2/token"
         headers = {"content-type": "application/json"}
@@ -89,7 +89,7 @@ class Kiwoom:
 
     def _request(self, path, api_id, params, method="POST", extra_headers=None):
         """
-        A wrapper for making API requests.
+        API 요청을 수행하는 래퍼입니다.
         """
         # TODO: 토큰 갱신 로직 추가
         # 한국 시간 헬퍼(`get_korea_time()`)를 일관되게 사용
@@ -122,8 +122,8 @@ class Kiwoom:
 
     def get_code_list_by_market(self, market_type):
         """
-        Retrieves a list of stock codes and names for a given market type.
-        market_type: '0' (KOSPI), '10' (KOSDAQ), etc.
+        지정한 마켓 유형에 대한 종목 코드와 이름 목록을 반환합니다.
+        `market_type`: '0' (KOSPI), '10' (KOSDAQ) 등
         """
         path = "/api/dostk/stkinfo"
         api_id = "ka10099"
@@ -142,7 +142,7 @@ class Kiwoom:
 
     def get_master_code_name(self, code, max_retries=3, delay=1):
         """
-        Retrieves the name of a stock given its code, with retry on API rate limit.
+        종목 코드로부터 종목명을 조회합니다. API 요청 한도 초과 응답일 경우 재시도합니다.
         """
         path = "/api/dostk/stkinfo"
         api_id = "ka10100"
@@ -171,19 +171,18 @@ class Kiwoom:
 
     def get_price_data(self, code, cont_yn='N', max_loops=1, max_retries=3, retry_delay=1):
         """
-        Retrieves historical daily OHLCV data for a specific stock.
+        특정 종목의 일별 OHLCV(시가/고가/저가/종가/거래량) 히스토리 데이터를 조회합니다.
 
-        Parameters:
-        - code: stock code
-        - cont_yn: continuation flag default
-        - max_loops: maximum number of pages to retrieve
-        - max_retries: per-page retry count when rate limit is hit
-        - retry_delay: delay (seconds) between retries on rate limit
+        매개변수:
+        - `code`: 종목 코드
+        - `cont_yn`: 연속 조회 플래그 기본값
+        - `max_loops`: 최대 페이지 조회 횟수
+        - `max_retries`: 페이지별 재시도 횟수(레이트 리밋 응답 시)
+        - `retry_delay`: 레이트 리밋 발생 시 재시도 간 지연(초)
 
-        The function retries an individual page request only when the API
-        responds with the rate-limit error (return_code == 5 and
-        return_msg contains the Korean rate-limit message). Other failures
-        stop the retrieval.
+        각 페이지 요청은 API가 레이트 리밋 응답(return_code == 5 및
+        return_msg에 레이트 리밋 문구 포함)을 반환할 때만 재시도합니다.
+        그 외의 실패는 조회를 중단합니다.
         """
         path = "/api/dostk/chart"
         api_id = "ka10081"
@@ -214,7 +213,7 @@ class Kiwoom:
                 if page_res and isinstance(page_res, dict) and "stk_dt_pole_chart_qry" in page_res:
                     break
 
-                # Check for rate-limit response to decide retry
+                # 재시도 여부 판단: rate-limit 응답인지 확인
                 if (
                     page_res is not None and
                     isinstance(page_res, dict) and
@@ -226,17 +225,17 @@ class Kiwoom:
                     time.sleep(retry_delay)
                     continue
 
-                # Other failures: do not retry
+                # 기타 실패: 재시도하지 않음
                 logger.error(f"Failed page request for code {code} (attempt {attempt+1}): {page_res}")
                 page_res = None
                 break
 
-            # If page request ultimately failed, stop retrieval
+            # 페이지 요청이 최종 실패하면 조회를 중단합니다
             if not page_res or not isinstance(page_res, dict) or "stk_dt_pole_chart_qry" not in page_res:
                 logger.warning(f"Stopping retrieval for code {code} due to page request failure.")
                 break
 
-            # Process received items
+            # 수신된 항목을 처리합니다
             for item in page_res["stk_dt_pole_chart_qry"]:
                 all_ohlcv_data['date'].append(item['dt'])
                 all_ohlcv_data['open'].append(int(item['open_pric']))
@@ -245,7 +244,7 @@ class Kiwoom:
                 all_ohlcv_data['close'].append(int(item['cur_prc']))
                 all_ohlcv_data['volume'].append(int(item['trde_qty']))
 
-            # Update continuation flags from headers
+            # 헤더에서 연속 조회 관련 플래그를 갱신합니다
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
@@ -258,18 +257,18 @@ class Kiwoom:
                 logger.info(f"Loop limit ({max_loops}) reached, breaking for code {code}")
                 break
             first = False
-            time.sleep(0.2) # To avoid rate limiting
+            time.sleep(0.2)  # 레이트 리밋 방지를 위해 대기
 
         df = pd.DataFrame(all_ohlcv_data, columns=['open', 'high', 'low', 'close', 'volume'], index=all_ohlcv_data['date'])
         return df[::-1]
 
     def get_deposit(self):
         """
-        Retrieves the orderable deposit amount using the Kiwoom REST API (kt00001).
+        REST API(kt00001)를 사용해 주문 가능 예수금을 조회합니다.
         """
         path = "/api/dostk/acnt"
         api_id = "kt00001"
-        params = {"qry_tp": "3"} # 3 for Estimated Inquiry
+        params = {"qry_tp": "3"}  # 3: 추정 조회
 
         res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
 
@@ -283,24 +282,24 @@ class Kiwoom:
 
     def send_order(self, rqname, screen_no, order_type, code, order_quantity, order_price, order_classification, origin_order_number=""):
         """
-        Sends a buy or sell order using the Kiwoom REST API.
-        rqname, screen_no are not directly used in REST API, kept for compatibility.
-        order_type: 0 for Buy, 1 for Sell (from original Kiwoom API)
-        order_classification: '00' for limit order (지정가), '03' for market order (시장가)
+        Kiwoom REST API를 사용해 매수/매도 주문을 전송합니다.
+        `rqname`, `screen_no`는 REST API에서 직접 사용되지 않지만 호환성을 위해 유지합니다.
+        `order_type`: 0=매수, 1=매도
+        `order_classification`: '00'=지정가, '03'=시장가
         """
         path = "/api/dostk/ordr"
         
         api_id_map = {
-            0: "kt10000", # Buy order
-            1: "kt10001"  # Sell order
-            # TODO: Add kt10002 for amend, kt10003 for cancel
+            0: "kt10000",  # 매수 주문
+            1: "kt10001"   # 매도 주문
+            # TODO: 수정용 kt10002, 취소용 kt10003 추가
         }
         api_id = api_id_map.get(order_type)
         if not api_id:
             logger.warning(f"Unsupported order_type: {order_type}")
             return None
 
-        # Map order_classification to trde_tp
+        # order_classification을 trde_tp로 매핑
         trde_tp_map = {
             "00": "0", # 지정가 (Limit order) -> 보통
             "03": "3"  # 시장가 (Market order)
@@ -311,16 +310,16 @@ class Kiwoom:
             logger.warning(f"Unsupported order_classification: {order_classification}")
             return None
 
-        # ord_uv should be empty for market orders
+        # 시장가 주문의 경우 ord_uv는 빈 문자열이어야 합니다
         order_uv_param = str(order_price) if trde_tp != "3" else ""
 
         params = {
-            "dmst_stex_tp": "KRX", # Hardcode to KRX for now
+            "dmst_stex_tp": "KRX",  # 현재는 KRX로 하드코딩
             "stk_cd": code,
             "ord_qty": str(order_quantity),
             "ord_uv": order_uv_param,
             "trde_tp": trde_tp,
-            "cond_uv": "" # Not handled in original signature
+            "cond_uv": ""  # 원래 시그니처에서 처리하지 않음
         }
 
         res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
@@ -343,7 +342,7 @@ class Kiwoom:
 
     def get_order(self, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
         """
-        Retrieves a list of unexecuted orders using the Kiwoom REST API (ka10075).
+        REST API(ka10075)를 사용해 미체결 주문 목록을 조회합니다.
         """
         path = "/api/dostk/acnt"
         api_id = "ka10075"
@@ -399,7 +398,7 @@ class Kiwoom:
                     '주문상태': item.get('ord_stt', '').strip(),
                     '주문수량': int(item.get('ord_qty', '0')),
                     '주문가격': int(item.get('ord_pric', '0')),
-                    '현재가': int(item.get('cur_prc', '0').replace('+', '').replace('-', '')), # Remove signs
+                    '현재가': int(item.get('cur_prc', '0').replace('+', '').replace('-', '')),  # 부호 제거
                     '주문구분': item.get('io_tp_nm', '').strip(),
                     '미체결수량': int(item.get('oso_qty', '0')),
                     '체결량': int(item.get('cntr_qty', '0')),
@@ -409,7 +408,7 @@ class Kiwoom:
                 }
                 all_unexecuted_orders.append(order_info)
 
-            # Update continuation flags from headers
+            # 헤더에서 연속 조회 관련 플래그를 갱신합니다
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
@@ -420,13 +419,13 @@ class Kiwoom:
                 logger.info(f"Loop limit ({max_loops}) reached for get_order, breaking")
                 break
             first = False
-            time.sleep(0.2) # To avoid rate limiting
+            time.sleep(0.2)  # 레이트 리밋 방지를 위해 대기
         self.order = {order['종목코드']: order for order in all_unexecuted_orders}
         return all_unexecuted_orders
 
     def get_balance(self, cont_yn='N', max_loops=10, max_retries=3, retry_delay=1):
         """
-        Retrieves account balance and holdings using the Kiwoom REST API (kt00018).
+        REST API(kt00018)를 사용해 계좌 잔액과 보유 종목(포지션)을 조회합니다.
         """
         path = "/api/dostk/acnt"
         api_id = "kt00018"
@@ -444,7 +443,7 @@ class Kiwoom:
             if next_key:
                 extra_headers["next-key"] = next_key
             
-            # Per-page request with retries only on rate-limit responses
+            # 페이지 단위 요청: 재시도는 요청 한도(rate-limit) 응답일 때만 수행
             page_res = None
             page_headers = None
             for attempt in range(max_retries):
@@ -484,7 +483,7 @@ class Kiwoom:
                 }
                 all_holdings.append((item.get('stk_cd', '').strip(), holding_info))
 
-            # Update continuation flags from headers
+            # 헤더에서 연속 조회 관련 플래그를 갱신합니다
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
@@ -495,17 +494,17 @@ class Kiwoom:
                 logger.info(f"Loop limit ({max_loops}) reached for get_balance, breaking")
                 break
             first = False
-            time.sleep(0.2) # To avoid rate limiting
+            time.sleep(0.2)  # 레이트 리밋 방지를 위해 대기
         self.balance = {code: info for code, info in all_holdings}
         return self.balance
 
     def set_real_reg(self, str_code_list, str_opt_type='0'):
         """
-        Registers for real-time data using WebSocket.
-        
-        Args:
-            str_code_list: ';'로 구분된 종목코드 문자열 (예: '005930;000660')
-            str_opt_type: '0' (기존 등록한 item/type은 해지 후 추가) 또는 '1' (기존 기존등록한 item/type은 유지 후 추가). 기본값은 '0'
+        WebSocket을 통해 실시간 데이터 구독을 등록합니다.
+
+        인자:
+            `str_code_list`: ';'로 구분된 종목코드 문자열 (예: '005930;000660')
+            `str_opt_type`: '0' (기존 등록 항목 해지 후 추가), '1' (기존 등록 유지 후 추가). 기본값 '0'
         """
         codes = str_code_list.split(';')
         
@@ -515,17 +514,17 @@ class Kiwoom:
             'opt_type': str_opt_type
         }
         
-        # In REST API, we subscribe by stock code and type (e.g., '0B' for execution)
-        # Let's assume we always want execution data, so type is '0B'.
+        # REST API에서는 종목 코드와 타입으로 구독합니다 (예: 체결 '0B')
+        # 여기서는 항상 체결 데이터만 구독한다고 가정합니다.
         
         subscription_data = [{
             'item': codes,
-            'type': ['0B'] # Assuming we always subscribe to '주식체결'
+            'type': ['0B']  # 항상 '주식체결' 구독을 가정
         }]
 
         message = {
             'trnm': 'REG',
-            'grp_no': '1', # Using a default group number
+            'grp_no': '1',  # 기본 그룹 번호 사용
             'refresh': str_opt_type, # '0' or '1'
             'data': subscription_data
         }
@@ -538,16 +537,16 @@ class Kiwoom:
 
     def _on_receive_real_data(self, s_code, real_type, real_data):
         """
-        This method is now called from the WebSocket message handler.
-        real_type is '0B' for execution data.
-        real_data is a dictionary of FIDs and values.
+        이 메서드는 이제 WebSocket 메시지 핸들러에서 호출됩니다.
+        `real_type`은 체결 데이터의 경우 '0B'입니다.
+        `real_data`는 FID와 값의 딕셔너리 형식입니다.
         """
         if real_type == "0B": # 주식체결
             if s_code not in self.universe_realtime_transaction_info:
                 self.universe_realtime_transaction_info[s_code] = {}
             
-            # Map FIDs from string to integer keys for consistency with original const.py if needed,
-            # but for now let's use string keys as received.
+            # 필요 시 원래의 const.py와 일관성을 위해 FID 문자열을 정수 키로 매핑할 수 있으나,
+            # 현재는 수신된 문자열 키를 그대로 사용합니다.
             self.universe_realtime_transaction_info[s_code].update({
                 "체결시간": real_data.get('20'),
                 "현재가": int(real_data.get('10', '0').replace('+', '').replace('-', '')),
@@ -562,7 +561,7 @@ class Kiwoom:
         # Add other real_type handlers if needed
 
     def _start_websocket_thread(self):
-        """Starts the WebSocket connection in a separate thread, ensures only one thread runs."""
+        """별도의 스레드에서 WebSocket 연결을 시작합니다. 중복 스레드 실행을 방지합니다."""
         if self.websocket_thread and self.websocket_thread.is_alive():
             logger.info("WebSocket thread already running.")
             return
@@ -572,10 +571,10 @@ class Kiwoom:
         self.websocket_thread.start()
 
     def _run_websocket_loop(self):
-        """Runs the asyncio event loop for the WebSocket. Handles stop event and loop reuse."""
+        """WebSocket용 asyncio 이벤트 루프를 실행합니다. 중지 이벤트와 루프 재사용을 처리합니다."""
         self.asyncio_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.asyncio_loop)
-        # create asyncio primitives tied to this loop
+        # 이 루프에 바인딩된 asyncio 원시 객체들을 생성합니다
         try:
             self._login_send_lock = asyncio.Lock()
         except Exception:
@@ -588,7 +587,7 @@ class Kiwoom:
             self.asyncio_loop.close()
 
     async def _websocket_main_loop(self):
-        """Main loop for WebSocket connection: handles connect, reconnect, and message processing."""
+        """WebSocket 연결의 메인 루프입니다: 연결/재연결 및 메시지 처리 로직을 담당합니다."""
         while not self._websocket_stop_event.is_set():
             try:
                 async with websockets.connect(self.socket_url) as websocket:
@@ -600,15 +599,15 @@ class Kiwoom:
                         await self._ensure_valid_token_async()
                     except Exception as e:
                         logger.warning(f"Token refresh before websocket login failed: {e}")
-                    # Send LOGIN directly on the main loop's connection path to avoid
-                    # racing with other code paths that may call `_send_websocket_message`.
+                    # 다른 경로에서 `_send_websocket_message`를 호출하며 경쟁 상태가 발생하지 않도록
+                    # 메인 루프의 연결 경로에서 직접 LOGIN을 전송합니다.
                     try:
                         if self._login_send_lock is not None:
                             async with self._login_send_lock:
                                 if not self._websocket_login_sent:
                                     await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
                                     self._websocket_login_sent = True
-                                    # logged_in will be set when LOGIN response arrives in _handle_websocket_message
+                                            # LOGIN 응답이 `_handle_websocket_message`에서 도착하면 logged_in이 설정됩니다
                                     self._websocket_logged_in = False
                         else:
                             # fallback: send without lock
@@ -619,7 +618,7 @@ class Kiwoom:
                     except Exception as e:
                         logger.exception(f"Failed to send LOGIN directly: {e}")
                     
-                    # 재연결 시 이전에 등록했던 실시간 데이터 재등록
+                    # 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다
                     await self._reregister_real_data()
                     
                     while self.is_websocket_connected and not self._websocket_stop_event.is_set():
@@ -671,7 +670,7 @@ class Kiwoom:
 
     async def _websocket_connect(self):
         try:
-            # Ensure token is valid before connecting
+            # 연결하기 전에 토큰이 유효한지 확인합니다
             try:
                 await self._ensure_valid_token_async()
             except Exception as e:
@@ -688,12 +687,12 @@ class Kiwoom:
             self.websocket = None
 
     async def _ensure_valid_token_async(self):
-        """Ensure `self.access_token` is valid; call blocking _authenticate in executor if expired.
+        """`self.access_token`이 유효한지 확인합니다. 만료되었으면 블로킹 되는 `_authenticate`를
+        쓰레드풀에서 실행하여 토큰을 갱신합니다.
 
-        This avoids blocking the asyncio event loop by running the synchronous
-        `_authenticate` in a threadpool.
+        이렇게 하면 동기 `_authenticate`가 asyncio 이벤트 루프를 차단하지 않도록 합니다.
         """
-        # If token is missing or will expire in the next few seconds, refresh it.
+        # 토큰이 없거나 짧은 시간 내에 만료될 예정이면 갱신합니다.
         try:
             if self.token_expires_in is None or self.token_expires_in < (get_korea_time() + datetime.timedelta(seconds=5)):
                 loop = asyncio.get_running_loop()
@@ -702,7 +701,7 @@ class Kiwoom:
             logger.exception(f"Token refresh failed in _ensure_valid_token_async: {e}")
 
     def stop_websocket(self):
-        """Stops the WebSocket thread and event loop safely."""
+        """WebSocket 스레드와 이벤트 루프를 안전하게 중지합니다."""
         self._websocket_stop_event.set()
         self.is_websocket_connected = False
         if self.asyncio_loop:
@@ -712,8 +711,8 @@ class Kiwoom:
             logger.info("WebSocket thread stopped.")
 
     async def _send_websocket_message(self, message):
-        """Sends a message to the WebSocket server. Handles reconnection if needed."""
-        # Ensure we have a JSON string and also keep a parsed object to inspect trnm
+        """WebSocket 서버로 메시지를 전송합니다. 필요 시 재연결과 사전 LOGIN 처리를 합니다."""
+        # 메시지가 문자열인지 확인하고, `trnm`을 검사하기 위해 파싱된 객체도 유지합니다
         if not isinstance(message, str):
             message = json.dumps(message)
         try:
@@ -727,8 +726,8 @@ class Kiwoom:
                 await self._websocket_connect()
             if self.is_websocket_connected and self.websocket:
                 try:
-                    # If not logged in yet and this is not an explicit LOGIN message,
-                    # send LOGIN first (once) to avoid server rejecting other messages.
+                    # 아직 로그인되어 있지 않고, 요청 메시지가 명시적인 LOGIN이 아닌 경우,
+                    # 서버가 다른 메시지를 거부하지 않도록 먼저 LOGIN을 한 번 전송합니다.
                     trnm = message_obj.get('trnm') if isinstance(message_obj, dict) else None
                     if trnm != 'LOGIN' and not self._websocket_logged_in:
                         try:
@@ -741,13 +740,13 @@ class Kiwoom:
                                 if not self._websocket_login_sent:
                                     await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
                                     self._websocket_login_sent = True
-                            # Wait up to ~1s for login to be confirmed
+                            # 로그인 확인을 위해 최대 약 1초(0.1s * 10회) 까지 대기합니다
                             for _ in range(10):
                                 if self._websocket_logged_in:
                                     break
                                 await asyncio.sleep(0.1)
                         except Exception as e:
-                            logger.warning(f"Pre-login send failed: {e}")
+                            logger.warning(f"사전 LOGIN 전송 실패: {e}")
 
                     await self.websocket.send(message)
                     send_attempted = True
@@ -757,13 +756,13 @@ class Kiwoom:
                     self.is_websocket_connected = False
                     self.websocket = None
             else:
-                logger.warning("WebSocket is still not connected after reconnect attempt.")
+                logger.warning("재연결 시도 이후에도 WebSocket이 연결되지 않았습니다.")
         if not send_attempted:
-            logger.error("Failed to send message via WebSocket after reconnection attempts.")
-            # Reset login_sent so next connect will attempt login again
+            logger.error("재연결 시도 후에도 WebSocket으로 메시지 전송에 실패했습니다.")
+            # 다음 연결에서 다시 LOGIN을 시도할 수 있도록 login_sent 플래그를 리셋합니다
             self._websocket_login_sent = False
     async def _handle_websocket_message(self, message):
-        """Handles incoming WebSocket messages."""
+        """들어오는 WebSocket 메시지를 처리합니다."""
         try:
             data = json.loads(message)
             trnm = data.get('trnm')
@@ -839,7 +838,7 @@ class Kiwoom:
             logger.exception(f"Error handling WebSocket message: {e}")
 
     def disconnect(self):
-        """Disconnects from the WebSocket."""
+        """WebSocket 연결을 종료합니다."""
         if self.is_websocket_connected and self.asyncio_loop:
             self.is_websocket_connected = False
             self.asyncio_loop.call_soon_threadsafe(asyncio.create_task, self.websocket.close())
