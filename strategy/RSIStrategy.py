@@ -71,7 +71,7 @@ class RSIStrategy(threading.Thread):
         """유니버스가 존재하는지 확인하고 없으면 생성하는 함수"""
         if not check_table_exist(self.strategy_name, 'universe'):
             universe_list = get_universe()
-            logger.debug("Universe list: %s", universe_list)
+            logger.info("Universe list: %s", universe_list)
             temp_universe = {}
             # 오늘 날짜를 20210101 형태로 지정
             now = get_korea_time().strftime("%Y%m%d")
@@ -175,7 +175,7 @@ class RSIStrategy(threading.Thread):
                     continue
 
                 for idx, code in enumerate(self.universe.keys()):
-                    logger.debug('[{}/{}_{}]'.format(idx + 1, len(self.universe), self.universe[code]['code_name']))
+                    logger.info('[{}/{}_{}]'.format(idx + 1, len(self.universe), self.universe[code]['code_name']))
                     time.sleep(0.5)
 
                     # (1)접수한 주문이 있는지 확인
@@ -186,7 +186,7 @@ class RSIStrategy(threading.Thread):
                         # (2.1) '미체결수량' 확인하여 미체결 종목인지 확인
                         if self.kiwoom.order[code]['미체결수량'] > 0:
                             # 미체결 주문이 있으면 다음 종목으로 (현재는 자동 체결 대기)
-                            logger.debug('미체결 수량 존재: %d', self.kiwoom.order[code]['미체결수량'])
+                            logger.info('미체결 수량 존재: %d', self.kiwoom.order[code]['미체결수량'])
                             continue
 
                     # (3)보유 종목인지 확인
@@ -234,7 +234,7 @@ class RSIStrategy(threading.Thread):
         
         # 실시간 체결 정보 확인
         if code not in self.kiwoom.universe_realtime_transaction_info.keys():
-            logger.debug("실시간 체결정보가 아직 없습니다: %s", code)
+            logger.info("실시간 체결정보가 아직 없습니다: %s", code)
             return None, None
         
         try:
@@ -443,7 +443,7 @@ class RSIStrategy(threading.Thread):
 
             # (7)주문 주식 수량이 1 미만이라면 매수 불가하므로 체크
             if quantity < 1:
-                logger.debug("주문 수량 부족 (quantity < 1): budget=%d, bid=%d", budget, bid)
+                logger.info("주문 수량 부족 (quantity < 1): budget=%d, bid=%d", budget, bid)
                 return
 
             # (8)예수금 충분한지 미리 체크 (수수료 포함)
@@ -481,7 +481,7 @@ class RSIStrategy(threading.Thread):
         """실시간으로 예수금을 동기화하는 함수"""
         try:
             self.deposit = self.kiwoom.get_deposit()
-            logger.debug("예수금 업데이트: %d", self.deposit)
+            logger.info("예수금 업데이트: %d", self.deposit)
         except Exception as e:
             logger.error("예수금 업데이트 실패: %s", e)
 

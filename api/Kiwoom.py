@@ -9,13 +9,14 @@ from util.time_helper import get_korea_time
 import asyncio
 import websockets
 import threading
-from util.logging_config import configure_logging, get_logger
+from util.logging_config import get_logger
 import logging
 
-# Rate limit message keyword used by Kiwoom API responses
+# Kiwoom API 응답에서 사용되는 요청 한도 초과 메시지 키워드
 RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
 
-configure_logging()
+# 참고: 로깅 설정은 애플리케이션(`main.py`)에서 환경변수 로드 후 초기화해야 합니다.
+# 모듈 임포트 시점에 `configure_logging()`을 호출하면 초기화 순서가 불명확해질 수 있으므로 지양합니다.
 logger = get_logger('kiwoom')
 
 
@@ -49,13 +50,13 @@ class Kiwoom:
 
         self._authenticate()
         self._start_websocket_thread()
-        # websocket login retry counter
+        # 웹소켓 로그인 재시도 카운터
         self._websocket_login_retries = 0
         self._websocket_max_login_retries = 3
-        # websocket login state guards to avoid duplicate LOGIN packets
+        # 중복 LOGIN 전송을 방지하기 위한 웹소켓 로그인 상태 플래그
         self._websocket_logged_in = False
         self._websocket_login_sent = False
-        # `asyncio.Lock` will be created within the websocket event loop thread
+        # `asyncio.Lock`은 웹소켓 이벤트 루프 스레드 내에서 생성됩니다
         self._login_send_lock = None
 
     def _authenticate(self):
@@ -75,11 +76,11 @@ class Kiwoom:
             if return_code := response_data.get("return_code") != 0:
                 logger.warning(response_data.get("return_msg"))
             self.access_token = response_data["token"]
-            # Make token_expires_in timezone-aware (Korea timezone) to match get_korea_time()
+                # `token_expires_in`을 한국 시간대(tz-aware)로 설정하여 `get_korea_time()`과 일치시킵니다
             try:
                 self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S').replace(tzinfo=ZoneInfo("Asia/Seoul"))
             except Exception:
-                # Fallback: set naive datetime if parsing fails, but prefer aware
+                # 폴백: 파싱에 실패하면 naive datetime으로 설정하되, 가능하면 timezone-aware를 사용합니다
                 self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S')
             logger.info("Authentication successful.")
         else:
@@ -90,8 +91,8 @@ class Kiwoom:
         """
         A wrapper for making API requests.
         """
-        # TODO: Add token refresh logic
-        # Use Korea timezone helper consistently
+        # TODO: 토큰 갱신 로직 추가
+        # 한국 시간 헬퍼(`get_korea_time()`)를 일관되게 사용
         if self.token_expires_in is None or self.token_expires_in < get_korea_time():
             self._authenticate()
 
@@ -108,11 +109,11 @@ class Kiwoom:
 
         if method == "POST":
             res = requests.post(url, headers=headers, data=json.dumps(params))
-        else: # GET
+        else:  # GET 요청 처리
             res = requests.get(url, headers=headers, params=params)
 
         if res.status_code == 200:
-            return res.json(), res.headers # Return headers for pagination
+            return res.json(), res.headers  # 페이징을 위한 헤더 반환
         else:
             logger.error(f"Request failed: {res.text}, {res.headers}")
             return res.json(), res.headers
@@ -196,20 +197,20 @@ class Kiwoom:
         while True:
             params = {
                 "stk_cd": code,
-                "base_dt": datetime.date.today().strftime("%Y%m%d"), # Start from today
-                "upd_stkpc_tp": "1" # Adjusted stock price
+                "base_dt": datetime.date.today().strftime("%Y%m%d"),  # 오늘부터 시작
+                "upd_stkpc_tp": "1"  # 수정된(조정된) 주가
             }
             extra_headers = {}
             if next_key:
                 extra_headers["next-key"] = next_key
 
-            # Per-page request with retries only on rate-limit responses
+            # 페이지 단위 요청: 재시도는 요청 한도(rate-limit) 응답일 때만 수행
             page_res = None
             page_headers = None
             for attempt in range(max_retries):
                 page_res, page_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
 
-                # Successful page response
+                # 페이지 요청 성공
                 if page_res and isinstance(page_res, dict) and "stk_dt_pole_chart_qry" in page_res:
                     break
 
