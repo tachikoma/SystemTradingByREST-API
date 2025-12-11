@@ -175,7 +175,7 @@ class RSIStrategy(threading.Thread):
                     continue
 
                 for idx, code in enumerate(self.universe.keys()):
-                    logger.info('[{}/{}_{}]'.format(idx + 1, len(self.universe), self.universe[code]['code_name']))
+                    logger.info('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name']))
                     time.sleep(0.5)
 
                     # (1)접수한 주문이 있는지 확인
@@ -343,7 +343,7 @@ class RSIStrategy(threading.Thread):
             
             ask = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매도호가']
 
-            order_result = self.kiwoom.send_order('send_sell_order', '1001', 2, code, quantity, ask, '00')
+            order_result = self.kiwoom.send_order('send_sell_order', '1001', 1, code, quantity, ask, '00')
 
             # 주문 결과 확인
             if order_result == 0:
@@ -455,7 +455,7 @@ class RSIStrategy(threading.Thread):
                 return
 
             # (9)계산을 바탕으로 지정가 매수 주문 접수
-            order_result = self.kiwoom.send_order('send_buy_order', '1001', 1, code, quantity, bid, '00')
+            order_result = self.kiwoom.send_order('send_buy_order', '1001', 0, code, quantity, bid, '00')
 
             # 주문 성공 시에만 예수금 차감
             if order_result == 0:  # 주문 성공

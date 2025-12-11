@@ -335,7 +335,7 @@ class Kiwoom:
                 '주문번호': res_data['ord_no'],
                 '주문상태': '접수' # Assuming initial state is '접수'
             }
-            return res_data['ord_no']
+            return 0  # 성공 코드
         else:
             logger.error(f"Order failed for code {code} or unexpected response: {res_data}")
             return None
