@@ -830,7 +830,7 @@ class Kiwoom:
                     
             else:
                 # 알 수 없는 메시지 타입 (디버깅용)
-                logger.debug(f"[DEBUG] Unknown message type '{trnm}': {data}")
+                logger.warning(f"Unknown message type '{trnm}': {data}")
                 
         except json.JSONDecodeError:
             logger.warning(f"Failed to decode WebSocket message: {message}")
