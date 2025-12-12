@@ -64,8 +64,8 @@ class RSIStrategy(threading.Thread):
 
         except Exception as e:
             logger.exception("Strategy init failed: %s", traceback.format_exc())
-            # LINE 메시지를 보내는 부분
-            # send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
+            # 텔레그램 메시지 전송
+            send_message(f"⚠️ 전략 초기화 실패\n{traceback.format_exc()}")
 
     def check_and_get_universe(self):
         """유니버스가 존재하는지 확인하고 없으면 생성하는 함수"""
@@ -204,8 +204,8 @@ class RSIStrategy(threading.Thread):
 
             except Exception as e:
                 logger.exception("Run loop exception: %s", traceback.format_exc())
-                # LINE 메시지를 보내는 부분
-                # send_message(traceback.format_exc(), RSI_STRATEGY_MESSAGE_TOKEN)
+                # 텔레그램 메시지 전송
+                send_message(f"⚠️ 전략 실행 중 오류\n{traceback.format_exc()}")
 
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
@@ -351,11 +351,11 @@ class RSIStrategy(threading.Thread):
                 # 매도 주문 성공 후 예수금 업데이트
                 self.update_deposit()
                 
-                message = "[{}]sell order is done! quantity:{}, ask:{}, order_result:{}".format(code, quantity, ask, order_result)
+                message = "📉 <b>매도 주문 체결</b>\n종목: {}\n수량: {}주\n가격: {:,}원".format(code, quantity, ask)
                 logger.info(message)
+                send_message(message)
             else:
                 logger.error("매도 주문 실패: code=%s, order_result=%s", code, order_result)
-            # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
             
         except KeyError as e:
             logger.error("매도 주문 처리 중 키 오류 (%s): %s", code, e)
@@ -465,14 +465,13 @@ class RSIStrategy(threading.Thread):
                 # _on_chejan_slot가 늦게 동작할 수도 있기 때문에 미리 약간의 정보를 넣어둠
                 self.kiwoom.order[code] = {'주문구분': '매수', '미체결수량': quantity}
                 
-                # LINE 메시지를 보내는 부분
-                message = "[{}]buy order is done! quantity:{}, bid:{}, order_result:{}, deposit:{}, get_balance_count:{}, get_buy_order_count:{}, balance_len:{}".format(
-                    code, quantity, bid, order_result, self.deposit, self.get_balance_count(), self.get_buy_order_count(),
-                    len(self.kiwoom.balance))
+                # 텔레그램 메시지 전송
+                message = "📈 <b>매수 주문 체결</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
+                    code, quantity, bid, self.deposit)
                 logger.info(message)
+                send_message(message)
             else:
                 logger.error("매수 주문 실패: code=%s, order_result=%s", code, order_result)
-            # send_message(message, RSI_STRATEGY_MESSAGE_TOKEN)
 
         # 매수신호가 없다면 종료
         else:

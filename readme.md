@@ -92,9 +92,42 @@ KIW_LOG_LEVEL=INFO
 KIW_LOG_ROTATION_MAX_BYTES=10485760
 KIW_LOG_BACKUP_COUNT=5
 
+# Telegram Bot (알림용)
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+TELEGRAM_CHAT_ID=your_telegram_chat_id
+
 # Integration tests gate
 # RUN_INTEGRATION=0
 ```
+
+### 텔레그램 봇 설정 (선택사항)
+전략 실행 중 매매 알림을 받으려면 텔레그램 봇을 설정하세요:
+
+1. **봇 생성**
+   - 텔레그램에서 [@BotFather](https://t.me/BotFather)와 대화
+   - `/newbot` 명령으로 새 봇 생성
+   - 봇 토큰 획득 (예: `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+2. **Chat ID 확인**
+   - 생성한 봇과 대화 시작 (메시지 1개 전송)
+   - 브라우저에서 다음 URL 접속:
+     ```
+     https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+     ```
+   - 응답에서 `"chat":{"id":123456789}` 부분의 숫자를 확인
+
+3. **.env에 설정**
+   ```env
+   TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+   TELEGRAM_CHAT_ID=123456789
+   ```
+
+4. **테스트**
+   ```bash
+   poetry run python scripts/test_telegram.py
+   ```
+
+텔레그램 설정이 없으면 알림이 전송되지 않지만 전략은 정상 작동합니다.
 
 환경 변수를 직접 설정해도 됩니다 (macOS/Linux 예시):
 ```bash
