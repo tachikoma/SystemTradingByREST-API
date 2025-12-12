@@ -176,13 +176,13 @@ class RSIStrategy(threading.Thread):
                     continue
 
                 for idx, code in enumerate(self.universe.keys()):
-                    logger.info('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name']))
+                    logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
                     time.sleep(0.5)
 
                     # (1)접수한 주문이 있는지 확인
                     if code in self.kiwoom.order.keys():
                         # (2)주문이 있음
-                        logger.info('접수 주문 %s', self.kiwoom.order[code])
+                        logger.info('접수 주문 %s(%s)', self.kiwoom.order[code], code)
 
                         # (2.1) '미체결수량' 확인하여 미체결 종목인지 확인
                         if self.kiwoom.order[code]['미체결수량'] > 0:
@@ -192,7 +192,7 @@ class RSIStrategy(threading.Thread):
 
                     # (3)보유 종목인지 확인
                     elif code in self.kiwoom.balance.keys():
-                        logger.info('보유 종목 %s', self.kiwoom.balance[code])
+                        logger.info('보유 종목 %s(%s)', self.kiwoom.balance[code], code)
                         # (6)매도 대상 확인
                         if self.check_sell_signal(code):
                             # (7)매도 대상이면 매도 주문 접수
