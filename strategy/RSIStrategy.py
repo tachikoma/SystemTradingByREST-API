@@ -346,16 +346,22 @@ class RSIStrategy(threading.Thread):
 
             order_result = self.kiwoom.send_order('send_sell_order', '1001', 1, code, quantity, ask, '00')
 
-            # 주문 결과 확인
-            if order_result == 0:
+            # 주문 결과 확인 (딕셔너리 형식)
+            if order_result.get('success'):
                 # 매도 주문 성공 후 예수금 업데이트
                 self.update_deposit()
                 
-                message = "📉 <b>매도 주문 체결</b>\n종목: {}\n수량: {}주\n가격: {:,}원".format(code, quantity, ask)
+                message = "📉 <b>매도 주문 체결</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원".format(
+                    code, order_result.get('order_no', 'N/A'), quantity, ask)
                 logger.info(message)
                 send_message(message)
             else:
-                logger.error("매도 주문 실패: code=%s, order_result=%s", code, order_result)
+                error_code = order_result.get('error_code', 'UNKNOWN')
+                error_message = order_result.get('error_message', '알 수 없는 오류')
+                error_msg = "❌ <b>매도 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
+                    code, quantity, ask, error_code, error_message)
+                logger.error("매도 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
+                send_message(error_msg)
             
         except KeyError as e:
             logger.error("매도 주문 처리 중 키 오류 (%s): %s", code, e)
@@ -458,20 +464,25 @@ class RSIStrategy(threading.Thread):
             # (9)계산을 바탕으로 지정가 매수 주문 접수
             order_result = self.kiwoom.send_order('send_buy_order', '1001', 0, code, quantity, bid, '00')
 
-            # 주문 성공 시에만 예수금 차감
-            if order_result == 0:  # 주문 성공
+            # 주문 성공 시에만 예수금 차감 (딕셔너리 형식)
+            if order_result.get('success'):  # 주문 성공
                 self.deposit = self.deposit - estimated_cost
                 
                 # _on_chejan_slot가 늦게 동작할 수도 있기 때문에 미리 약간의 정보를 넣어둠
                 self.kiwoom.order[code] = {'주문구분': '매수', '미체결수량': quantity}
                 
                 # 텔레그램 메시지 전송
-                message = "📈 <b>매수 주문 체결</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
-                    code, quantity, bid, self.deposit)
+                message = "📈 <b>매수 주문 체결</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
+                    code, order_result.get('order_no', 'N/A'), quantity, bid, self.deposit)
                 logger.info(message)
                 send_message(message)
             else:
-                logger.error("매수 주문 실패: code=%s, order_result=%s", code, order_result)
+                error_code = order_result.get('error_code', 'UNKNOWN')
+                error_message = order_result.get('error_message', '알 수 없는 오류')
+                error_msg = "❌ <b>매수 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
+                    code, quantity, bid, error_code, error_message)
+                logger.error("매수 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
+                send_message(error_msg)
 
         # 매수신호가 없다면 종료
         else:

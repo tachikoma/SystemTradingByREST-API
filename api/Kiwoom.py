@@ -286,8 +286,30 @@ class Kiwoom:
         `rqname`, `screen_no`는 REST API에서 직접 사용되지 않지만 호환성을 위해 유지합니다.
         `order_type`: 0=매수, 1=매도
         `order_classification`: '00'=지정가, '03'=시장가
+        
+        Returns:
+            dict: 주문 결과 딕셔너리
+                - success (bool): 주문 성공 여부
+                - order_no (str): 주문번호 (성공 시)
+                - code (str): 종목코드
+                - order_type (int): 주문유형 (0=매수, 1=매도)
+                - quantity (int): 주문수량
+                - price (int): 주문가격
+                - error_code (str): 에러코드 (실패 시)
+                - error_message (str): 에러메시지 (실패 시)
+                - raw_response (dict): API 원본 응답
         """
         path = "/api/dostk/ordr"
+        
+        # 기본 결과 딕셔너리
+        result = {
+            'success': False,
+            'code': code,
+            'order_type': order_type,
+            'quantity': order_quantity,
+            'price': order_price,
+            'order_classification': order_classification
+        }
         
         api_id_map = {
             0: "kt10000",  # 매수 주문
@@ -296,8 +318,13 @@ class Kiwoom:
         }
         api_id = api_id_map.get(order_type)
         if not api_id:
-            logger.warning(f"Unsupported order_type: {order_type}")
-            return None
+            error_msg = f"지원하지 않는 주문유형입니다: {order_type}"
+            logger.warning(error_msg)
+            result.update({
+                'error_code': 'INVALID_ORDER_TYPE',
+                'error_message': error_msg
+            })
+            return result
 
         # order_classification을 trde_tp로 매핑
         trde_tp_map = {
@@ -307,8 +334,13 @@ class Kiwoom:
         }
         trde_tp = trde_tp_map.get(order_classification)
         if not trde_tp:
-            logger.warning(f"Unsupported order_classification: {order_classification}")
-            return None
+            error_msg = f"지원하지 않는 주문구분입니다: {order_classification}"
+            logger.warning(error_msg)
+            result.update({
+                'error_code': 'INVALID_ORDER_CLASSIFICATION',
+                'error_message': error_msg
+            })
+            return result
 
         # 시장가 주문의 경우 ord_uv는 빈 문자열이어야 합니다
         order_uv_param = str(order_price) if trde_tp != "3" else ""
@@ -323,6 +355,7 @@ class Kiwoom:
         }
 
         res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
+        result['raw_response'] = res_data
 
         if res_data and isinstance(res_data, dict) and "ord_no" in res_data:
             logger.info(f"Order successful. Order number: {res_data['ord_no']}")
@@ -335,10 +368,22 @@ class Kiwoom:
                 '주문번호': res_data['ord_no'],
                 '주문상태': '접수' # Assuming initial state is '접수'
             }
-            return 0  # 성공 코드
+            result.update({
+                'success': True,
+                'order_no': res_data['ord_no']
+            })
+            return result
         else:
-            logger.error(f"Order failed for code {code} or unexpected response: {res_data}")
-            return None
+            # 실패 시 상세 에러 정보 추출
+            error_code = res_data.get('return_code', 'UNKNOWN') if res_data else 'NO_RESPONSE'
+            error_message = res_data.get('return_msg', '알 수 없는 오류') if res_data else 'API 응답 없음'
+            
+            logger.error(f"Order failed for code {code}: {error_code} - {error_message}")
+            result.update({
+                'error_code': str(error_code),
+                'error_message': error_message
+            })
+            return result
 
     def get_order(self, cont_yn='N', max_loops=200, max_retries=3, retry_delay=1):
         """
