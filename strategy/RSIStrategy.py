@@ -21,7 +21,7 @@ class RSIStrategy(threading.Thread):
     RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
     RSI_BUY_THRESHOLD = 5  # RSI 매수 기준
     PRICE_DROP_THRESHOLD = -2  # 가격 하락 기준 (%)
-    FEE_RATE = 1.00015  # 거래 수수료율
+    FEE_RATE = 1.035 # 모의투자 거래 수수료율 (참고로 키움 실전투자 자체 수수료 없고, 유관기관 수수료: KRX 0.0036396%, NXT: 0.0031833% 만 있음)
     
     def __init__(self, kiwoom):
         threading.Thread.__init__(self)
