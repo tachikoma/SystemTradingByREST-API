@@ -626,10 +626,10 @@ class Kiwoom:
         - 9201: 계좌번호
         - 9203: 주문번호
         - 9001: 종목코드
-        - 913: 주문상태 (접수/확인/체결)
+        - 913: 주문상태 (접수/확인/체결/취소/거부)
         - 900: 주문수량
-        - 902: 체결수량
-        - 903: 미체결수량
+        - 911: 체결수량
+        - 902: 미체결수량
         - 905: 주문구분 (+매수/-매도)
         - 10: 현재가
         """
@@ -638,15 +638,15 @@ class Kiwoom:
             code = real_data.get('9001', '').strip()
             order_status = real_data.get('913', '').strip()  # 접수/확인/체결
             order_qty = int(real_data.get('900', '0'))
-            exec_qty = int(real_data.get('902', '0'))  # 체결량
-            unexec_qty = int(real_data.get('903', '0'))  # 미체결수량
-            order_type = real_data.get('905', '').strip()  # +매수/-매도
+            exec_qty = int(real_data.get('911', '0'))  # 체결량
+            unexec_qty = int(real_data.get('902', '0'))  # 미체결수량
+            order_type = real_data.get('905', '').strip()  # +매수/-매도; 매도정정, 매수정정, 매수취소, 매도취소
             current_price = int(real_data.get('10', '0').replace('+', '').replace('-', ''))
             
             # 주문구분 정규화
-            if '매수' in order_type:
+            if '+매수' in order_type:
                 order_type_normalized = '매수'
-            elif '매도' in order_type:
+            elif '-매도' in order_type:
                 order_type_normalized = '매도'
             else:
                 order_type_normalized = order_type

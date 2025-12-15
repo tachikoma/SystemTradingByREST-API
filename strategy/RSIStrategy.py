@@ -485,7 +485,7 @@ class RSIStrategy(threading.Thread):
             if order_result.get('success'):  # 주문 성공
                 self.deposit = self.deposit - estimated_cost
                 
-                # _on_chejan_slot가 늦게 동작할 수도 있기 때문에 미리 약간의 정보를 넣어둠
+                # 주문체결 응답 처리가 늦게 동작할 수도 있기 때문에 미리 약간의 정보를 넣어둠
                 self.kiwoom.order[code] = {'주문구분': '매수', '미체결수량': quantity}
                 
                 # 텔레그램 메시지 전송
