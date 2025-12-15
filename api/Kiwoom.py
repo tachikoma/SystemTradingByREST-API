@@ -559,13 +559,20 @@ class Kiwoom:
             'opt_type': str_opt_type
         }
         
-        # REST API에서는 종목 코드와 타입으로 구독합니다 (예: 체결 '0B')
-        # 여기서는 항상 체결 데이터만 구독한다고 가정합니다.
+        # REST API에서는 종목 코드와 타입으로 구독합니다
+        # '0B': 주식체결 (시세 정보)
+        # '00': 주문체결 (주문/체결 정보)
         
-        subscription_data = [{
-            'item': codes,
-            'type': ['0B']  # 항상 '주식체결' 구독을 가정
-        }]
+        subscription_data = [
+            {
+                'item': codes,
+                'type': ['0B']  # 주식 실시간 체결 데이터
+            },
+            {
+                'item': [],  # 주문체결은 종목코드 불필요 (계좌 전체)
+                'type': ['00']  # 주문체결 실시간 데이터
+            }
+        ]
 
         message = {
             'trnm': 'REG',
@@ -603,7 +610,115 @@ class Kiwoom:
                 "누적거래량": int(real_data.get('13', '0'))
             })
             logger.debug(f"Real-time update for {s_code}: {self.universe_realtime_transaction_info[s_code]}")
+        
+        elif real_type == "00":  # 주문체결
+            # 주문체결 실시간 데이터를 처리하여 order와 balance를 동기화
+            self._handle_order_execution(s_code, real_data)
+            logger.info(f"Order execution received for {s_code}")
+        
         # Add other real_type handlers if needed
+
+    def _handle_order_execution(self, s_code, real_data):
+        """
+        주문체결 실시간 데이터를 처리하여 order와 balance를 업데이트합니다.
+        
+        주요 FID:
+        - 9201: 계좌번호
+        - 9203: 주문번호
+        - 9001: 종목코드
+        - 913: 주문상태 (접수/확인/체결)
+        - 900: 주문수량
+        - 902: 체결수량
+        - 903: 미체결수량
+        - 905: 주문구분 (+매수/-매도)
+        - 10: 현재가
+        """
+        try:
+            order_no = real_data.get('9203', '').strip()
+            code = real_data.get('9001', '').strip()
+            order_status = real_data.get('913', '').strip()  # 접수/확인/체결
+            order_qty = int(real_data.get('900', '0'))
+            exec_qty = int(real_data.get('902', '0'))  # 체결량
+            unexec_qty = int(real_data.get('903', '0'))  # 미체결수량
+            order_type = real_data.get('905', '').strip()  # +매수/-매도
+            current_price = int(real_data.get('10', '0').replace('+', '').replace('-', ''))
+            
+            # 주문구분 정규화
+            if '매수' in order_type:
+                order_type_normalized = '매수'
+            elif '매도' in order_type:
+                order_type_normalized = '매도'
+            else:
+                order_type_normalized = order_type
+            
+            logger.info(f"주문체결: [{code}] {order_type_normalized} {order_status} - 주문:{order_qty}, 체결:{exec_qty}, 미체결:{unexec_qty}")
+            
+            # order 딕셔너리 업데이트
+            if unexec_qty > 0:
+                # 미체결 수량이 있으면 order에 유지
+                self.order[code] = {
+                    '종목코드': code,
+                    '주문번호': order_no,
+                    '주문상태': order_status,
+                    '주문수량': order_qty,
+                    '현재가': current_price,
+                    '주문구분': order_type_normalized,
+                    '미체결수량': unexec_qty,
+                    '체결량': exec_qty
+                }
+            else:
+                # 완전 체결되면 order에서 제거
+                if code in self.order:
+                    del self.order[code]
+                    logger.info(f"주문 완전 체결로 order에서 제거: {code}")
+            
+            # balance 업데이트 (체결된 경우)
+            if exec_qty > 0:
+                if order_type_normalized == '매수':
+                    # 매수 체결: balance에 추가 또는 수량 증가
+                    if code in self.balance:
+                        # 기존 보유 종목에 추가 매수
+                        old_qty = self.balance[code]['보유수량']
+                        old_price = self.balance[code]['매입가']
+                        new_qty = old_qty + exec_qty
+                        # 평균 매입가 계산
+                        new_avg_price = ((old_qty * old_price) + (exec_qty * current_price)) // new_qty
+                        self.balance[code]['보유수량'] = new_qty
+                        self.balance[code]['매입가'] = new_avg_price
+                        self.balance[code]['현재가'] = current_price
+                        logger.info(f"매수 체결로 balance 업데이트: {code} 수량 {old_qty}->{new_qty}, 평균가 {new_avg_price}")
+                    else:
+                        # 신규 매수
+                        self.balance[code] = {
+                            '종목명': real_data.get('302', '').strip(),
+                            '보유수량': exec_qty,
+                            '매입가': current_price,
+                            '수익률': 0.0,
+                            '현재가': current_price,
+                            '매입금액': exec_qty * current_price,
+                            '매매가능수량': exec_qty
+                        }
+                        logger.info(f"신규 매수 체결로 balance 추가: {code} 수량 {exec_qty}, 가격 {current_price}")
+                
+                elif order_type_normalized == '매도':
+                    # 매도 체결: balance에서 수량 감소 또는 제거
+                    if code in self.balance:
+                        old_qty = self.balance[code]['보유수량']
+                        new_qty = old_qty - exec_qty
+                        if new_qty <= 0:
+                            # 전량 매도
+                            del self.balance[code]
+                            logger.info(f"전량 매도 체결로 balance에서 제거: {code}")
+                        else:
+                            # 일부 매도
+                            self.balance[code]['보유수량'] = new_qty
+                            self.balance[code]['매매가능수량'] = new_qty
+                            self.balance[code]['현재가'] = current_price
+                            logger.info(f"일부 매도 체결로 balance 업데이트: {code} 수량 {old_qty}->{new_qty}")
+                    
+        except Exception as e:
+            logger.error(f"주문체결 데이터 처리 중 오류: {e}")
+            logger.debug(f"real_data: {real_data}")
 
     def _start_websocket_thread(self):
         """별도의 스레드에서 WebSocket 연결을 시작합니다. 중복 스레드 실행을 방지합니다."""

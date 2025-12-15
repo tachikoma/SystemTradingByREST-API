@@ -37,6 +37,10 @@ class RSIStrategy(threading.Thread):
         # 초기화 함수 성공 여부 확인 변수
         self.is_init_success = False
 
+        # 주기적 동기화 관련 변수
+        self.last_sync_time = 0
+        self.SYNC_INTERVAL = 300  # 5분마다 동기화 (300초)
+
         self.init_strategy()
 
     def init_strategy(self):
@@ -167,6 +171,19 @@ class RSIStrategy(threading.Thread):
         """실질적 수행 역할을 하는 함수"""
         while self.is_init_success:
             try:
+                # 주기적 동기화 체크 (웹소켓 실시간 데이터 보완용)
+                current_time = time.time()
+                if current_time - self.last_sync_time >= self.SYNC_INTERVAL:
+                    logger.info("=== 주기적 동기화 시작 ===")
+                    try:
+                        self.kiwoom.get_order()
+                        self.kiwoom.get_balance()
+                        self.update_deposit()
+                        self.last_sync_time = current_time
+                        logger.info("=== 주기적 동기화 완료 ===")
+                    except Exception as sync_error:
+                        logger.error("주기적 동기화 실패: %s", sync_error)
+                
                 # 현재 한국 시간 확인
                 logger.info("Korea time: %s", get_korea_time())
                 # (0)장중인지 확인
