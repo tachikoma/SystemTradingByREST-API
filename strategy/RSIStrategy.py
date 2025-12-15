@@ -171,6 +171,14 @@ class RSIStrategy(threading.Thread):
         """실질적 수행 역할을 하는 함수"""
         while self.is_init_success:
             try:
+                # 현재 한국 시간 확인
+                logger.info("Korea time: %s", get_korea_time())
+                # (0)장중인지 확인
+                if not check_transaction_open():
+                    logger.info("장시간이 아니므로 5분간 대기합니다.")
+                    time.sleep(5 * 60)
+                    continue
+
                 # 주기적 동기화 체크 (웹소켓 실시간 데이터 보완용)
                 current_time = time.time()
                 if current_time - self.last_sync_time >= self.SYNC_INTERVAL:
@@ -183,14 +191,6 @@ class RSIStrategy(threading.Thread):
                         logger.info("=== 주기적 동기화 완료 ===")
                     except Exception as sync_error:
                         logger.error("주기적 동기화 실패: %s", sync_error)
-                
-                # 현재 한국 시간 확인
-                logger.info("Korea time: %s", get_korea_time())
-                # (0)장중인지 확인
-                if not check_transaction_open():
-                    logger.info("장시간이 아니므로 5분간 대기합니다.")
-                    time.sleep(5 * 60)
-                    continue
 
                 for idx, code in enumerate(self.universe.keys()):
                     logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
