@@ -365,10 +365,10 @@ class RSIStrategy(threading.Thread):
 
             # 주문 결과 확인 (딕셔너리 형식)
             if order_result.get('success'):
-                # 매도 주문 성공 후 예수금 업데이트
-                self.update_deposit()
+                # send_order()에서 이미 self.kiwoom.order[code]를 설정함
+                # 웹소켓 응답이 오면 자동으로 업데이트되고, 체결 완료 시 자동 삭제됨
                 
-                message = "📉 <b>매도 주문 체결</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원".format(
+                message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원".format(
                     code, order_result.get('order_no', 'N/A'), quantity, ask)
                 logger.info(message)
                 send_message(message)
@@ -485,11 +485,11 @@ class RSIStrategy(threading.Thread):
             if order_result.get('success'):  # 주문 성공
                 self.deposit = self.deposit - estimated_cost
                 
-                # 주문체결 응답 처리가 늦게 동작할 수도 있기 때문에 미리 약간의 정보를 넣어둠
-                self.kiwoom.order[code] = {'주문구분': '매수', '미체결수량': quantity}
+                # send_order()에서 이미 self.kiwoom.order[code]를 설정했으므로
+                # 여기서는 중복 설정하지 않음 (웹소켓 응답이 오면 자동 업데이트됨)
                 
                 # 텔레그램 메시지 전송
-                message = "📈 <b>매수 주문 체결</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
+                message = "📈 <b>매수 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
                     code, order_result.get('order_no', 'N/A'), quantity, bid, self.deposit)
                 logger.info(message)
                 send_message(message)

@@ -359,14 +359,18 @@ class Kiwoom:
 
         if res_data and isinstance(res_data, dict) and "ord_no" in res_data:
             logger.info(f"Order successful. Order number: {res_data['ord_no']}")
-            # Update self.order with the new order details (simplified for now)
-            self.order[res_data['ord_no']] = {
+            # Update self.order with the new order details
+            # 키를 종목코드로 사용하여 RSIStrategy 및 _handle_order_execution과 일관성 유지
+            order_type_str = '매수' if order_type == 0 else '매도'
+            self.order[code] = {
                 '종목코드': code,
                 '주문수량': order_quantity,
                 '주문가격': order_price,
-                '주문구분': order_type,
+                '주문구분': order_type_str,  # 문자열로 통일
                 '주문번호': res_data['ord_no'],
-                '주문상태': '접수' # Assuming initial state is '접수'
+                '주문상태': '접수',
+                '미체결수량': order_quantity,  # 초기에는 전량 미체결
+                '체결량': 0
             }
             result.update({
                 'success': True,
