@@ -211,8 +211,8 @@ def main():
         rsi_sell_threshold=80,
         rsi_buy_threshold=5,
         price_drop_threshold=-2,
-        commission_rate=0.00015,
-        tax_rate=0.0025
+        commission_rate=0.00035,
+        tax_rate=0.0015
     )
     
     # 3) 백테스트 실행

@@ -27,7 +27,7 @@ class BacktestEngine:
         rsi_buy_threshold: float = 5,  # RSI 매수 기준
         price_drop_threshold: float = -2,  # 가격 하락 기준 (%)
         commission_rate: float = 0.0035,  # 모의 투자 거래 수수료율 (편도 0.35%)
-        tax_rate: float = 0.0025,  # 거래세 (매도 시만 0.25%)
+        tax_rate: float = 0.0015,  # 거래세 (매도 시만 0.15%)
     ):
         self.initial_capital = initial_capital
         self.max_holdings = max_holdings
