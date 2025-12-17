@@ -1,4 +1,5 @@
 import time
+import os
 from api.Kiwoom import Kiwoom
 from util.make_up_universe import *
 from util.db_helper import *
@@ -21,7 +22,6 @@ class RSIStrategy(threading.Thread):
     RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
     RSI_BUY_THRESHOLD = 5  # RSI 매수 기준
     PRICE_DROP_THRESHOLD = -2  # 가격 하락 기준 (%)
-    FEE_RATE = 1.0035 # 모의투자 거래 수수료율 0.35% (참고로 키움 실전투자 자체 수수료 없고, 유관기관 수수료: KRX 0.0036396%, NXT: 0.0031833% 만 있음)
     
     def __init__(self, kiwoom):
         threading.Thread.__init__(self)
@@ -40,6 +40,20 @@ class RSIStrategy(threading.Thread):
         # 주기적 동기화 관련 변수
         self.last_sync_time = 0
         self.SYNC_INTERVAL = 300  # 5분마다 동기화 (300초)
+        
+        # 거래 비용 설정 (.env 파일에서 읽어오기)
+        # 증권사 수수료율 (매수/매도 동일, 기본값: 0.35%)
+        fee_percent = float(os.getenv('TRADING_FEE_PERCENT', '0.35'))
+        self.BUY_FEE_RATE = 1 + (fee_percent / 100)
+        
+        # 증권거래세 (매도 시만 적용, 기본값: 0.15%)
+        tax_percent = float(os.getenv('TRADING_TAX_PERCENT', '0.15'))
+        self.SELL_FEE_RATE = 1 + ((fee_percent + tax_percent) / 100)
+        
+        logger.info("거래 비용 설정: 수수료=%.4f%%, 증권거래세=%.4f%% (매도시)", 
+                   fee_percent, tax_percent)
+        logger.info("계산된 비율: BUY_FEE_RATE=%.6f (%.2f%%), SELL_FEE_RATE=%.6f (%.2f%%)", 
+                   self.BUY_FEE_RATE, fee_percent, self.SELL_FEE_RATE, fee_percent + tax_percent)
 
         self.init_strategy()
 
@@ -365,11 +379,16 @@ class RSIStrategy(threading.Thread):
 
             # 주문 결과 확인 (딕셔너리 형식)
             if order_result.get('success'):
+                # 매도 체결 시 예상 수령액 계산 (수수료 + 증권거래세 차감)
+                sell_amount = quantity * ask
+                estimated_proceeds = math.floor(sell_amount / self.SELL_FEE_RATE)  # 실제 수령액
+                total_fee = sell_amount - estimated_proceeds  # 총 비용
+                
                 # send_order()에서 이미 self.kiwoom.order[code]를 설정함
                 # 웹소켓 응답이 오면 자동으로 업데이트되고, 체결 완료 시 자동 삭제됨
                 
-                message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원".format(
-                    code, order_result.get('order_no', 'N/A'), quantity, ask)
+                message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)".format(
+                    code, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee)
                 logger.info(message)
                 send_message(message)
             else:
@@ -470,9 +489,9 @@ class RSIStrategy(threading.Thread):
                 logger.info("주문 수량 부족 (quantity < 1): budget=%d, bid=%d", budget, bid)
                 return
 
-            # (8)예수금 충분한지 미리 체크 (수수료 포함)
+            # (8)예수금 충분한지 미리 체크 (매수 수수료 포함)
             amount = quantity * bid
-            estimated_cost = math.floor(amount * self.FEE_RATE)
+            estimated_cost = math.floor(amount * self.BUY_FEE_RATE)
             
             if self.deposit < estimated_cost:
                 logger.warning("예수금 부족: deposit=%d, estimated_cost=%d", self.deposit, estimated_cost)
