@@ -16,12 +16,32 @@ RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를
 DB에 저장된 유니버스와 가격 데이터를 사용하여 백테스트를 실행합니다:
 
 ```bash
-python -m backtest.run_backtest
+# 프로젝트 루트 디렉토리에서 실행
+# 기본: DB의 전체 데이터 기간 사용
+poetry run python -m backtest.run_backtest
+
+# 최근 5년 데이터만 사용
+poetry run python -m backtest.run_backtest --years 5
+
+# 특정 기간 지정
+poetry run python -m backtest.run_backtest --start 20200101 --end 20231231
+
+# 다른 DB 사용
+poetry run python -m backtest.run_backtest --db my_backtest_data
 ```
 
-### 2. 커스텀 백테스트 실행
+### 파라미터 옵션
 
-Python 스크립트에서 직접 백테스트를 설정하고 실행할 수 있습니다:
+- `--years N`: 최근 N년 데이터 사용 (예: `--years 5`)
+- `--start YYYYMMDD`: 백테스트 시작 날짜 (예: `--start 20200101`)
+- `--end YYYYMMDD`: 백테스트 종료 날짜 (예: `--end 20231231`, 기본값: 오늘)
+- `--db DB_NAME`: 사용할 DB 이름 (기본값: `backtest_data`)
+
+**참고**: 파라미터를 지정하지 않으면 DB에 저장된 데이터의 전체 기간을 사용합니다.
+
+### 2. 프로그램적 사용
+
+Python 코드에서 직접 백테스트를 설정하고 실행할 수 있습니다:
 
 ```python
 from backtest import BacktestEngine

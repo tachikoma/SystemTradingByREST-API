@@ -191,12 +191,15 @@ class Kiwoom:
         }
 
         next_key = ""
-        first = True
         loop_count = 0
-        while True:
+        base_dt = datetime.date.today().strftime("%Y%m%d")  # 첫 조회는 오늘부터
+        
+        while loop_count < max_loops:
+            loop_count += 1
+            
             params = {
                 "stk_cd": code,
-                "base_dt": datetime.date.today().strftime("%Y%m%d"),  # 오늘부터 시작
+                "base_dt": base_dt,
                 "upd_stkpc_tp": "1"  # 수정된(조정된) 주가
             }
             extra_headers = {}
@@ -236,6 +239,7 @@ class Kiwoom:
                 break
 
             # 수신된 항목을 처리합니다
+            oldest_date = None
             for item in page_res["stk_dt_pole_chart_qry"]:
                 all_ohlcv_data['date'].append(item['dt'])
                 all_ohlcv_data['open'].append(int(item['open_pric']))
@@ -243,21 +247,31 @@ class Kiwoom:
                 all_ohlcv_data['low'].append(int(item['low_pric']))
                 all_ohlcv_data['close'].append(int(item['cur_prc']))
                 all_ohlcv_data['volume'].append(int(item['trde_qty']))
+                # 가장 오래된 날짜 추적 (리스트의 마지막 항목이 가장 오래된 날짜)
+                oldest_date = item['dt']
 
             # 헤더에서 연속 조회 관련 플래그를 갱신합니다
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
 
-            # do-while 형태: 최소 1회 실행, cont_yn이 'Y'가 아니면 종료
-            if not first and cont_yn != "Y":
+            # cont_yn이 'Y'가 아니면 더 이상 데이터가 없으므로 종료
+            if cont_yn != "Y":
+                logger.info(f"No more data available for code {code} (loop {loop_count}/{max_loops})")
                 break
-            loop_count += 1
-            if loop_count >= max_loops:
-                logger.info(f"Loop limit ({max_loops}) reached get_price_data, breaking for code {code}")
-                break
-            first = False
-            time.sleep(0.2)  # 레이트 리밋 방지를 위해 대기
+            
+            # 다음 조회를 위해 base_dt를 가장 오래된 날짜의 전날로 설정
+            if oldest_date:
+                try:
+                    oldest_dt = datetime.datetime.strptime(oldest_date, "%Y%m%d")
+                    prev_day = oldest_dt - datetime.timedelta(days=1)
+                    base_dt = prev_day.strftime("%Y%m%d")
+                    logger.debug(f"Next base_dt for {code}: {base_dt} (previous oldest: {oldest_date})")
+                except Exception as e:
+                    logger.warning(f"Failed to calculate next base_dt for {code}: {e}")
+            
+            # 레이트 리밋 방지를 위해 대기
+            time.sleep(0.2)
 
         df = pd.DataFrame(all_ohlcv_data, columns=['open', 'high', 'low', 'close', 'volume'], index=all_ohlcv_data['date'])
         return df[::-1]

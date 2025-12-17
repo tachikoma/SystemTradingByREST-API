@@ -142,3 +142,4 @@ chart*.py
 IDEA.py
 .DS_Store
 .vscode
+backtest/output
