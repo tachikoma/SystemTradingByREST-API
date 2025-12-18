@@ -2,8 +2,10 @@ import requests
 from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
+import logging
+import os
 
 BASE_URL = 'https://finance.naver.com/sise/sise_market_sum.nhn?sosok='
 CODES = [0, 1]  # KOSPI:0, KOSDAQ:1
@@ -11,6 +13,28 @@ START_PAGE = 1
 fields = []
 now = datetime.now(ZoneInfo("Asia/Seoul"))
 formattedDate = now.strftime("%Y%m%d")
+
+logger = logging.getLogger(__name__)
+
+
+def is_market_hours():
+    """
+    장시간인지 확인하는 함수
+    평일 09:00 ~ 15:30 사이를 장시간으로 판단
+    """
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    # 주말 체크
+    if now.weekday() >= 5:  # 5=토요일, 6=일요일
+        return False
+    
+    # 장시작: 09:00, 장마감: 15:30
+    market_open = time(9, 0)
+    market_close = time(15, 30)
+    
+    current_time = now.time()
+    
+    return market_open <= current_time <= market_close
 
 
 def execute_crawler():
@@ -98,8 +122,29 @@ def crawler(code, page):
 
 
 def get_universe():
-    # 크롤링 결과를 얻어옴
-    df = execute_crawler()
+    """
+    유니버스를 생성하는 함수
+    장시간이 아니고 NaverFinance.xlsx 파일이 있으면 기존 파일 사용
+    장시간이거나 파일이 없으면 크롤링 실행
+    """
+    excel_file = 'NaverFinance.xlsx'
+    
+    # 장시간이 아니고 기존 파일이 있으면 파일 로드
+    if not is_market_hours() and os.path.exists(excel_file):
+        logger.info(f"장시간이 아닙니다. 기존 {excel_file} 파일을 사용합니다.")
+        print(f"장시간이 아닙니다. 기존 {excel_file} 파일을 사용합니다.")
+        df = pd.read_excel(excel_file, index_col=0)
+    else:
+        # 장시간이거나 파일이 없으면 크롤링 실행
+        if is_market_hours():
+            logger.info("장시간입니다. 크롤링을 실행합니다.")
+            print("장시간입니다. 크롤링을 실행합니다.")
+        else:
+            logger.info(f"{excel_file} 파일이 없습니다. 크롤링을 실행합니다.")
+            print(f"{excel_file} 파일이 없습니다. 크롤링을 실행합니다.")
+        
+        # 크롤링 결과를 얻어옴
+        df = execute_crawler()
 
     mapping = {',': '', 'N/A': '0'}
     df.replace(mapping, regex=True, inplace=True)

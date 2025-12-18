@@ -79,18 +79,15 @@ class HistoricalDataFetcher:
             logger.warning(f"매칭되지 않은 종목 수: {len(unmatched)}")
             logger.warning(f"매칭되지 않은 종목 샘플 (처음 10개): {unmatched[:10]}")
         
-        # 유니버스를 DB에 저장
-        if not check_table_exist(self.db_name, 'universe'):
-            now = datetime.now().strftime("%Y%m%d")
-            universe_df = pd.DataFrame({
-                'code': self.universe.keys(),
-                'code_name': self.universe.values(),
-                'created_at': [now] * len(self.universe.keys())
-            })
-            insert_df_to_db(self.db_name, 'universe', universe_df)
-            logger.info("유니버스를 DB에 저장했습니다.")
-        else:
-            logger.info("유니버스 테이블이 이미 존재합니다.")
+        # 유니버스를 DB에 저장 (기존 테이블이 있어도 덮어쓰기)
+        now = datetime.now().strftime("%Y%m%d")
+        universe_df = pd.DataFrame({
+            'code': self.universe.keys(),
+            'code_name': self.universe.values(),
+            'created_at': [now] * len(self.universe.keys())
+        })
+        insert_df_to_db(self.db_name, 'universe', universe_df)
+        logger.info("유니버스를 DB에 저장했습니다.")
             
         return self.universe
     
@@ -233,7 +230,7 @@ def main():
     
     # Kiwoom API 초기화 (mock=True로 설정)
     logger.info("Kiwoom API 초기화 중...")
-    kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=True)
+    kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=False)
     logger.info("Kiwoom API 초기화 완료")
     
     # 데이터 수집기 생성
