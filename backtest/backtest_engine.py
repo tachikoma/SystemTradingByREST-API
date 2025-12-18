@@ -42,12 +42,17 @@ class BacktestEngine:
         self.commission_rate = commission_rate
         self.tax_rate = tax_rate
         
+        # Universe 재구성 설정
+        self.universe_update_days = 30  # 30일마다 재구성
+        self.enable_universe_rebalancing = True  # 재구성 활성화 여부
+        
         # 포트폴리오 상태
         self.cash = initial_capital
         self.holdings: Dict[str, Dict] = {}  # {code: {'quantity': int, 'avg_price': float}}
         
         # 거래 기록
         self.trades: List[Dict] = []
+        self.universe_changes: List[Dict] = []  # Universe 변경 기록
         self.daily_portfolio_value: List[Dict] = []
         
     def calculate_rsi(self, prices: pd.Series, period: int = None) -> pd.Series:
@@ -73,6 +78,58 @@ class BacktestEngine:
         rsi = rsi.fillna(0)
         
         return rsi
+    
+    def select_universe(self, price_data: Dict[str, pd.DataFrame], date: str, top_n: int = 100) -> List[str]:
+        """특정 날짜의 universe 선택 (간단한 모멘텀 기반)
+        
+        Args:
+            price_data: 전체 가격 데이터
+            date: 기준 날짜
+            top_n: 선택할 종목 수
+            
+        Returns:
+            선택된 종목 코드 리스트
+        """
+        scores = []
+        
+        for code, df in price_data.items():
+            if date not in df.index:
+                continue
+            
+            idx = df.index.get_loc(date)
+            
+            # 최소 60일 데이터 필요 (MA60 계산용)
+            if idx < 60:
+                continue
+            
+            try:
+                # 현재 가격
+                current_price = df.iloc[idx]['close']
+                
+                # 20일과 60일 평균 변화율 (모멘텀)
+                ma20 = df.iloc[max(0, idx-19):idx+1]['close'].mean()
+                ma60 = df.iloc[max(0, idx-59):idx+1]['close'].mean()
+                
+                # 간단한 점수: 모멘텀 + 추세
+                if ma20 > ma60 and current_price > ma60:
+                    # 60일 수익률
+                    price_60d_ago = df.iloc[max(0, idx-60)]['close']
+                    momentum = (current_price - price_60d_ago) / price_60d_ago * 100
+                    
+                    scores.append({
+                        'code': code,
+                        'score': momentum  # 모멘텀 점수
+                    })
+            except Exception as e:
+                continue
+        
+        # 점수별 정렬
+        scores.sort(key=lambda x: x['score'], reverse=True)
+        
+        # 상위 N개 선택
+        selected = [item['code'] for item in scores[:top_n]]
+        
+        return selected
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """기술적 지표 계산
@@ -396,14 +453,62 @@ class BacktestEngine:
         
         logger.info(f"백테스트 기간: {trading_dates[0]} ~ {trading_dates[-1]}")
         logger.info(f"총 거래일: {len(trading_dates)}일")
-        logger.info(f"유니버스 종목 수: {len(processed_data)}")
+        logger.info(f"초기 종목 수: {len(processed_data)}")
+        logger.info(f"Universe 재구성: {'ON' if self.enable_universe_rebalancing else 'OFF'} ({self.universe_update_days}일마다)")
+        
+        # Universe 관리
+        current_universe = list(processed_data.keys())  # 초기 universe
+        last_universe_update = None
         
         # 각 거래일마다 시뮬레이션
-        for date in trading_dates:
+        for idx, date in enumerate(trading_dates):
+            # Universe 재구성 체크
+            if self.enable_universe_rebalancing:
+                if last_universe_update is None:
+                    last_universe_update = datetime.strptime(date, '%Y%m%d')
+                else:
+                    current_date = datetime.strptime(date, '%Y%m%d')
+                    days_since_update = (current_date - last_universe_update).days
+                    
+                    if days_since_update >= self.universe_update_days:
+                        # Universe 재선정
+                        old_universe = set(current_universe)
+                        new_universe = self.select_universe(processed_data, date, top_n=100)
+                        
+                        # 보유 종목은 유지
+                        holding_codes = set(self.holdings.keys())
+                        new_universe_set = set(new_universe)
+                        final_universe = list(new_universe_set | holding_codes)
+                        
+                        current_universe = final_universe
+                        last_universe_update = current_date
+                        
+                        # Universe 변경 기록
+                        added = new_universe_set - old_universe
+                        removed = old_universe - new_universe_set - holding_codes
+                        
+                        self.universe_changes.append({
+                            'date': date,
+                            'total_count': len(final_universe),
+                            'added_count': len(added),
+                            'removed_count': len(removed),
+                            'holdings_kept': len(holding_codes)
+                        })
+                        
+                        logger.info(f"{date}: Universe 재구성 - 총 {len(final_universe)}개 (추가: {len(added)}, 제거: {len(removed)}, 보유 유지: {len(holding_codes)})")
             # 1) 매도 신호 확인 (보유 종목)
             codes_to_sell = []
             for code in list(self.holdings.keys()):
                 if code not in processed_data:
+                    continue
+                
+                # Universe에서 제외된 종목은 강제 매도 (재구성 활성화 시)
+                if self.enable_universe_rebalancing and code not in current_universe:
+                    df = processed_data[code]
+                    if date in df.index:
+                        price = df.loc[date, 'close']
+                        codes_to_sell.append((code, price))
+                        logger.info(f"{date}: {code} - Universe에서 제외되어 강제 매도")
                     continue
                 
                 df = processed_data[code]
@@ -427,6 +532,10 @@ class BacktestEngine:
                 for code, df in processed_data.items():
                     # 이미 보유 중이면 스킵
                     if code in self.holdings:
+                        continue
+                    
+                    # 현재 Universe에 없는 종목은 스킵 (재구성 활성화 시)
+                    if self.enable_universe_rebalancing and code not in current_universe:
                         continue
                     
                     buy_signal, buy_price = self.check_buy_signal(
@@ -511,7 +620,10 @@ class BacktestEngine:
             'win_rate': win_rate,
             'avg_profit_rate': avg_profit_rate,
             'total_profit': sum([t.get('profit', 0) for t in sell_trades]),
-            'daily_values': df
+            'daily_values': df,
+            'universe_rebalancing': self.enable_universe_rebalancing,
+            'universe_changes': self.universe_changes,
+            'rebalance_count': len(self.universe_changes)
         }
         
         return results

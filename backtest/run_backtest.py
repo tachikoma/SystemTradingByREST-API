@@ -124,6 +124,21 @@ def print_results(results: dict):
     print(f"승률:               {results['win_rate']:>15.2f} %")
     print(f"평균 수익률:        {results['avg_profit_rate']:>15.2f} %")
     print(f"총 실현 손익:       {results['total_profit']:>15,.0f} 원")
+    
+    # Universe 재구성 정보 출력
+    if results.get('universe_rebalancing', False):
+        print("-"*60)
+        print(f"Universe 재구성:    활성화 ({results['rebalance_count']}회)")
+        if results['universe_changes']:
+            print("\nUniverse 재구성 이력:")
+            for change in results['universe_changes']:
+                print(f"  {change['date']}: 총 {change['total_count']}개 "
+                      f"(추가: {change['added_count']}, 제거: {change['removed_count']}, "
+                      f"보유 유지: {change['holdings_kept']})")
+    else:
+        print("-"*60)
+        print(f"Universe 재구성:    비활성화 (고정 Universe)")
+    
     print("="*60 + "\n")
 
 
@@ -279,6 +294,9 @@ def main():
         commission_rate=0.00015,
         tax_rate=0.0015
     )
+    
+    # Universe 재구성 비활성화 (실전과 동일한 고정 universe 사용)
+    engine.enable_universe_rebalancing = False
     
     # 3) 백테스트 실행 - 기간 설정
     if args.start:

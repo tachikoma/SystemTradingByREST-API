@@ -42,6 +42,11 @@ class RSIStrategy(threading.Thread):
         self.last_sync_time = 0
         self.SYNC_INTERVAL = 300  # 5분마다 동기화 (300초)
         
+        # Universe 재구성 관련 변수
+        self.last_universe_update = get_korea_time()
+        self.UNIVERSE_UPDATE_DAYS = 30  # 30일마다 재구성
+        self.universe_updated_today = False
+        
         # 거래 비용 설정 (.env 파일에서 읽어오기)
         # 증권사 수수료율 (매수/매도 동일, 기본값: 0.35%)
         fee_percent = float(os.getenv('TRADING_FEE_PERCENT', '0.35'))
@@ -86,9 +91,13 @@ class RSIStrategy(threading.Thread):
             # 텔레그램 메시지 전송
             send_message(f"⚠️ 전략 초기화 실패\n{traceback.format_exc()}")
 
-    def check_and_get_universe(self):
-        """유니버스가 존재하는지 확인하고 없으면 생성하는 함수"""
-        if not check_table_exist(self.strategy_name, 'universe'):
+    def check_and_get_universe(self, force_update=False):
+        """유니버스가 존재하는지 확인하고 없으면 생성하는 함수
+        
+        Args:
+            force_update: True이면 기존 universe를 무시하고 새로 생성
+        """
+        if force_update or not check_table_exist(self.strategy_name, 'universe'):
             logger.info("Universe table does not exist. Creating new universe.")
             universe_list = get_universe()
             logger.info("Universe list: %s", universe_list)
@@ -187,7 +196,32 @@ class RSIStrategy(threading.Thread):
         while self.is_init_success:
             try:
                 # 현재 한국 시간 확인
-                logger.info("Korea time: %s", get_korea_time())
+                now = get_korea_time()
+                logger.info("Korea time: %s", now)
+                
+                # Universe 재구성 체크 (매일 00:00 ~ 00:05 사이)
+                if now.hour == 0 and now.minute < 5 and not self.universe_updated_today:
+                    days_since_update = (now.date() - self.last_universe_update.date()).days
+                    
+                    if days_since_update >= self.UNIVERSE_UPDATE_DAYS:
+                        logger.info("🔄 Universe 재구성 시작 (마지막 업데이트: %d일 전)", days_since_update)
+                        send_message(f"🔄 Universe 재구성 시작\n마지막 업데이트: {days_since_update}일 전")
+                        
+                        try:
+                            self.update_universe_with_holdings()
+                            self.last_universe_update = now
+                            self.universe_updated_today = True
+                            
+                            logger.info("✅ Universe 재구성 완료 (종목 수: %d)", len(self.universe))
+                            send_message(f"✅ Universe 재구성 완료\n종목 수: {len(self.universe)}")
+                        except Exception as update_error:
+                            logger.error("Universe 재구성 실패: %s", update_error)
+                            send_message(f"❌ Universe 재구성 실패\n{update_error}")
+                
+                # 다음 날로 넘어가면 플래그 리셋
+                if now.hour == 1:
+                    self.universe_updated_today = False
+                
                 # (0)장중인지 확인
                 if not check_transaction_open():
                     logger.info("장시간이 아니므로 5분간 대기합니다.")
@@ -239,6 +273,29 @@ class RSIStrategy(threading.Thread):
                 # 텔레그램 메시지 전송
                 send_message(f"⚠️ 전략 실행 중 오류\n{traceback.format_exc()}")
 
+    def update_universe_with_holdings(self):
+        """보유 종목을 유지하면서 universe 업데이트"""
+        # 현재 보유 종목 백업
+        holding_codes = set(self.kiwoom.balance.keys())
+        holding_info = {code: self.universe[code] for code in holding_codes if code in self.universe}
+        
+        logger.info("현재 보유 종목 수: %d", len(holding_codes))
+        
+        # 새로운 universe 생성 (force_update=True)
+        self.check_and_get_universe(force_update=True)
+        
+        # 보유 종목은 반드시 포함 (매도 전까지 유지)
+        for code, info in holding_info.items():
+            if code not in self.universe:
+                self.universe[code] = info
+                logger.info("보유 종목 유지: %s (%s)", code, info.get('code_name', 'N/A'))
+        
+        # 가격 데이터 업데이트
+        self.check_and_get_price_data()
+        
+        # 실시간 체결정보 재등록
+        self.set_universe_real_time()
+    
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
         
