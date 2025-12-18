@@ -19,6 +19,7 @@ class RSIStrategy(threading.Thread):
     RSI_PERIOD = 2  # RSI 계산 기간
     MA_SHORT = 20  # 단기 이동평균
     MA_LONG = 60  # 장기 이동평균
+    MA_TREND = 200  # 장기 추세 이동평균 (필터용)
     RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
     RSI_BUY_THRESHOLD = 5  # RSI 매수 기준
     PRICE_DROP_THRESHOLD = -2  # 가격 하락 기준 (%)
@@ -339,10 +340,16 @@ class RSIStrategy(threading.Thread):
                 logger.warning("RSI 값이 유효하지 않습니다 (%s): %s", code, rsi)
                 return False
             
-            # 매도 조건 두 가지를 모두 만족하면 True
-            if rsi > self.RSI_SELL_THRESHOLD and close > purchase_price:
-                logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d)", 
-                           code, rsi, close, purchase_price)
+            # 매도 시 수수료+세금을 고려한 손익분기점 계산
+            # 실제 수령액 = 매도금액 / SELL_FEE_RATE
+            # 손익분기점 = 매입가 * SELL_FEE_RATE (이 가격 이상에서 팔아야 손실 없음)
+            breakeven_price = math.ceil(purchase_price * self.SELL_FEE_RATE)
+            
+            # 매도 조건: RSI 과열 + 수수료/세금 고려해도 수익
+            if rsi > self.RSI_SELL_THRESHOLD and close > breakeven_price:
+                estimated_profit_rate = ((close - breakeven_price) / purchase_price) * 100
+                logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d, breakeven=%d, 예상수익률=%.2f%%)", 
+                           code, rsi, close, purchase_price, breakeven_price, estimated_profit_rate)
                 return True
             else:
                 return False
@@ -425,14 +432,16 @@ class RSIStrategy(threading.Thread):
             # 종가(close)를 기준으로 이동 평균 구하기
             df['ma20'] = df['close'].rolling(window=self.MA_SHORT, min_periods=1).mean()
             df['ma60'] = df['close'].rolling(window=self.MA_LONG, min_periods=1).mean()
+            df['ma200'] = df['close'].rolling(window=self.MA_TREND, min_periods=1).mean()
             
             rsi = df[-1:]['RSI(2)'].values[0]
             ma20 = df[-1:]['ma20'].values[0]
             ma60 = df[-1:]['ma60'].values[0]
+            ma200 = df[-1:]['ma200'].values[0]
             
             # 값들이 유효한지 체크
-            if np.isnan(rsi) or np.isinf(rsi) or np.isnan(ma20) or np.isinf(ma20) or np.isnan(ma60) or np.isinf(ma60):
-                logger.warning("계산된 값이 유효하지 않습니다 (%s): rsi=%s, ma20=%s, ma60=%s", code, rsi, ma20, ma60)
+            if np.isnan(rsi) or np.isinf(rsi) or np.isnan(ma20) or np.isinf(ma20) or np.isnan(ma60) or np.isinf(ma60) or np.isnan(ma200) or np.isinf(ma200):
+                logger.warning("계산된 값이 유효하지 않습니다 (%s): rsi=%s, ma20=%s, ma60=%s, ma200=%s", code, rsi, ma20, ma60, ma200)
                 return False
             
             # 2 거래일 전 날짜(index)를 구함
@@ -466,7 +475,8 @@ class RSIStrategy(threading.Thread):
             return False
 
         # (3)매수 신호 확인(조건에 부합하면 주문 접수)
-        if ma20 > ma60 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD:
+        # 조건: 단기 상승 추세 + 장기 상승 추세 + RSI 과매도 + 단기 하락
+        if ma20 > ma60 and close > ma200 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD:
             # (4)이미 보유한 종목, 매수 주문 접수한 종목의 합이 보유 가능 최대치라면 더 이상 매수 불가하므로 종료
             if (self.get_balance_count() + self.get_buy_order_count()) >= self.MAX_HOLDINGS:
                 return

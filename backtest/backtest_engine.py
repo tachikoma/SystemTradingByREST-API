@@ -23,6 +23,7 @@ class BacktestEngine:
         rsi_period: int = 2,  # RSI 계산 기간
         ma_short: int = 20,  # 단기 이동평균
         ma_long: int = 60,  # 장기 이동평균
+        ma_trend: int = 200,  # 장기 추세 이동평균 (필터용)
         rsi_sell_threshold: float = 80,  # RSI 매도 기준
         rsi_buy_threshold: float = 5,  # RSI 매수 기준
         price_drop_threshold: float = -2,  # 가격 하락 기준 (%)
@@ -34,6 +35,7 @@ class BacktestEngine:
         self.rsi_period = rsi_period
         self.ma_short = ma_short
         self.ma_long = ma_long
+        self.ma_trend = ma_trend
         self.rsi_sell_threshold = rsi_sell_threshold
         self.rsi_buy_threshold = rsi_buy_threshold
         self.price_drop_threshold = price_drop_threshold
@@ -89,6 +91,7 @@ class BacktestEngine:
         # 이동평균 계산
         df['ma20'] = df['close'].rolling(window=self.ma_short, min_periods=1).mean()
         df['ma60'] = df['close'].rolling(window=self.ma_long, min_periods=1).mean()
+        df['ma200'] = df['close'].rolling(window=self.ma_trend, min_periods=1).mean()
         
         return df
     
@@ -131,12 +134,13 @@ class BacktestEngine:
             rsi = current['rsi']
             ma20 = current['ma20']
             ma60 = current['ma60']
+            ma200 = current['ma200']
             
             # 2거래일 전 종가
             close_2days_ago = df.iloc[idx - 2]['close']
             
             # 값 유효성 체크
-            if np.isnan(rsi) or np.isnan(ma20) or np.isnan(ma60) or close_2days_ago == 0:
+            if np.isnan(rsi) or np.isnan(ma20) or np.isnan(ma60) or np.isnan(ma200) or close_2days_ago == 0:
                 return False, None
             
             # 가격 변동률 계산
@@ -144,9 +148,10 @@ class BacktestEngine:
             
             # 매수 조건 확인
             # 1) ma20 > ma60 (단기 이평 > 장기 이평)
-            # 2) RSI < 5 (과매도)
-            # 3) 2일 전 대비 -2% 이상 하락
-            if ma20 > ma60 and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
+            # 2) close > ma200 (장기 추세 상승)
+            # 3) RSI < 5 (과매도)
+            # 4) 2일 전 대비 -2% 이상 하락
+            if ma20 > ma60 and close > ma200 and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
                 return True, close
             
             return False, None
@@ -187,10 +192,16 @@ class BacktestEngine:
             if np.isnan(rsi):
                 return False, None
             
+            # 매도 시 수수료+세금을 고려한 손익분기점 계산
+            # 실제 수령액 = 매도금액 / (1 + commission_rate + tax_rate)
+            # 손익분기점 = 매입가 * (1 + commission_rate + tax_rate)
+            sell_fee_rate = 1 + self.commission_rate + self.tax_rate
+            breakeven_price = avg_purchase_price * sell_fee_rate
+            
             # 매도 조건 확인
             # 1) RSI > 80 (과매수)
-            # 2) 현재가 > 매입가 (수익 실현)
-            if rsi > self.rsi_sell_threshold and close > avg_purchase_price:
+            # 2) 현재가 > 손익분기점 (수수료+세금 고려해도 수익)
+            if rsi > self.rsi_sell_threshold and close > breakeven_price:
                 return True, close
             
             return False, None

@@ -272,6 +272,7 @@ def main():
         rsi_period=2,
         ma_short=20,
         ma_long=60,
+        ma_trend=200,  # 200일 이평선 추가
         rsi_sell_threshold=80,
         rsi_buy_threshold=5,
         price_drop_threshold=-2,
