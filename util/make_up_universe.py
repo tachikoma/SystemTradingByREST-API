@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
-from datetime import datetime, time
+from datetime import datetime, time as datetime_time
 from zoneinfo import ZoneInfo
 import logging
 import os
@@ -29,8 +29,8 @@ def is_market_hours():
         return False
     
     # 장시작: 09:00, 장마감: 15:30
-    market_open = time(9, 0)
-    market_close = time(15, 30)
+    market_open = datetime_time(9, 0)
+    market_close = datetime_time(15, 30)
     
     current_time = now.time()
     
