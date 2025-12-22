@@ -11,7 +11,24 @@
 - **데이터베이스 (`util/db_helper.py`):** SQLite를 사용하여 종목 유니버스 및 과거 시세 데이터를 캐시하여 빠른 시작과 API 요청 제한을 회피합니다.
 
 ## 요구 사항
-1.  **Python 3.11** 이상이 설치되어 있어야 합니다.
+1.  **Python 3.11 이상**이 설치되어 있어야 합니다.
+    
+    > **macOS 사용자 주의**: 최신 macOS에도 기본으로 Python 3.9가 설치되어 있습니다. Python 3.11 이상을 별도로 설치해야 합니다.
+    > 
+    > **Homebrew를 통한 설치:**
+    > ```bash
+    > brew install python@3.11
+    > # 또는 최신 버전
+    > brew install python@3.12
+    > ```
+    > 
+    > 설치 후 버전 확인:
+    > ```bash
+    > python3 --version
+    > # 또는
+    > python3.11 --version
+    > ```
+
 2.  **Poetry**를 설치합니다.
     ```bash
     pip install poetry
@@ -137,7 +154,7 @@ export KIWOOM_SECRETKEY=...
 
 ## 실행
 ```bash
-poetry run python3.11 main.py
+poetry run python main.py
 ```
 
 ## 동작 및 구현 상세 (실무 참고)
