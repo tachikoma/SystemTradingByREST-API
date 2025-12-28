@@ -6,6 +6,7 @@ RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를
 
 import pandas as pd
 import numpy as np
+import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
@@ -195,8 +196,9 @@ class BacktestEngine:
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
             # 실제 수령액 = 매도금액 / (1 + commission_rate + tax_rate)
             # 손익분기점 = 매입가 * (1 + commission_rate + tax_rate)
+            # RSIStrategy와 동일하게 math.ceil() 적용 (가격은 정수)
             sell_fee_rate = 1 + self.commission_rate + self.tax_rate
-            breakeven_price = avg_purchase_price * sell_fee_rate
+            breakeven_price = math.ceil(avg_purchase_price * sell_fee_rate)
             
             # 매도 조건 확인
             # 1) RSI > 80 (과매수)
@@ -219,16 +221,16 @@ class BacktestEngine:
             date: 거래 날짜
             budget: 매수에 사용할 예산
         """
-        # 매수 가능 수량 계산
-        quantity = int(budget / price)
+        # 매수 가능 수량 계산 (RSIStrategy와 동일하게 math.floor 사용)
+        quantity = math.floor(budget / price)
         
         if quantity < 1:
             return
         
-        # 수수료 포함 실제 매수 금액
+        # 수수료 포함 실제 매수 금액 (RSIStrategy와 동일하게 math.floor 사용)
         buy_amount = quantity * price
         commission = buy_amount * self.commission_rate
-        total_cost = buy_amount + commission
+        total_cost = math.floor(buy_amount * (1 + self.commission_rate))
         
         # 예산 체크
         if total_cost > self.cash:
@@ -439,9 +441,10 @@ class BacktestEngine:
                 # 매수 가능한 종목 수만큼만 매수
                 buy_candidates = buy_candidates[:available_slots]
                 
-                # 매수 예산 배분 (균등 분할)
+                # 매수 예산 배분 (RSIStrategy와 동일: 남은 슬롯 기준)
+                # 남은 슬롯으로 현금을 나누어 종목당 예산 계산
                 if buy_candidates:
-                    budget_per_stock = self.cash / len(buy_candidates)
+                    budget_per_stock = self.cash / available_slots
                     
                     for code, price in buy_candidates:
                         self.execute_buy(code, price, date, budget_per_stock)
