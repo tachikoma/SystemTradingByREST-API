@@ -344,18 +344,26 @@ class RSIStrategy(threading.Thread):
             # 과거 가격 데이터에 금일 날짜로 데이터 추가
             df.loc[get_korea_time().strftime('%Y%m%d')] = today_price_data
             
-            # RSI(N) 계산
+            # RSI(N) 계산 - 표준 RSI 공식 사용 (BacktestEngine과 동일)
             date_index = df.index.astype('str')
-            # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 크면 증가분을 넣고, 감소했으면 0을 넣어줌
-            U = np.where(df['close'].diff(1) > 0, df['close'].diff(1), 0)
-            # df.diff를 통해 (기준일 종가 - 기준일 전일 종가)를 계산하여 0보다 작으면 감소분을 넣고, 증가했으면 0을 넣어줌
-            D = np.where(df['close'].diff(1) < 0, df['close'].diff(1) * (-1), 0)
-            AU = pd.DataFrame(U, index=date_index).rolling(window=self.RSI_PERIOD).mean()
-            AD = pd.DataFrame(D, index=date_index).rolling(window=self.RSI_PERIOD).mean()
             
-            # ZeroDivisionError 방지: AD + AU가 0이 되지 않도록 체크
+            # 가격 변화 계산
+            delta = df['close'].diff(1)
+            
+            # 상승분 (gain)과 하락분 (loss) 분리
+            gain = np.where(delta > 0, delta, 0)
+            loss = np.where(delta < 0, -delta, 0)
+            
+            # 평균 계산
+            avg_gain = pd.DataFrame(gain, index=date_index).rolling(window=self.RSI_PERIOD).mean()
+            avg_loss = pd.DataFrame(loss, index=date_index).rolling(window=self.RSI_PERIOD).mean()
+            
+            # RS (Relative Strength) 계산
+            # ZeroDivisionError 방지
             with np.errstate(divide='ignore', invalid='ignore'):
-                RSI = AU / (AD + AU) * 100
+                rs = avg_gain / avg_loss.replace(0, np.nan)
+                # 표준 RSI 공식: 100 - (100 / (1 + RS))
+                RSI = 100 - (100 / (1 + rs))
                 RSI = RSI.fillna(0)  # NaN을 0으로 대체
             
             df['RSI(2)'] = RSI
