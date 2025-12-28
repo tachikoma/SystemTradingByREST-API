@@ -230,7 +230,7 @@ def main():
     
     # Kiwoom API 초기화 (mock=True로 설정)
     logger.info("Kiwoom API 초기화 중...")
-    kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=False)
+    kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=True)
     logger.info("Kiwoom API 초기화 완료")
     
     # 데이터 수집기 생성

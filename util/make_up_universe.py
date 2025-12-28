@@ -146,32 +146,55 @@ def get_universe():
         # 크롤링 결과를 얻어옴
         df = execute_crawler()
 
-    mapping = {',': '', 'N/A': '0'}
+    mapping = {',': '', 'N/A': '0', '%': ''}
     df.replace(mapping, regex=True, inplace=True)
 
-    # 사용할 column들 설정
-    cols = ['거래량', '매출액', '매출액증가율', 'ROE', 'PER']
+    # 사용할 column들 설정 (RSI 전략에 최적화)
+    cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율']
 
     # column들을 숫자타입으로 변환(Naver Finance를 크롤링해온 데이터는 str 형태)
-    df[cols] = df[cols].astype(float)
+    for col in cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # NaN이 생긴 행 제거
+    df = df.dropna(subset=cols)
+    
+    # 음수 등락률 절대값 처리 필요 (등락률은 이미 숫자)
+    if len(df) == 0:
+        logger.warning("필터링 후 데이터가 없습니다.")
+        return []
 
-    # 유니버스 구성 조건 (1)~(4)를 만족하는 데이터 가져오기
-    df = df[(df['거래량'] > 0) & (df['매출액'] > 0) & (df['매출액증가율'] > 0) & (df['ROE'] > 0) & (df['PER'] > 0) & (~df.종목명.str.contains("지주")) & (~df.종목명.str.contains("홀딩스"))]
+    # ===== RSI(2) 전략에 최적화된 Universe 구성 =====
+    # 1. 기본 필터링: 유동성 + 적절한 시가총액 범위
+    # 거래대금/시가총액 단위: 백만원
+    df = df[
+        (df['거래대금'] > 3000) &              # 30억 이상 (유동성 확보)
+        (df['시가총액'] > 50000) &             # 500억 이상 (최소 규모)
+        (df['시가총액'] < 5000000) &           # 5조 미만 (대형 우량주 제외)
+        (df['거래량'] > 0) &                   # 거래량 있는 종목
+        (~df.종목명.str.contains("지주", na=False)) &    # 지주회사 제외
+        (~df.종목명.str.contains("홀딩스", na=False)) &  # 홀딩스 제외
+        (~df.종목명.str.contains("스팩", na=False)) &    # 스팩 제외
+        (~df.종목명.str.contains("리츠", na=False)) &    # 리츠 제외
+        (~df.종목명.str.contains("우", na=False))        # 우선주 제외
+    ]
 
-    # PER의 역수
-    df['1/PER'] = 1 / df['PER']
+    # 2. 변동성 지표 계산
+    # - 등락률 절대값: 당일 변동성
+    # - 외국인비율: 유동성 대리변수
+    df['변동성_지표'] = abs(df['등락률'])
+    
+    # 3. 거래 활발도 계산 (거래대금 대비 시가총액 비율)
+    df['거래회전율'] = df['거래대금'] / df['시가총액'] * 100
+    
+    # 4. 변동성 + 거래활발도 기준 종합 점수
+    # 변동성 상위 50% + 거래회전율 상위 50% 종목 선호
+    df['변동성_순위'] = df['변동성_지표'].rank(method='max', ascending=False)
+    df['거래회전율_순위'] = df['거래회전율'].rank(method='max', ascending=False)
+    df['종합_순위'] = (df['변동성_순위'] + df['거래회전율_순위']) / 2
 
-    # ROE의 순위 계산
-    df['RANK_ROE'] = df['ROE'].rank(method='max', ascending=False)
-
-    # 1/PER의 순위 계산
-    df['RANK_1/PER'] = df['1/PER'].rank(method='max', ascending=False)
-
-    # ROE 순위, 1/PER 순위 합산한 랭킹
-    df['RANK_VALUE'] = (df['RANK_ROE'] + df['RANK_1/PER']) / 2
-
-    # RANK_VALUE을 기준으로 정렬
-    df = df.sort_values(by=['RANK_VALUE'])
+    # 5. 종합 순위로 정렬
+    df = df.sort_values(by=['종합_순위'])
 
     # 필터링한 데이터프레임의 index 번호를 새로 매김
     df.reset_index(inplace=True, drop=True)
