@@ -47,6 +47,10 @@ class RSIStrategy(threading.Thread):
         self.UNIVERSE_UPDATE_DAYS = 30  # 30일마다 재구성
         self.universe_updated_today = False
         
+        # 모의투자 매매제한 종목 블랙리스트 (모의투자에서만 사용)
+        self.mock_trade_blacklist = set()
+        self.load_mock_blacklist()
+        
         # 거래 비용 설정 (.env 파일에서 읽어오기)
         # 증권사 수수료율 (매수/매도 동일, 기본값: 0.35%)
         fee_percent = float(os.getenv('TRADING_FEE_PERCENT', '0.35'))
@@ -91,6 +95,60 @@ class RSIStrategy(threading.Thread):
             # 텔레그램 메시지 전송
             send_message(f"⚠️ 전략 초기화 실패\n{traceback.format_exc()}")
 
+    def load_mock_blacklist(self):
+        """DB에서 모의투자 블랙리스트를 로드하는 함수"""
+        if not self.kiwoom.mock:
+            return  # 실전 투자에서는 블랙리스트 사용하지 않음
+        
+        try:
+            if check_table_exist(self.strategy_name, 'mock_blacklist'):
+                sql = "select code from mock_blacklist"
+                cur = execute_sql(self.strategy_name, sql)
+                blacklist_items = cur.fetchall()
+                for item in blacklist_items:
+                    self.mock_trade_blacklist.add(item[0])
+                logger.info("모의투자 블랙리스트 로드: %d개 종목", len(self.mock_trade_blacklist))
+        except Exception as e:
+            logger.error("블랙리스트 로드 실패: %s", e)
+
+    def add_to_mock_blacklist(self, code, code_name, reason):
+        """모의투자 블랙리스트에 종목을 추가하는 함수"""
+        if not self.kiwoom.mock:
+            return  # 실전 투자에서는 블랙리스트 사용하지 않음
+        
+        if code in self.mock_trade_blacklist:
+            return  # 이미 블랙리스트에 있음
+        
+        try:
+            self.mock_trade_blacklist.add(code)
+            
+            # DB에 저장
+            if not check_table_exist(self.strategy_name, 'mock_blacklist'):
+                # 테이블 생성
+                create_sql = """CREATE TABLE mock_blacklist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    code_name TEXT,
+                    reason TEXT,
+                    created_at TEXT
+                )"""
+                execute_sql(self.strategy_name, create_sql)
+            
+            now = get_korea_time().strftime("%Y%m%d %H:%M:%S")
+            insert_sql = f"INSERT INTO mock_blacklist (code, code_name, reason, created_at) VALUES ('{code}', '{code_name}', '{reason}', '{now}')"
+            execute_sql(self.strategy_name, insert_sql)
+            
+            logger.warning("모의투자 블랙리스트 추가: %s (%s) - %s", code, code_name, reason)
+            send_message(f"🚫 <b>모의투자 블랙리스트 추가</b>\n종목: {code_name} ({code})\n사유: {reason}")
+            
+            # universe에서 제거
+            if code in self.universe:
+                del self.universe[code]
+                logger.info("Universe에서 제거: %s", code)
+        
+        except Exception as e:
+            logger.error("블랙리스트 추가 실패: %s", e)
+
     def check_and_get_universe(self, force_update=False):
         """유니버스가 존재하는지 확인하고 없으면 생성하는 함수
         
@@ -119,6 +177,10 @@ class RSIStrategy(threading.Thread):
 
                 # 얻어온 종목명이 유니버스에 포함되어 있다면 딕셔너리에 추가
                 if code_name in universe_list:
+                    # 모의투자일 때 블랙리스트 체크
+                    if self.kiwoom.mock and code_dict["code"] in self.mock_trade_blacklist:
+                        logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code_dict["code"])
+                        continue
                     temp_universe[code_dict["code"]] = code_name
             # 코드, 종목명, 생성일자자를 열로 가지는 DaaFrame 생성
             universe_df = pd.DataFrame({
@@ -143,6 +205,10 @@ class RSIStrategy(threading.Thread):
             universe_list = cur.fetchall()
             for item in universe_list:
                 idx, code, code_name, created_at = item
+                # 모의투자일 때 블랙리스트 체크
+                if self.kiwoom.mock and code in self.mock_trade_blacklist:
+                    logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code)
+                    continue
                 self.universe[code] = {
                     'code_name': code_name
                 }
@@ -301,6 +367,12 @@ class RSIStrategy(threading.Thread):
         
         # universe 딕셔너리의 key값들은 종목코드들을 의미
         codes = self.universe.keys()
+        
+        # 모의투자일 때 블랙리스트 제외
+        if self.kiwoom.mock:
+            codes = [code for code in codes if code not in self.mock_trade_blacklist]
+        else:
+            codes = list(codes)
 
         # 종목코드들을 ';'을 기준으로 묶어주는 작업
         codes = ";".join(map(str, codes))
@@ -539,6 +611,11 @@ class RSIStrategy(threading.Thread):
             logger.error("매수 신호 확인 중 예상치 못한 오류 (%s): %s", code, e)
             return False
 
+        # (2-1) 모의투자일 때 블랙리스트 체크
+        if self.kiwoom.mock and code in self.mock_trade_blacklist:
+            logger.debug("블랙리스트 종목 매수 시도 차단: %s", code)
+            return
+
         # (3)매수 신호 확인(조건에 부합하면 주문 접수)
         # 조건: 단기 상승 추세 + 장기 상승 추세 + RSI 과매도 + 단기 하락
         if ma20 > ma60 and close > ma200 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD:
@@ -594,6 +671,11 @@ class RSIStrategy(threading.Thread):
                     code, quantity, bid, error_code, error_message)
                 logger.error("매수 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
                 send_message(error_msg)
+                
+                # 모의투자 매매제한 종목(RC4007) 감지 및 블랙리스트 추가
+                if self.kiwoom.mock and 'RC4007' in error_message:
+                    code_name = self.universe.get(code, {}).get('code_name', code)
+                    self.add_to_mock_blacklist(code, code_name, error_message)
 
         # 매수신호가 없다면 종료
         else:

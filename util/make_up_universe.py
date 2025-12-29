@@ -14,6 +14,12 @@ fields = []
 now = datetime.now(ZoneInfo("Asia/Seoul"))
 formattedDate = now.strftime("%Y%m%d")
 
+# 모의투자 매매제한 종목 코드 리스트
+MOCK_TRADE_BLACKLIST_CODES = [
+    '023760',  # 한국캐피탈
+    # 추가 제한 종목은 여기에 추가
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,6 +107,16 @@ def crawler(code, page):
     # column명을 가공
     header_data = [item.get_text().strip() for item in table_html.select('thead th')][1:-1]
 
+    # 종목코드 추출 (a.title 태그의 href에서 추출)
+    code_data = []
+    for item in table_html.select('a.tltle'):
+        href = item.get('href', '')
+        if 'code=' in href:
+            code = href.split('code=')[1].split('&')[0]
+            code_data.append(code)
+        else:
+            code_data.append('')
+
     # 종목명 + 수치 추출 (a.title = 종목명, td.number = 기타 수치)
     inner_data = [item.get_text().strip() for item in table_html.find_all(lambda x:
                                                                           (x.name == 'a' and
@@ -118,6 +134,11 @@ def crawler(code, page):
 
     # 한 페이지에서 얻은 정보를 모아 DataFrame로 만들어 반환
     df = pd.DataFrame(data=number_data, columns=header_data)
+    
+    # 종목코드 컬럼 추가
+    if len(code_data) == len(df):
+        df.insert(0, '종목코드', code_data)
+    
     return df
 
 
@@ -163,6 +184,14 @@ def get_universe():
     if len(df) == 0:
         logger.warning("필터링 후 데이터가 없습니다.")
         return []
+    
+    # 종목코드가 있는 경우 모의투자 제한 종목 제외
+    if '종목코드' in df.columns:
+        before_count = len(df)
+        df = df[~df['종목코드'].isin(MOCK_TRADE_BLACKLIST_CODES)]
+        removed = before_count - len(df)
+        if removed > 0:
+            logger.info(f"모의투자 제한 종목 {removed}개 제외")
 
     # ===== RSI(2) 전략에 최적화된 Universe 구성 =====
     # 1. 기본 필터링: 유동성 + 적절한 시가총액 범위
@@ -176,7 +205,8 @@ def get_universe():
         (~df.종목명.str.contains("홀딩스", na=False)) &  # 홀딩스 제외
         (~df.종목명.str.contains("스팩", na=False)) &    # 스팩 제외
         (~df.종목명.str.contains("리츠", na=False)) &    # 리츠 제외
-        (~df.종목명.str.contains("우", na=False))        # 우선주 제외
+        (~df.종목명.str.contains("우", na=False)) &      # 우선주 제외
+        (~df.종목명.str.contains("캐피탈", na=False))    # 캐피탈 제외 (모의투자 제한 많음)
     ]
 
     # 2. 변동성 지표 계산
