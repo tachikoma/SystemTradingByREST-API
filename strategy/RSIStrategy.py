@@ -71,7 +71,7 @@ class RSIStrategy(threading.Thread):
         """전략 초기화 기능을 수행하는 함수"""
         try:
             # 유니버스 조회, 없으면 생성
-            self.check_and_get_universe()
+            self.check_and_get_universe(True)
 
             # 가격 정보를 조회, 필요하면 생성
             self.check_and_get_price_data()
