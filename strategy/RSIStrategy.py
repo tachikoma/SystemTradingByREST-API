@@ -76,12 +76,15 @@ class RSIStrategy(threading.Thread):
 
             # 가격 정보를 조회, 필요하면 생성
             self.check_and_get_price_data()
+            time.sleep(0.3)  # API 호출 간격 확보
 
             # Kiwoom > 주문정보 확인
             self.kiwoom.get_order()
+            time.sleep(0.3)  # API 호출 간격 확보
 
             # Kiwoom > 잔고 확인
             self.kiwoom.get_balance()
+            time.sleep(0.3)  # API 호출 간격 확보
 
             # Kiwoom > 예수금 확인
             self.deposit = self.kiwoom.get_deposit()
@@ -219,8 +222,6 @@ class RSIStrategy(threading.Thread):
         """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""
         for idx, code in enumerate(self.universe.keys()):
             logger.info("(%d/%d) %s", idx + 1, len(self.universe), code)
-
-            time.sleep(0.2)  # To avoid rate limiting
             
             # 테이블 존재 여부 확인
             table_exists = check_table_exist(self.strategy_name, code)
@@ -228,6 +229,7 @@ class RSIStrategy(threading.Thread):
             # 케이스 1: 테이블이 없으면 API로 조회 후 생성
             if not table_exists:
                 price_df = self.kiwoom.get_price_data(code)
+                time.sleep(0.3)  # API 호출 후 대기
                 insert_df_to_db(self.strategy_name, code, price_df)
                 self.universe[code]['price_df'] = price_df
                 logger.debug("Created price table for %s", code)
@@ -243,12 +245,13 @@ class RSIStrategy(threading.Thread):
                 # 최근 저장 일자가 오늘이 아니면 업데이트
                 if last_date[0] != now:
                     price_df = self.kiwoom.get_price_data(code)
+                    time.sleep(0.3)  # API 호출 후 대기
                     insert_df_to_db(self.strategy_name, code, price_df)
                     self.universe[code]['price_df'] = price_df
                     logger.debug("Updated price data for %s", code)
                     continue
             
-            # 케이스 3: DB에서 기존 데이터 로드
+            # 케이스 3: DB에서 기존 데이터 로드 (API 호출 없음, 대기 불필요)
             sql = "select * from `{}`".format(code)
             cur = execute_sql(self.strategy_name, sql)
             cols = [column[0] for column in cur.description]
@@ -316,7 +319,7 @@ class RSIStrategy(threading.Thread):
 
                 for idx, code in enumerate(self.universe.keys()):
                     logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
-                    time.sleep(0.5)
+                    time.sleep(0.3)  # 종목별 처리 간격
 
                     # (1)접수한 주문이 있는지 확인
                     if code in self.kiwoom.order.keys():
