@@ -124,6 +124,17 @@ def print_results(results: dict):
     print(f"승률:               {results['win_rate']:>15.2f} %")
     print(f"평균 수익률:        {results['avg_profit_rate']:>15.2f} %")
     print(f"총 실현 손익:       {results['total_profit']:>15,.0f} 원")
+    
+    # 손절 정보 출력
+    if results.get('stop_loss_enabled', False):
+        print("-"*60)
+        print("손절 설정:")
+        print(f"  가격 손절:        {results.get('price_stop_loss_pct', 0):>15.1f} %")
+        print(f"  시간 손절:        {results.get('time_stop_loss_days', 0):>15} 일")
+        print(f"  손절 횟수:        {results.get('stop_loss_count', 0):>15} 회")
+        stop_loss_ratio = (results.get('stop_loss_count', 0) / results['sell_trades'] * 100) if results['sell_trades'] > 0 else 0
+        print(f"  손절 비율:        {stop_loss_ratio:>15.2f} %")
+    
     print("="*60 + "\n")
 
 
@@ -266,18 +277,12 @@ def main():
         return
     
     # 2) 백테스트 엔진 생성
+    # 최적 전략: 현금 20% 비중 + 진입 조건 강화 (RSI<3, 하락>-5%)
+    # 기대 성과: 연수익률 25.53%, MDD -49.35%, 위험조정수익 0.5175
     engine = BacktestEngine(
-        initial_capital=10_000_000,  # 1천만원
+        initial_capital=10_000_000 * 0.8,  # 현금 20% 유지 (800만원 투자)
         max_holdings=10,
-        rsi_period=2,
-        ma_short=20,
-        ma_long=60,
-        ma_trend=200,  # 200일 이평선 추가
-        rsi_sell_threshold=80,
-        rsi_buy_threshold=5,
-        price_drop_threshold=-2,
-        commission_rate=0.00015,
-        tax_rate=0.0015
+        # rsi_buy_threshold=3, price_drop_threshold=-5.0은 기본값으로 적용됨
     )
     
     # 3) 백테스트 실행 - 기간 설정

@@ -276,23 +276,44 @@ class Kiwoom:
         df = pd.DataFrame(all_ohlcv_data, columns=['open', 'high', 'low', 'close', 'volume'], index=all_ohlcv_data['date'])
         return df[::-1]
 
-    def get_deposit(self):
+    def get_deposit(self, max_retries=3, retry_delay=1):
         """
         REST API(kt00001)를 사용해 주문 가능 예수금을 조회합니다.
+        
+        Args:
+            max_retries: 최대 재시도 횟수 (기본값: 3)
+            retry_delay: 재시도 대기 시간(초) (기본값: 1)
         """
         path = "/api/dostk/acnt"
         api_id = "kt00001"
         params = {"qry_tp": "3"}  # 3: 추정 조회
 
-        res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
+        res_data = None
+        for attempt in range(max_retries):
+            res_data, _ = self._request(path=path, api_id=api_id, params=params, method="POST")
 
-        deposit = 0
-        if res_data and isinstance(res_data, dict) and "ord_alow_amt" in res_data:
-            deposit = int(res_data["ord_alow_amt"])
-        else:
-            logger.warning(f"Failed to retrieve deposit or unexpected response format: {res_data}")
+            if res_data and isinstance(res_data, dict) and "ord_alow_amt" in res_data:
+                deposit = int(res_data["ord_alow_amt"])
+                return deposit
 
-        return deposit
+            # Rate limit 체크
+            if (
+                res_data is not None and
+                isinstance(res_data, dict) and
+                "return_code" in res_data and
+                res_data.get("return_code") == 5 and
+                RATE_LIMIT_MSG in res_data.get("return_msg", "")
+            ):
+                logger.warning(f"API rate limit exceeded for get_deposit (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+
+            logger.error(f"Failed to retrieve deposit (attempt {attempt+1}/{max_retries}): {res_data}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+
+        logger.warning(f"Failed to retrieve deposit after {max_retries} attempts: {res_data}")
+        return 0
 
     def send_order(self, rqname, screen_no, order_type, code, order_quantity, order_price, order_classification, origin_order_number=""):
         """

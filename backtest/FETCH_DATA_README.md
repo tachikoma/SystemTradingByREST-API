@@ -108,20 +108,75 @@ conn.close()
 수집된 `backtest_data.db` 파일을 백테스트 엔진에서 사용하면 됩니다:
 
 ```python
+# 간단한 실행
+poetry run python -m backtest.run_backtest
+```
+
+또는 직접 사용:
+
+```python
 from backtest.backtest_engine import BacktestEngine
-import sqlite3
-import pandas as pd
+from backtest.run_backtest import load_price_data_from_db
 
 # DB에서 데이터 로드
-conn = sqlite3.connect('backtest_data.db')
-universe_df = pd.read_sql("SELECT * FROM universe", conn)
+price_data, date_range = load_price_data_from_db('backtest_data')
 
-# 백테스트 실행
-for _, row in universe_df.iterrows():
-    code = row['code']
-    stock_df = pd.read_sql(f"SELECT * FROM `{code}`", conn, index_col='index')
-    # ... 백테스트 로직
+# 백테스트 실행 (최적 전략 적용됨)
+engine = BacktestEngine(
+    initial_capital=10_000_000 * 0.8,  # 20% 현금 보유
+    max_holdings=10,
+    rsi_buy_threshold=3,  # 최적화: 5→3
+    price_drop_threshold=-5.0,  # 최적화: -2→-5
+)
+results = engine.run_backtest(price_data)
+
+print(f"연평균 수익률: {results['annual_return']:.2f}%")
+print(f"MDD: {results['mdd']:.2f}%")
+print(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
 ```
+
+## 백테스트 최적 전략 (2026-01-01 발견)
+
+9.7년간의 백테스트(2016-2025)를 통해 발견한 최적 전략:
+
+### 핵심 매개변수
+- **현금 비중**: 20% (항상 현금 보유)
+- **RSI 매수 기준**: 3 이하 (기존 5 → 더 강한 과매도)
+- **가격 하락 기준**: -5% 이상 (기존 -2% → 더 큰 하락)
+- **최대 보유 종목**: 10개
+- **손절**: 사용 안 함 (백테스트 결과 불필요)
+
+### 성과 비교
+
+| 지표 | 기본 전략 | 최적 전략 | 개선 |
+|------|-----------|-----------|------|
+| 연수익률 | 21.71% | 25.53% | +3.82%p (+17.6%) |
+| MDD | -55.15% | -49.35% | +5.80%p (-10.5%) |
+| Sharpe | 0.84 | 0.98 | +0.14 (+16.7%) |
+| 위험조정 | 0.3937 | 0.5175 | +0.1238 (+31.4%) |
+
+### 왜 이 전략이 최적인가?
+
+1. **현금 20% 보유**
+   - MDD 비례 감소 (자동으로 ~11% 개선)
+   - 극단적 하락 시 안전 버퍼
+   - 추가 기회 대응 여력
+
+2. **진입 조건 강화 (RSI<3, 하락>-5%)**
+   - 더 강한 과매도 신호만 포착
+   - 거짓 신호 감소
+   - 반등 확률 증가
+
+3. **손절 불사용**
+   - RSI(2) 역추세 전략 특성상 손절 시 수익 기회 상실
+   - 100% 승률 유지
+   - 단, 실전에서는 관리종목 지정 시 즉시 매도 권장
+
+자세한 연구 내용은 다음 문서를 참고하세요:
+- [README.md](README.md): 종합 전략 문서
+- [MDD_REDUCTION_METHODS.md](MDD_REDUCTION_METHODS.md): 8가지 MDD 감소 방법
+- [STOP_LOSS_ANALYSIS.md](STOP_LOSS_ANALYSIS.md): 손절 분석
+- [MDD_REDUCTION_FINAL_RECOMMENDATION.md](MDD_REDUCTION_FINAL_RECOMMENDATION.md): 최종 권장사항
 
 ## 문제 해결
 

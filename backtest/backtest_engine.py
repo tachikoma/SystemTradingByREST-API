@@ -26,10 +26,14 @@ class BacktestEngine:
         ma_long: int = 60,  # 장기 이동평균
         ma_trend: int = 200,  # 장기 추세 이동평균 (필터용)
         rsi_sell_threshold: float = 80,  # RSI 매도 기준
-        rsi_buy_threshold: float = 5,  # RSI 매수 기준
-        price_drop_threshold: float = -2,  # 가격 하락 기준 (%)
+        rsi_buy_threshold: float = 3,  # RSI 매수 기준 (최적화: 5→3)
+        price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화: -2→-5)
         commission_rate: float = 0.0035,  # 모의 투자 거래 수수료율 (편도 0.35%)
         tax_rate: float = 0.0015,  # 거래세 (매도 시만 0.15%)
+        # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
+        enable_stop_loss: bool = False,  # 손절 비활성화 (기본값)
+        price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%) - 극단적 상황용
+        time_stop_loss_days: int = 180,  # 시간 손절 기준 (일) - 매우 보수적
     ):
         self.initial_capital = initial_capital
         self.max_holdings = max_holdings
@@ -43,13 +47,19 @@ class BacktestEngine:
         self.commission_rate = commission_rate
         self.tax_rate = tax_rate
         
+        # 손절 설정
+        self.enable_stop_loss = enable_stop_loss
+        self.price_stop_loss_pct = price_stop_loss_pct
+        self.time_stop_loss_days = time_stop_loss_days
+        
         # 포트폴리오 상태
         self.cash = initial_capital
-        self.holdings: Dict[str, Dict] = {}  # {code: {'quantity': int, 'avg_price': float}}
+        self.holdings: Dict[str, Dict] = {}  # {code: {'quantity': int, 'avg_price': float, 'buy_date': str}}
         
         # 거래 기록
         self.trades: List[Dict] = []
         self.daily_portfolio_value: List[Dict] = []
+        self.stop_loss_count = 0  # 손절 횟수
         
     def calculate_rsi(self, prices: pd.Series, period: int = None) -> pd.Series:
         """RSI 계산
@@ -212,6 +222,56 @@ class BacktestEngine:
             logger.warning(f"매도 신호 확인 중 오류 ({code}, {date}): {e}")
             return False, None
     
+    def check_stop_loss(
+        self,
+        code: str,
+        date: str,
+        df: pd.DataFrame,
+        avg_purchase_price: float,
+        buy_date: str
+    ) -> Tuple[bool, Optional[float], str]:
+        """손절 조건 확인
+        
+        Args:
+            code: 종목 코드
+            date: 현재 날짜
+            df: 해당 종목의 OHLCV + 지표 데이터
+            avg_purchase_price: 평균 매입가
+            buy_date: 매수 날짜
+            
+        Returns:
+            (손절 신호 여부, 매도 가격, 손절 사유)
+        """
+        if not self.enable_stop_loss:
+            return False, None, ""
+        
+        try:
+            if date not in df.index:
+                return False, None, ""
+            
+            idx = df.index.get_loc(date)
+            current = df.iloc[idx]
+            close = current['close']
+            
+            # 1. 가격 손절 체크
+            price_change_pct = ((close - avg_purchase_price) / avg_purchase_price) * 100
+            if price_change_pct <= self.price_stop_loss_pct:
+                return True, close, f"가격손절({price_change_pct:.2f}%)"
+            
+            # 2. 시간 손절 체크
+            buy_date_dt = pd.to_datetime(buy_date, format='%Y%m%d')
+            current_date_dt = pd.to_datetime(date, format='%Y%m%d')
+            holding_days = (current_date_dt - buy_date_dt).days
+            
+            if holding_days > self.time_stop_loss_days:
+                return True, close, f"시간손절({holding_days}일)"
+            
+            return False, None, ""
+            
+        except (KeyError, IndexError) as e:
+            logger.warning(f"손절 확인 중 오류 ({code}, {date}): {e}")
+            return False, None, ""
+    
     def execute_buy(self, code: str, price: float, date: str, budget: float):
         """매수 주문 실행
         
@@ -250,18 +310,21 @@ class BacktestEngine:
             # 기존 보유 종목 추가 매수
             old_quantity = self.holdings[code]['quantity']
             old_avg_price = self.holdings[code]['avg_price']
+            buy_date = self.holdings[code]['buy_date']  # 최초 매수일 유지
             new_quantity = old_quantity + quantity
             new_avg_price = (old_quantity * old_avg_price + buy_amount) / new_quantity
             
             self.holdings[code] = {
                 'quantity': new_quantity,
-                'avg_price': new_avg_price
+                'avg_price': new_avg_price,
+                'buy_date': buy_date
             }
         else:
             # 신규 매수
             self.holdings[code] = {
                 'quantity': quantity,
-                'avg_price': price
+                'avg_price': price,
+                'buy_date': date
             }
         
         # 거래 기록
@@ -410,14 +473,27 @@ class BacktestEngine:
                 
                 df = processed_data[code]
                 avg_price = self.holdings[code]['avg_price']
+                buy_date = self.holdings[code]['buy_date']
                 
+                # RSI 매도 신호 체크
                 sell_signal, sell_price = self.check_sell_signal(code, date, df, avg_price)
                 if sell_signal:
-                    codes_to_sell.append((code, sell_price))
+                    codes_to_sell.append((code, sell_price, "RSI매도"))
+                    continue
+                
+                # 손절 체크
+                stop_loss_signal, stop_price, stop_reason = self.check_stop_loss(
+                    code, date, df, avg_price, buy_date
+                )
+                if stop_loss_signal:
+                    codes_to_sell.append((code, stop_price, stop_reason))
+                    self.stop_loss_count += 1
             
             # 매도 실행
-            for code, price in codes_to_sell:
+            for code, price, reason in codes_to_sell:
                 self.execute_sell(code, price, date)
+                if "손절" in reason:
+                    logger.info(f"[{date}] {reason}: {code}, 가격: {price:,.0f}")
             
             # 2) 매수 신호 확인 (미보유 종목)
             current_holdings = len(self.holdings)
@@ -514,6 +590,10 @@ class BacktestEngine:
             'win_rate': win_rate,
             'avg_profit_rate': avg_profit_rate,
             'total_profit': sum([t.get('profit', 0) for t in sell_trades]),
+            'stop_loss_count': self.stop_loss_count,  # 손절 횟수
+            'stop_loss_enabled': self.enable_stop_loss,  # 손절 활성화 여부
+            'price_stop_loss_pct': self.price_stop_loss_pct,  # 가격 손절 기준
+            'time_stop_loss_days': self.time_stop_loss_days,  # 시간 손절 기준
             'daily_values': df
         }
         

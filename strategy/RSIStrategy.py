@@ -14,15 +14,16 @@ logger = get_logger(__name__)
 
 
 class RSIStrategy(threading.Thread):
-    # 전략 상수 정의
+    # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
     MAX_HOLDINGS = 10  # 최대 보유 종목 수
     RSI_PERIOD = 2  # RSI 계산 기간
     MA_SHORT = 20  # 단기 이동평균
     MA_LONG = 60  # 장기 이동평균
     MA_TREND = 200  # 장기 추세 이동평균 (필터용)
     RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
-    RSI_BUY_THRESHOLD = 5  # RSI 매수 기준
-    PRICE_DROP_THRESHOLD = -2  # 가격 하락 기준 (%)
+    RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
+    PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
+    CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
     
     def __init__(self, kiwoom):
         threading.Thread.__init__(self)
@@ -299,9 +300,15 @@ class RSIStrategy(threading.Thread):
                 if current_time - self.last_sync_time >= self.SYNC_INTERVAL:
                     logger.info("=== 주기적 동기화 시작 ===")
                     try:
+                        # API 호출 사이에 대기시간을 두어 rate limit 방지
                         self.kiwoom.get_order()
+                        time.sleep(0.3)  # API 호출 간격 확보
+                        
                         self.kiwoom.get_balance()
+                        time.sleep(0.3)  # API 호출 간격 확보
+                        
                         self.update_deposit()
+                        
                         self.last_sync_time = current_time
                         logger.info("=== 주기적 동기화 완료 ===")
                     except Exception as sync_error:
@@ -623,8 +630,10 @@ class RSIStrategy(threading.Thread):
             if (self.get_balance_count() + self.get_buy_order_count()) >= self.MAX_HOLDINGS:
                 return
 
-            # (5)주문에 사용할 금액 계산
-            budget = self.deposit / (self.MAX_HOLDINGS - (self.get_balance_count() + self.get_buy_order_count()))
+            # (5)주문에 사용할 금액 계산 (현금 20% 보유 전략 적용)
+            # 전체 예수금의 80%만 투자에 사용 (백테스트 최적화 결과 반영)
+            investable_deposit = self.deposit * (1 - self.CASH_RESERVE_RATIO)
+            budget = investable_deposit / (self.MAX_HOLDINGS - (self.get_balance_count() + self.get_buy_order_count()))
 
             # 최우선 매수호가 확인 (에러 핸들링 추가)
             try:
@@ -681,10 +690,15 @@ class RSIStrategy(threading.Thread):
         else:
             return
 
-    def update_deposit(self):
-        """실시간으로 예수금을 동기화하는 함수"""
+    def update_deposit(self, max_retries=3, retry_delay=1):
+        """실시간으로 예수금을 동기화하는 함수
+        
+        Args:
+            max_retries: 최대 재시도 횟수 (기본값: 3)
+            retry_delay: 재시도 대기 시간(초) (기본값: 1)
+        """
         try:
-            self.deposit = self.kiwoom.get_deposit()
+            self.deposit = self.kiwoom.get_deposit(max_retries=max_retries, retry_delay=retry_delay)
             logger.info("예수금 업데이트: %d", self.deposit)
         except Exception as e:
             logger.error("예수금 업데이트 실패: %s", e)

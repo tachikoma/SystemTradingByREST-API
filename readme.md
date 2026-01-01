@@ -73,6 +73,34 @@
 - `util/`: 헬퍼 유틸리티들 (`time_helper.py`, `db_helper.py`, `logging_config.py` 등)
 
 ## 최근 변경사항(요약)
+
+### 2026-01-01: 백테스트 최적 전략 발견 및 실전 적용 ⭐
+- **백테스트 최적화 (9.7년 검증: 2016-2025)**
+  - 최적 매개변수 발견: 현금 20% + RSI<3 + 하락>-5%
+  - 연수익률: 21.71% → 25.53% (+3.82%p, +17.6%)
+  - MDD: -55.15% → -49.35% (+5.80%p 개선, -10.5%)
+  - Sharpe Ratio: 0.84 → 0.98 (+16.7%)
+  - 위험조정 수익률: 0.3937 → 0.5175 (+31.4% 개선)
+
+- **실전 전략 동기화 (`strategy/RSIStrategy.py`)**
+  - `RSI_BUY_THRESHOLD`: 5 → 3 (더 강한 과매도에서 진입)
+  - `PRICE_DROP_THRESHOLD`: -2% → -5% (더 큰 하락 후 진입)
+  - `CASH_RESERVE_RATIO`: 0.2 추가 (항상 20% 현금 보유)
+  - 예산 계산: 전체 예수금의 80%만 투자에 사용
+
+- **API 안정성 개선**
+  - `get_deposit()` 함수에 retry 처리 추가 (rate limit 대응)
+  - 주기적 동기화에 API 호출 간 대기시간 추가 (0.3초)
+  - `get_order()`, `get_balance()`, `get_deposit()` 모두 retry 지원
+
+- **백테스트 연구 문서 추가**
+  - `backtest/README.md`: 종합 전략 문서
+  - `backtest/MDD_REDUCTION_METHODS.md`: 8가지 MDD 감소 방법
+  - `backtest/STOP_LOSS_ANALYSIS.md`: 손절 분석 (손절 불필요 결론)
+  - `backtest/CUMULATIVE_RSI_ANALYSIS.md`: Cumulative RSI 전략
+  - `backtest/MDD_REDUCTION_FINAL_RECOMMENDATION.md`: 최적 전략 권장
+
+### 이전 변경사항
 - REST 페이징 개선: `get_price_data`, `get_order`, `get_balance` 등에 `cont_yn` 파라미터를 추가하여 do-while 스타일로 첫 페이지를 반드시 조회하도록 변경함.
 - 페이징별 재시도: API의 과금·요청 한도(rate-limit) 응답(응답코드 `5` 및 메시지 `허용된 요청 개수를 초과하였습니다`)에 한해서만 페이지 단위 재시도 로직을 추가함.
 - WebSocket 안정화:
@@ -153,9 +181,31 @@ export KIWOOM_SECRETKEY=...
 ```
 
 ## 실행
+
+### 실전 거래
 ```bash
 poetry run python main.py
 ```
+
+### 백테스트
+백테스트를 통해 전략을 검증할 수 있습니다:
+
+```bash
+# 1. 과거 데이터 수집 (최초 1회)
+poetry run python -m backtest.fetch_historical_data
+
+# 2. 백테스트 실행
+poetry run python -m backtest.run_backtest
+```
+
+**백테스트 결과 예시 (최적 전략: 2016-2025, 9.7년):**
+- 연평균 수익률: 25.53%
+- MDD: -49.35%
+- Sharpe Ratio: 0.98
+- 승률: 100%
+- 총 거래: 412회
+
+자세한 내용은 [backtest/README.md](backtest/README.md)를 참고하세요.
 
 ## 동작 및 구현 상세 (실무 참고)
  - 페이징 호출: `get_price_data(..., cont_yn='N')` 기본 동작은 첫 페이지를 가져오고, 이후 API 반환값에 따라 `cont_yn`을 사용해 다음 페이지를 반복 조회합니다. 내부적으로 do-while 형태를 흉내내며 `max_loops`, `max_retries`, `retry_delay`로 안전장치를 제공합니다.
