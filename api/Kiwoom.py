@@ -140,7 +140,7 @@ class Kiwoom:
 
         return code_list
 
-    def get_master_code_name(self, code, max_retries=3, delay=1):
+    def get_master_code_name(self, code, max_retries=3, retry_delay=0.5):
         """
         종목 코드로부터 종목명을 조회합니다. API 요청 한도 초과 응답일 경우 재시도합니다.
         """
@@ -160,8 +160,8 @@ class Kiwoom:
                 res_data["return_code"] == 5 and
                 RATE_LIMIT_MSG in res_data.get("return_msg", "")
             ):
-                logger.warning(f"API rate limit exceeded (attempt {attempt+1}), retrying after {delay}s...")
-                time.sleep(delay)
+                logger.warning(f"API rate limit exceeded (attempt {attempt+1}), retrying after {retry_delay}s...")
+                time.sleep(retry_delay)
                 continue
             # 기타 실패는 즉시 종료
             logger.warning(f"Failed to retrieve stock name for code {code} or unexpected response format: {res_data}")
@@ -169,7 +169,7 @@ class Kiwoom:
         logger.error(f"All retries failed for code {code}.")
         return None
 
-    def get_price_data(self, code, cont_yn='N', max_loops=1, max_retries=3, retry_delay=1):
+    def get_price_data(self, code, cont_yn='N', max_loops=1, max_retries=3, retry_delay=0.5):
         """
         특정 종목의 일별 OHLCV(시가/고가/저가/종가/거래량) 히스토리 데이터를 조회합니다.
 
@@ -270,13 +270,13 @@ class Kiwoom:
                 except Exception as e:
                     logger.warning(f"Failed to calculate next base_dt for {code}: {e}")
             
-            # 레이트 리밋 방지를 위해 대기
+            # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             time.sleep(0.2)
 
         df = pd.DataFrame(all_ohlcv_data, columns=['open', 'high', 'low', 'close', 'volume'], index=all_ohlcv_data['date'])
         return df[::-1]
 
-    def get_deposit(self, max_retries=3, retry_delay=1):
+    def get_deposit(self, max_retries=3, retry_delay=0.5):
         """
         REST API(kt00001)를 사용해 주문 가능 예수금을 조회합니다.
         
@@ -424,7 +424,7 @@ class Kiwoom:
             })
             return result
 
-    def get_order(self, cont_yn='N', max_loops=200, max_retries=3, retry_delay=1):
+    def get_order(self, cont_yn='N', max_loops=200, max_retries=3, retry_delay=0.5):
         """
         REST API(ka10075)를 사용해 미체결 주문 목록을 조회합니다.
         """
@@ -503,11 +503,14 @@ class Kiwoom:
                 logger.info(f"Loop limit ({max_loops}) reached for get_order, breaking")
                 break
             first = False
-            time.sleep(0.2)  # 레이트 리밋 방지를 위해 대기
+            
+            # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
+            if cont_yn == "Y":
+                time.sleep(0.2)
         self.order = {order['종목코드']: order for order in all_unexecuted_orders}
         return all_unexecuted_orders
 
-    def get_balance(self, cont_yn='N', max_loops=200, max_retries=3, retry_delay=1):
+    def get_balance(self, cont_yn='N', max_loops=200, max_retries=3, retry_delay=0.5):
         """
         REST API(kt00018)를 사용해 계좌 잔액과 보유 종목(포지션)을 조회합니다.
         """
@@ -578,7 +581,10 @@ class Kiwoom:
                 logger.info(f"Loop limit ({max_loops}) reached for get_balance, breaking")
                 break
             first = False
-            time.sleep(0.2)  # 레이트 리밋 방지를 위해 대기
+            
+            # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
+            if cont_yn == "Y":
+                time.sleep(0.2)
         self.balance = {code: info for code, info in all_holdings}
         return self.balance
 
