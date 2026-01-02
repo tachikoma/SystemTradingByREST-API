@@ -678,15 +678,24 @@ class Kiwoom:
         - 905: 주문구분 (+매수/-매도)
         - 10: 현재가
         """
+        def safe_int(value, default=0):
+            """빈 문자열이나 None을 안전하게 int로 변환"""
+            if not value or (isinstance(value, str) and value.strip() == ''):
+                return default
+            try:
+                return int(str(value).replace('+', '').replace('-', '').strip())
+            except (ValueError, AttributeError):
+                return default
+        
         try:
             order_no = real_data.get('9203', '').strip()
             code = real_data.get('9001', '').strip()
             order_status = real_data.get('913', '').strip()  # 접수/확인/체결
-            order_qty = int(real_data.get('900', '0'))
-            exec_qty = int(real_data.get('911', '0'))  # 체결량
-            unexec_qty = int(real_data.get('902', '0'))  # 미체결수량
+            order_qty = safe_int(real_data.get('900', '0'))
+            exec_qty = safe_int(real_data.get('911', '0'))  # 체결량
+            unexec_qty = safe_int(real_data.get('902', '0'))  # 미체결수량
             order_type = real_data.get('905', '').strip()  # +매수/-매도; 매도정정, 매수정정, 매수취소, 매도취소
-            current_price = int(real_data.get('10', '0').replace('+', '').replace('-', ''))
+            current_price = safe_int(real_data.get('10', '0'))
             
             # 주문구분 정규화
             if '+매수' in order_type:

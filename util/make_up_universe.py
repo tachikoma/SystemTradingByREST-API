@@ -148,27 +148,55 @@ def crawler(code, page):
 def get_universe():
     """
     유니버스를 생성하는 함수
-    장시간이 아니고 NaverFinance.xlsx 파일이 있으면 기존 파일 사용
-    장시간이거나 파일이 없으면 크롤링 실행
+    - 오늘 날짜 파일이 있으면 사용
+    - 없거나 오래되었으면 크롤링 시도
+    - 크롤링 실패 시 기존 파일 사용 (fallback)
     """
     excel_file = 'NaverFinance.xlsx'
+    today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
     
-    # 장시간이 아니고 기존 파일이 있으면 파일 로드
-    if not is_market_hours() and os.path.exists(excel_file):
-        logger.info(f"장시간이 아닙니다. 기존 {excel_file} 파일을 사용합니다.")
-        print(f"장시간이 아닙니다. 기존 {excel_file} 파일을 사용합니다.")
-        df = pd.read_excel(excel_file, index_col=0)
-    else:
-        # 장시간이거나 파일이 없으면 크롤링 실행
-        if is_market_hours():
-            logger.info("장시간입니다. 크롤링을 실행합니다.")
-            print("장시간입니다. 크롤링을 실행합니다.")
-        else:
-            logger.info(f"{excel_file} 파일이 없습니다. 크롤링을 실행합니다.")
-            print(f"{excel_file} 파일이 없습니다. 크롤링을 실행합니다.")
+    # 오늘 날짜 파일이 있는지 확인
+    file_is_today = False
+    if os.path.exists(excel_file):
+        file_mod_time = datetime.fromtimestamp(os.path.getmtime(excel_file), tz=ZoneInfo("Asia/Seoul"))
+        file_date_str = file_mod_time.strftime("%Y%m%d")
+        file_is_today = (file_date_str == today_str)
         
-        # 크롤링 결과를 얻어옴
-        df = execute_crawler()
+        if file_is_today:
+            logger.info(f"오늘 생성된 {excel_file} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
+            print(f"오늘 생성된 {excel_file} 파일을 사용합니다.")
+            try:
+                df = pd.read_excel(excel_file, index_col=0)
+            except Exception as e:
+                logger.error(f"파일 읽기 실패: {e}. 크롤링을 시도합니다.")
+                file_is_today = False  # 파일 읽기 실패하면 크롤링 시도
+    
+    # 오늘 파일이 없거나 읽기 실패 시 크롤링 시도
+    if not file_is_today:
+        logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(excel_file)}, 오늘 파일: {file_is_today})")
+        print(f"크롤링을 실행합니다...")
+        
+        try:
+            # 크롤링 결과를 얻어옴
+            df = execute_crawler()
+            logger.info(f"크롤링 성공: {len(df)}개 종목")
+            
+        except Exception as e:
+            logger.error(f"크롤링 실패: {e}")
+            print(f"크롤링 실패: {e}")
+            
+            # 크롤링 실패 시 기존 파일 사용 (fallback)
+            if os.path.exists(excel_file):
+                logger.warning(f"크롤링 실패. 기존 {excel_file} 파일을 사용합니다.")
+                print(f"⚠️  크롤링 실패. 기존 파일을 사용합니다.")
+                try:
+                    df = pd.read_excel(excel_file, index_col=0)
+                except Exception as read_error:
+                    logger.error(f"기존 파일 읽기도 실패: {read_error}")
+                    raise Exception(f"크롤링 및 파일 읽기 모두 실패: {e}, {read_error}")
+            else:
+                logger.error(f"크롤링 실패이고 기존 파일도 없습니다.")
+                raise Exception(f"크롤링 실패이고 기존 파일도 없습니다: {e}")
 
     mapping = {',': '', 'N/A': '0', '%': ''}
     df.replace(mapping, regex=True, inplace=True)
@@ -244,10 +272,21 @@ def get_universe():
 
     # 상위 100개만 추출
     df = df.loc[:99]
+    
+    # Universe 최소 개수 검증 (비정상 데이터 방지)
+    MIN_UNIVERSE_SIZE = 10
+    if len(df) < MIN_UNIVERSE_SIZE:
+        error_msg = f"Universe 크기가 너무 작습니다 ({len(df)}개). 최소 {MIN_UNIVERSE_SIZE}개 필요."
+        logger.error(error_msg)
+        raise Exception(error_msg)
 
     # 유니버스 생성 결과를 엑셀 출력
     df.to_excel('universe.xlsx')
-    return df['종목명'].tolist()
+    
+    universe_list = df['종목명'].tolist()
+    logger.info(f"Universe 생성 완료: {len(universe_list)}개 종목")
+    
+    return universe_list
 
 
 if __name__ == "__main__":

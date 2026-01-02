@@ -1,5 +1,7 @@
 import time
 import os
+import datetime
+from zoneinfo import ZoneInfo
 from api.Kiwoom import Kiwoom
 from util.make_up_universe import *
 from util.db_helper import *
@@ -161,8 +163,56 @@ class RSIStrategy(threading.Thread):
         """
         if force_update or not check_table_exist(self.strategy_name, 'universe'):
             logger.info("Universe table does not exist. Creating new universe.")
-            universe_list = get_universe()
-            logger.info("Universe list: %s", universe_list)
+            
+            try:
+                universe_list = get_universe()
+                logger.info("Universe list: %s", universe_list)
+            except Exception as e:
+                error_msg = f"Universe 생성 실패: {e}"
+                logger.error(error_msg)
+                send_message(f"❌ Universe 생성 실패\n{e}")
+                
+                # 기존 universe 테이블이 있으면 로드하여 계속 사용
+                if check_table_exist(self.strategy_name, 'universe'):
+                    logger.warning("기존 Universe를 계속 사용합니다.")
+                    send_message("⚠️ 기존 Universe를 계속 사용합니다.")
+                    # 기존 universe 로드 (아래 else 블록 로직 사용)
+                    sql = "select * from universe"
+                    cur = execute_sql(self.strategy_name, sql)
+                    universe_list_db = cur.fetchall()
+                    
+                    universe_created_at = None
+                    for item in universe_list_db:
+                        idx, code, code_name, created_at = item
+                        
+                        if universe_created_at is None:
+                            universe_created_at = created_at
+                        
+                        if self.kiwoom.mock and code in self.mock_trade_blacklist:
+                            logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code)
+                            continue
+                        self.universe[code] = {
+                            'code_name': code_name
+                        }
+                    
+                    if universe_created_at:
+                        try:
+                            self.last_universe_update = datetime.datetime.strptime(
+                                universe_created_at, "%Y%m%d"
+                            ).replace(tzinfo=ZoneInfo("Asia/Seoul"))
+                            days_ago = (get_korea_time().date() - self.last_universe_update.date()).days
+                            logger.info("기존 universe 로드 완료: %d개 (생성 %d일 전)", 
+                                       len(self.universe), days_ago)
+                        except Exception:
+                            self.last_universe_update = get_korea_time()
+                    
+                    return  # 기존 universe 사용하고 종료
+                else:
+                    # 기존 universe도 없으면 치명적 오류
+                    logger.critical("Universe 생성 실패이고 기존 universe도 없습니다.")
+                    send_message(f"🚨 치명적 오류: Universe 없음\n{e}")
+                    raise Exception(f"Universe 생성 실패이고 기존 데이터도 없습니다: {e}")
+            
             temp_universe = {}
             # 오늘 날짜를 20210101 형태로 지정
             now = get_korea_time().strftime("%Y%m%d")
@@ -201,14 +251,26 @@ class RSIStrategy(threading.Thread):
                 self.universe[code] = {
                     'code_name': code_name
                 }
-            logger.info("Created and loaded universe with %d items", len(self.universe))
+            
+            # Universe 생성 시간을 메모리에 저장 (DB의 created_at과 동기화)
+            self.last_universe_update = get_korea_time()
+            logger.info("Created and loaded universe with %d items (created_at: %s)", 
+                       len(self.universe), now)
         else:
             # 기존 universe 테이블이 있으면 DB에서 로드
             sql = "select * from universe"
             cur = execute_sql(self.strategy_name, sql)
             universe_list = cur.fetchall()
+            
+            # DB에서 Universe 생성 날짜를 읽어와 last_universe_update 초기화
+            universe_created_at = None
             for item in universe_list:
                 idx, code, code_name, created_at = item
+                
+                # 첫 번째 레코드의 created_at을 Universe 생성 날짜로 사용
+                if universe_created_at is None:
+                    universe_created_at = created_at
+                
                 # 모의투자일 때 블랙리스트 체크
                 if self.kiwoom.mock and code in self.mock_trade_blacklist:
                     logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code)
@@ -216,7 +278,22 @@ class RSIStrategy(threading.Thread):
                 self.universe[code] = {
                     'code_name': code_name
                 }
-            logger.info("Loaded universe from DB with %d items", len(self.universe))
+            
+            # DB의 created_at을 last_universe_update로 설정 (YYYYMMDD 형식 파싱)
+            if universe_created_at:
+                try:
+                    self.last_universe_update = datetime.datetime.strptime(
+                        universe_created_at, "%Y%m%d"
+                    ).replace(tzinfo=ZoneInfo("Asia/Seoul"))
+                    days_ago = (get_korea_time().date() - self.last_universe_update.date()).days
+                    logger.info("Loaded universe from DB with %d items (created %d days ago: %s)", 
+                               len(self.universe), days_ago, universe_created_at)
+                except Exception as e:
+                    logger.warning("Failed to parse universe created_at: %s, using current time", e)
+                    self.last_universe_update = get_korea_time()
+            else:
+                logger.warning("No universe created_at found, using current time")
+                self.last_universe_update = get_korea_time()
 
     def check_and_get_price_data(self):
         """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""
@@ -350,21 +427,56 @@ class RSIStrategy(threading.Thread):
                 send_message(f"⚠️ 전략 실행 중 오류\n{traceback.format_exc()}")
 
     def update_universe_with_holdings(self):
-        """보유 종목을 유지하면서 universe 업데이트"""
+        """Universe 업데이트 및 제외된 보유 종목 청산"""
         # 현재 보유 종목 백업
         holding_codes = set(self.kiwoom.balance.keys())
-        holding_info = {code: self.universe[code] for code in holding_codes if code in self.universe}
+        holding_info = {code: self.universe.get(code, {'code_name': 'N/A'}) for code in holding_codes}
         
         logger.info("현재 보유 종목 수: %d", len(holding_codes))
         
         # 새로운 universe 생성 (force_update=True)
         self.check_and_get_universe(force_update=True)
         
-        # 보유 종목은 반드시 포함 (매도 전까지 유지)
-        for code, info in holding_info.items():
-            if code not in self.universe:
-                self.universe[code] = info
-                logger.info("보유 종목 유지: %s (%s)", code, info.get('code_name', 'N/A'))
+        # 새 universe에 없는 보유 종목 찾기
+        codes_to_liquidate = holding_codes - set(self.universe.keys())
+        
+        if codes_to_liquidate:
+            logger.info("🔴 Universe에서 제외된 보유 종목 %d개 청산 시작", len(codes_to_liquidate))
+            send_message(f"🔴 Universe 재구성\nUniverse에서 제외된 보유 종목 {len(codes_to_liquidate)}개 청산 시작")
+            
+            # 제외된 종목들을 시장가 매도
+            for code in codes_to_liquidate:
+                try:
+                    code_name = holding_info[code].get('code_name', 'N/A')
+                    quantity = self.kiwoom.balance[code]['보유수량']
+                    
+                    logger.info("청산 주문: %s (%s) %d주", code, code_name, quantity)
+                    
+                    # 시장가 매도 (order_classification='03')
+                    order_result = self.kiwoom.send_order(
+                        'universe_liquidation', '1001', 1, code, quantity, 0, '03'
+                    )
+                    
+                    if order_result.get('success'):
+                        # 매도 주문 성공 시 일단 universe에 임시로 추가 (체결 완료될 때까지 유지)
+                        self.universe[code] = holding_info[code]
+                        logger.info("✅ 청산 주문 접수 완료: %s (%s)", code, code_name)
+                        send_message(f"✅ 청산 주문 접수\n종목: {code} ({code_name})\n수량: {quantity}주\n주문번호: {order_result.get('order_no', 'N/A')}")
+                    else:
+                        error_msg = order_result.get('error_message', 'Unknown error')
+                        logger.error("❌ 청산 주문 실패: %s (%s) - %s", code, code_name, error_msg)
+                        send_message(f"❌ 청산 주문 실패\n종목: {code} ({code_name})\n오류: {error_msg}")
+                        # 실패해도 universe에 추가하여 다음에 다시 시도
+                        self.universe[code] = holding_info[code]
+                    
+                    time.sleep(0.2)  # API 호출 간격
+                    
+                except Exception as e:
+                    logger.exception("청산 주문 중 오류 (%s): %s", code, e)
+                    # 오류 발생 시에도 universe에 추가하여 다음에 다시 시도
+                    self.universe[code] = holding_info[code]
+        else:
+            logger.info("✅ Universe 재구성 완료 (청산할 종목 없음)")
         
         # 가격 데이터 업데이트
         self.check_and_get_price_data()
