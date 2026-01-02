@@ -2,14 +2,45 @@ import requests
 from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, time as datetime_time
+from zoneinfo import ZoneInfo
+import logging
+import os
 
 BASE_URL = 'https://finance.naver.com/sise/sise_market_sum.nhn?sosok='
 CODES = [0, 1]  # KOSPI:0, KOSDAQ:1
 START_PAGE = 1
 fields = []
-now = datetime.now()
+now = datetime.now(ZoneInfo("Asia/Seoul"))
 formattedDate = now.strftime("%Y%m%d")
+
+# 모의투자 매매제한 종목 코드 리스트
+MOCK_TRADE_BLACKLIST_CODES = [
+    '023760',  # 한국캐피탈
+    # 추가 제한 종목은 여기에 추가
+]
+
+logger = logging.getLogger(__name__)
+
+
+def is_market_hours():
+    """
+    장시간인지 확인하는 함수
+    평일 09:00 ~ 15:30 사이를 장시간으로 판단
+    """
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    
+    # 주말 체크
+    if now.weekday() >= 5:  # 5=토요일, 6=일요일
+        return False
+    
+    # 장시작: 09:00, 장마감: 15:30
+    market_open = datetime_time(9, 0)
+    market_close = datetime_time(15, 30)
+    
+    current_time = now.time()
+    
+    return market_open <= current_time <= market_close
 
 
 def execute_crawler():
@@ -39,6 +70,9 @@ def execute_crawler():
 
         # 전체 페이지를 저장한 result를 하나의 데이터프레임으로 만듬
         df = pd.concat(result, axis=0, ignore_index=True)
+        
+        # 시장구분 컬럼 추가 (0=코스피, 1=코스닥)
+        df['시장구분'] = '코스피' if code == 0 else '코스닥'
 
         # 변수 df는 KOSPI, KOSDAQ별로 크롤링한 종목 정보이고 이를 하나로 합치기 위해 df_total에 추가
         df_total.append(df)
@@ -76,6 +110,16 @@ def crawler(code, page):
     # column명을 가공
     header_data = [item.get_text().strip() for item in table_html.select('thead th')][1:-1]
 
+    # 종목코드 추출 (a.title 태그의 href에서 추출)
+    code_data = []
+    for item in table_html.select('a.tltle'):
+        href = item.get('href', '')
+        if 'code=' in href:
+            code = href.split('code=')[1].split('&')[0]
+            code_data.append(code)
+        else:
+            code_data.append('')
+
     # 종목명 + 수치 추출 (a.title = 종목명, td.number = 기타 수치)
     inner_data = [item.get_text().strip() for item in table_html.find_all(lambda x:
                                                                           (x.name == 'a' and
@@ -93,45 +137,113 @@ def crawler(code, page):
 
     # 한 페이지에서 얻은 정보를 모아 DataFrame로 만들어 반환
     df = pd.DataFrame(data=number_data, columns=header_data)
+    
+    # 종목코드 컬럼 추가
+    if len(code_data) == len(df):
+        df.insert(0, '종목코드', code_data)
+    
     return df
 
 
 def get_universe():
-    # 크롤링 결과를 얻어옴
-    df = execute_crawler()
+    """
+    유니버스를 생성하는 함수
+    장시간이 아니고 NaverFinance.xlsx 파일이 있으면 기존 파일 사용
+    장시간이거나 파일이 없으면 크롤링 실행
+    """
+    excel_file = 'NaverFinance.xlsx'
+    
+    # 장시간이 아니고 기존 파일이 있으면 파일 로드
+    if not is_market_hours() and os.path.exists(excel_file):
+        logger.info(f"장시간이 아닙니다. 기존 {excel_file} 파일을 사용합니다.")
+        print(f"장시간이 아닙니다. 기존 {excel_file} 파일을 사용합니다.")
+        df = pd.read_excel(excel_file, index_col=0)
+    else:
+        # 장시간이거나 파일이 없으면 크롤링 실행
+        if is_market_hours():
+            logger.info("장시간입니다. 크롤링을 실행합니다.")
+            print("장시간입니다. 크롤링을 실행합니다.")
+        else:
+            logger.info(f"{excel_file} 파일이 없습니다. 크롤링을 실행합니다.")
+            print(f"{excel_file} 파일이 없습니다. 크롤링을 실행합니다.")
+        
+        # 크롤링 결과를 얻어옴
+        df = execute_crawler()
 
-    mapping = {',': '', 'N/A': '0'}
+    mapping = {',': '', 'N/A': '0', '%': ''}
     df.replace(mapping, regex=True, inplace=True)
 
-    # 사용할 column들 설정
-    cols = ['거래량', '매출액', '매출액증가율', 'ROE', 'PER']
+    # 사용할 column들 설정 (RSI 전략에 최적화)
+    cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율']
 
     # column들을 숫자타입으로 변환(Naver Finance를 크롤링해온 데이터는 str 형태)
-    df[cols] = df[cols].astype(float)
+    for col in cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    
+    # NaN이 생긴 행 제거
+    df = df.dropna(subset=cols)
+    
+    # 음수 등락률 절대값 처리 필요 (등락률은 이미 숫자)
+    if len(df) == 0:
+        logger.warning("필터링 후 데이터가 없습니다.")
+        return []
+    
+    # 종목코드가 있는 경우 모의투자 제한 종목 제외
+    if '종목코드' in df.columns:
+        before_count = len(df)
+        df = df[~df['종목코드'].isin(MOCK_TRADE_BLACKLIST_CODES)]
+        removed = before_count - len(df)
+        if removed > 0:
+            logger.info(f"모의투자 제한 종목 {removed}개 제외")
 
-    # 유니버스 구성 조건 (1)~(4)를 만족하는 데이터 가져오기
-    df = df[(df['거래량'] > 0) & (df['매출액'] > 0) & (df['매출액증가율'] > 0) & (df['ROE'] > 0) & (df['PER'] > 0) & (~df.종목명.str.contains("지주")) & (~df.종목명.str.contains("홀딩스"))]
+    # ===== RSI(2) 전략에 최적화된 Universe 구성 =====
+    # 1. 기본 필터링: 유동성 + 적절한 시가총액 범위
+    # 거래대금/시가총액 단위: 백만원
+    
+    # 크롤링 시 저장된 시장구분 정보 활용 (종목코드 기반 추측보다 정확)
+    kosdaq_mask = df['시장구분'] == '코스닥'
+    
+    # 시장별 차등 시가총액 필터 (코스피: 500억, 코스닥: 200억)
+    market_cap_filter = (
+        (~kosdaq_mask & (df['시가총액'] > 50000)) |  # 코스피: 500억 이상
+        (kosdaq_mask & (df['시가총액'] > 20000))      # 코스닥: 200억 이상
+    )
+    
+    df = df[
+        market_cap_filter &                        # 시장별 차등 시가총액 조건
+        (df['거래대금'] > 3000) &                  # 30억 이상 (유동성 확보)
+        (df['시가총액'] < 5000000) &               # 5조 미만 (대형 우량주 제외)
+        (df['거래량'] > 0) &                       # 거래량 있는 종목
+        (~df.종목명.str.contains("지주", na=False)) &    # 지주회사 제외
+        (~df.종목명.str.contains("홀딩스", na=False)) &  # 홀딩스 제외
+        (~df.종목명.str.contains("스팩", na=False)) &    # 스팩 제외
+        (~df.종목명.str.contains("리츠", na=False)) &    # 리츠 제외
+        (~df.종목명.str.contains("우", na=False)) &      # 우선주 제외
+        (~df.종목명.str.contains("캐피탈", na=False))    # 캐피탈 제외 (모의투자 제한 많음)
+    ]
 
-    # PER의 역수
-    df['1/PER'] = 1 / df['PER']
+    # 2. 변동성 지표 계산
+    # - 등락률 절대값: 당일 변동성
+    # - 외국인비율: 유동성 대리변수
+    df['변동성_지표'] = abs(df['등락률'])
+    
+    # 3. 거래 활발도 계산 (거래대금 대비 시가총액 비율)
+    df['거래회전율'] = df['거래대금'] / df['시가총액'] * 100
+    
+    # 4. 변동성 + 거래활발도 기준 종합 점수
+    # 변동성 상위 50% + 거래회전율 상위 50% 종목 선호
+    df['변동성_순위'] = df['변동성_지표'].rank(method='max', ascending=False)
+    df['거래회전율_순위'] = df['거래회전율'].rank(method='max', ascending=False)
+    df['종합_순위'] = (df['변동성_순위'] + df['거래회전율_순위']) / 2
 
-    # ROE의 순위 계산
-    df['RANK_ROE'] = df['ROE'].rank(method='max', ascending=False)
-
-    # 1/PER의 순위 계산
-    df['RANK_1/PER'] = df['1/PER'].rank(method='max', ascending=False)
-
-    # ROE 순위, 1/PER 순위 합산한 랭킹
-    df['RANK_VALUE'] = (df['RANK_ROE'] + df['RANK_1/PER']) / 2
-
-    # RANK_VALUE을 기준으로 정렬
-    df = df.sort_values(by=['RANK_VALUE'])
+    # 5. 종합 순위로 정렬
+    df = df.sort_values(by=['종합_순위'])
 
     # 필터링한 데이터프레임의 index 번호를 새로 매김
     df.reset_index(inplace=True, drop=True)
 
-    # 상위 200개만 추출
-    df = df.loc[:199]
+    # 상위 100개만 추출
+    df = df.loc[:99]
 
     # 유니버스 생성 결과를 엑셀 출력
     df.to_excel('universe.xlsx')
