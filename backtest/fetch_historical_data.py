@@ -217,19 +217,20 @@ def main():
     logger.info("백테스트용 과거 데이터 수집 프로그램 시작")
     logger.info("=" * 60)
     
-    # API 키 확인
-    appkey = os.environ.get('KIWOOM_APPKEY')
-    secretkey = os.environ.get('KIWOOM_SECRETKEY')
+    # 실전투자 API 키만 사용 (백테스트용 데이터 수집은 실전 데이터가 필요)
+    appkey = os.environ.get('KIWOOM_REAL_APPKEY')
+    secretkey = os.environ.get('KIWOOM_REAL_SECRETKEY')
     
     if not appkey or not secretkey:
-        logger.error("Error: KIWOOM_APPKEY and KIWOOM_SECRETKEY are not set.")
-        logger.error("Please create a .env file with the following content:")
-        logger.error("  KIWOOM_APPKEY=your_app_key")
-        logger.error("  KIWOOM_SECRETKEY=your_secret_key")
+        logger.error("Error: KIWOOM_REAL_APPKEY and KIWOOM_REAL_SECRETKEY are not set.")
+        logger.error("백테스트 데이터 수집은 실전투자 API 키가 필요합니다.")
+        logger.error("Please set in .env file:")
+        logger.error("  KIWOOM_REAL_APPKEY=your_real_app_key")
+        logger.error("  KIWOOM_REAL_SECRETKEY=your_real_secret_key")
         sys.exit(1)
     
-    # Kiwoom API 초기화 (mock=True로 설정)
-    logger.info("Kiwoom API 초기화 중...")
+    # Kiwoom API 초기화 (실전투자 키로 mock=False 사용)
+    logger.info("Kiwoom API 초기화 중 (실전투자 모드)...")
     kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=False)
     logger.info("Kiwoom API 초기화 완료")
     
