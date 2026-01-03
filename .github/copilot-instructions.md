@@ -76,7 +76,7 @@ Kiwoom API는 초당 요청 제한 있음:
 ```python
 # 연속 API 호출 시 대기
 self.kiwoom.get_order()
-time.sleep(0.3)  # 300ms 대기
+time.sleep(0.1)  # 100ms 대기 (권장)
 self.kiwoom.get_balance()
 ```
 `api/Kiwoom.py`의 `_request()`: rate limit 시 retry + exponential backoff
@@ -159,8 +159,8 @@ export KIW_LOG_DIR=./logs
 1. **키움증권 REST API** (OpenAPI+)
    - 인증: OAuth2 (client_credentials)
    - Base URL: `https://mockapi.kiwoom.com` (mock) / `https://api.kiwoom.com` (real)
-   - WebSocket: `wss://mockapi.kiwoom.com:10000/api/dostk/websocket`
-   - Rate limit: 초당 ~3-5 요청 (명시적 제한 없음, 경험적 수치)
+   - WebSocket: `wss://mockapi.kiwoom.com:10000/api/dostk/websocket` (mock) / `wss://api.kiwoom.com:10000/api/dostk/websocket` (real)
+   - Rate limit: 초당 ~10 요청 (명시적 제한 없음, 경험적 수치), 0.1초 간격 권장 (안정적)
 
 2. **네이버 금융** (크롤링)
    - URL: `https://finance.naver.com/sise/sise_market_sum.nhn?sosok={0|1}`
@@ -180,8 +180,9 @@ export KIW_LOG_DIR=./logs
 - **키움 API 기반** (권장): `get_universe(kiwoom_client, use_kiwoom_api=True)`
   - ka10099: 전체 종목 리스트 (코스피 + 코스닥)
   - ka10001: 종목별 상세 정보 (거래량, 거래대금, 등락률, 시가총액 등)
+  - 함수: `fetch_all_stocks_from_kiwoom()` - 전체 종목 수집 (4,234개)
   - 캐싱: `all_stocks_kiwoom.xlsx` (당일 재사용)
-  - Rate limit 대응: 0.1초 간격, 수천 종목 조회 시 시간 소요
+  - Rate limit 대응: 0.1초 간격, 전체 수집 시간 약 7분
 - **스마트 전략**:
   - Universe 재구성: 30일마다 (종목 리스트 변경)
   - 데이터 캐싱: 매일 장 종료 후 15:30~16:00 (최신 데이터 갱신)
@@ -210,10 +211,15 @@ export KIW_LOG_DIR=./logs
 ### 거래 비용
 `strategy/RSIStrategy.py` 초기화 시 .env에서 읽음:
 ```python
-TRADING_FEE_PERCENT=0.35  # 수수료 (편도)
-TRADING_TAX_PERCENT=0.15  # 증권거래세 (매도만)
+# 모의투자 (KIWOOM_MODE=mock)
+TRADING_FEE_PERCENT_MOCK=0.35  # 수수료 0.35%
+TRADING_TAX_PERCENT_MOCK=0.0   # 거래세 없음
+
+# 실전투자 (KIWOOM_MODE=real)
+TRADING_FEE_PERCENT_REAL=0.015  # 수수료 0.015%
+TRADING_TAX_PERCENT_REAL=0.20   # 거래세 0.20% (매도만), 2026년 기준
 ```
-백테스트에서도 동일 비율 사용 (`backtest_engine.py`)
+모드에 따라 자동 선택되며, 백테스트도 동일 비율 사용 (`backtest_engine.py`)
 
 ### 스레드 안전성
 - `RSIStrategy`는 `threading.Thread` - 별도 스레드 실행

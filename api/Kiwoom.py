@@ -180,12 +180,14 @@ class Kiwoom:
                 - name: 종목명
                 - cur_prc: 현재가 (String)
                 - trde_qty: 거래량 (String)
-                - trde_amt: 거래대금 (String, 백만원 단위)
+                - trde_amt: 거래대금 (String, 백만원 단위 - 계산값)
                 - flu_rt: 등락률 (String, %)
                 - list_cnt: 상장주식수 (String)
-                - mrkt_cap: 시가총액 (String, 백만원 단위)
+                - mrkt_cap: 시가총액 (String, 억원 단위 - API 원본값)
                 - for_exh_rt: 외국인비율 (String, %)
                 또는 None (실패 시)
+        
+        주의: 시가총액은 억원 단위로 반환되므로, 백만원 단위 변환이 필요하면 ×100 해야 함
         """
         path = "/api/dostk/stkinfo"
         api_id = "ka10001"
@@ -204,17 +206,17 @@ class Kiwoom:
                     cur_prc = abs(float(res_data.get('cur_prc', '0').replace('+', '').replace('-', '')))
                     trde_amt = str(int((trde_qty * cur_prc) / 1_000_000))  # 백만원 단위
                     
-                    # 시가총액은 'cap' 키 사용 (이미 백만원 단위)
+                    # 시가총액은 'cap' 키 사용 (API는 억원 단위로 반환)
                     mrkt_cap = res_data.get('cap', '0')
                     
-                    # 상장주식수는 'dstr_stk' 또는 계산 (시가총액 / 현재가 * 1,000,000)
+                    # 상장주식수는 'dstr_stk' 또는 계산 (시가총액 / 현재가)
                     dstr_stk = res_data.get('dstr_stk', '')
                     if dstr_stk and dstr_stk.strip():
                         list_cnt = dstr_stk
                     else:
-                        # 계산: 시가총액(백만원) * 1,000,000 / 현재가
+                        # 계산: 시가총액(억원) * 100,000,000 / 현재가
                         if cur_prc > 0:
-                            list_cnt = str(int(float(mrkt_cap) * 1_000_000 / cur_prc))
+                            list_cnt = str(int(float(mrkt_cap) * 100_000_000 / cur_prc))
                         else:
                             list_cnt = '0'
                     

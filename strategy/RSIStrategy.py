@@ -59,12 +59,19 @@ class RSIStrategy(threading.Thread):
         self.load_mock_blacklist()
         
         # 거래 비용 설정 (.env 파일에서 읽어오기)
-        # 증권사 수수료율 (매수/매도 동일, 기본값: 0.35%)
-        fee_percent = float(os.getenv('TRADING_FEE_PERCENT', '0.35'))
-        self.BUY_FEE_RATE = 1 + (fee_percent / 100)
+        # 모의투자와 실전투자에 따라 자동으로 적용
+        if kiwoom.mock:
+            # 모의투자: 수수료 0.35%, 증권거래세 없음
+            fee_percent = float(os.getenv('TRADING_FEE_PERCENT_MOCK', '0.35'))
+            tax_percent = float(os.getenv('TRADING_TAX_PERCENT_MOCK', '0.0'))
+            logger.info("💼 모의투자 거래 비용 적용")
+        else:
+            # 실전투자: 수수료 0.015%, 증권거래세 0.20% (매도시)
+            fee_percent = float(os.getenv('TRADING_FEE_PERCENT_REAL', '0.015'))
+            tax_percent = float(os.getenv('TRADING_TAX_PERCENT_REAL', '0.20'))
+            logger.info("💰 실전투자 거래 비용 적용")
         
-        # 증권거래세 (매도 시만 적용, 기본값: 0.15%)
-        tax_percent = float(os.getenv('TRADING_TAX_PERCENT', '0.15'))
+        self.BUY_FEE_RATE = 1 + (fee_percent / 100)
         self.SELL_FEE_RATE = 1 + ((fee_percent + tax_percent) / 100)
         
         logger.info("거래 비용 설정: 수수료=%.4f%%, 증권거래세=%.4f%% (매도시)", 

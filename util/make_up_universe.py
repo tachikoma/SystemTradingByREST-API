@@ -108,14 +108,15 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
         
         if info:
             try:
+                # 키움 API: 시가총액은 억원 단위, 거래대금은 백만원 단위
                 stock_data.append({
                     '종목코드': stock['code'],
                     '종목명': info.get('name', stock['name']),
                     '시장구분': stock['market'],
                     '현재가': int(info.get('cur_prc', 0)),
                     '거래량': int(info.get('trde_qty', 0)),
-                    '거래대금': int(info.get('trde_amt', 0)),  # 백만원 단위
-                    '시가총액': int(info.get('mrkt_cap', 0)),  # 백만원 단위
+                    '거래대금': int(info.get('trde_amt', 0)),  # 백만원 단위 (그대로 사용)
+                    '시가총액': int(info.get('mrkt_cap', 0)) * 100,  # 억원 → 백만원 (×100)
                     '등락률': float(info.get('flu_rt', 0)),
                     '외국인비율': float(info.get('for_exh_rt', 0)),
                     '상장주식수': int(info.get('list_cnt', 0)),
