@@ -20,19 +20,43 @@ if __name__ == '__main__':
     from api.Kiwoom import Kiwoom
     from strategy.RSIStrategy import RSIStrategy
 
-    # 환경변수에서 API 키를 가져옵니다
-    appkey = os.environ.get('KIWOOM_APPKEY')
-    secretkey = os.environ.get('KIWOOM_SECRETKEY')
-
+    # 환경변수에서 거래 모드를 가져옵니다 (기본값: mock)
+    mode = os.environ.get('KIWOOM_MODE', 'mock').lower()
+    is_mock = mode == 'mock'
+    
+    # 거래 모드에 따라 적절한 API 키를 가져옵니다
+    if is_mock:
+        appkey = os.environ.get('KIWOOM_MOCK_APPKEY') or os.environ.get('KIWOOM_APPKEY')
+        secretkey = os.environ.get('KIWOOM_MOCK_SECRETKEY') or os.environ.get('KIWOOM_SECRETKEY')
+        mode_name = "모의투자"
+    else:
+        appkey = os.environ.get('KIWOOM_REAL_APPKEY')
+        secretkey = os.environ.get('KIWOOM_REAL_SECRETKEY')
+        mode_name = "실전투자"
+    
     if not appkey or not secretkey:
-        print("Error: KIWOOM_APPKEY and KIWOOM_SECRETKEY are not set.")
+        print(f"Error: API keys for {mode_name} mode are not set.")
         print("Please create a .env file with the following content:")
-        print("  KIWOOM_APPKEY=your_app_key")
-        print("  KIWOOM_SECRETKEY=your_secret_key")
+        if is_mock:
+            print("  KIWOOM_MODE=mock")
+            print("  KIWOOM_MOCK_APPKEY=your_mock_app_key")
+            print("  KIWOOM_MOCK_SECRETKEY=your_mock_secret_key")
+        else:
+            print("  KIWOOM_MODE=real")
+            print("  KIWOOM_REAL_APPKEY=your_real_app_key")
+            print("  KIWOOM_REAL_SECRETKEY=your_real_secret_key")
         sys.exit(1)
-
-    # mock 거래를 위해 mock=True로 설정합니다
-    kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=True)
+    
+    print(f"🚀 Starting System Trading in {mode_name} mode...")
+    if not is_mock:
+        print("⚠️  WARNING: Running in REAL trading mode! Real money is at risk.")
+        confirmation = input("Type 'YES' to confirm: ")
+        if confirmation != 'YES':
+            print("Aborted.")
+            sys.exit(0)
+    
+    # Kiwoom 클라이언트 생성
+    kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=is_mock)
 
     # 전략 스레드를 시작합니다
     rsi_strategy = RSIStrategy(kiwoom)

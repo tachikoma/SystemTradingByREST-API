@@ -50,17 +50,28 @@ class RSIStrategy(threading.Thread):
         self.UNIVERSE_UPDATE_DAYS = 30  # 30일마다 재구성
         self.universe_updated_today = False
         
+        # 데이터 캐싱 관련 변수
+        self.last_data_cache_time = None
+        self.data_cached_today = False
+        
         # 모의투자 매매제한 종목 블랙리스트 (모의투자에서만 사용)
         self.mock_trade_blacklist = set()
         self.load_mock_blacklist()
         
         # 거래 비용 설정 (.env 파일에서 읽어오기)
-        # 증권사 수수료율 (매수/매도 동일, 기본값: 0.35%)
-        fee_percent = float(os.getenv('TRADING_FEE_PERCENT', '0.35'))
-        self.BUY_FEE_RATE = 1 + (fee_percent / 100)
+        # 모의투자와 실전투자에 따라 자동으로 적용
+        if kiwoom.mock:
+            # 모의투자: 수수료 0.35%, 증권거래세 없음
+            fee_percent = float(os.getenv('TRADING_FEE_PERCENT_MOCK', '0.35'))
+            tax_percent = float(os.getenv('TRADING_TAX_PERCENT_MOCK', '0.0'))
+            logger.info("💼 모의투자 거래 비용 적용")
+        else:
+            # 실전투자: 수수료 0.015%, 증권거래세 0.20% (매도시)
+            fee_percent = float(os.getenv('TRADING_FEE_PERCENT_REAL', '0.015'))
+            tax_percent = float(os.getenv('TRADING_TAX_PERCENT_REAL', '0.20'))
+            logger.info("💰 실전투자 거래 비용 적용")
         
-        # 증권거래세 (매도 시만 적용, 기본값: 0.15%)
-        tax_percent = float(os.getenv('TRADING_TAX_PERCENT', '0.15'))
+        self.BUY_FEE_RATE = 1 + (fee_percent / 100)
         self.SELL_FEE_RATE = 1 + ((fee_percent + tax_percent) / 100)
         
         logger.info("거래 비용 설정: 수수료=%.4f%%, 증권거래세=%.4f%% (매도시)", 
@@ -165,7 +176,8 @@ class RSIStrategy(threading.Thread):
             logger.info("Universe table does not exist. Creating new universe.")
             
             try:
-                universe_list = get_universe()
+                # 스마트 유니버스 생성: 장 종료 후면 API로 당일 데이터 갱신, 장 중이면 크롤링
+                universe_list = get_universe(kiwoom_client=self.kiwoom)
                 logger.info("Universe list: %s", universe_list)
             except Exception as e:
                 error_msg = f"Universe 생성 실패: {e}"
@@ -346,6 +358,25 @@ class RSIStrategy(threading.Thread):
                 now = get_korea_time()
                 logger.info("Korea time: %s", now)
                 
+                # 장 종료 후 데이터 캐싱 (15:30 ~ 16:00 사이)
+                if now.hour == 15 and 30 <= now.minute < 60 and not self.data_cached_today:
+                    logger.info("💾 장 종료 후 데이터 캐싱 시작...")
+                    send_message("💾 장 종료 후 데이터 캐싱 시작")
+                    
+                    try:
+                        # 키움 API로 당일 데이터 수집 (force_cache=True)
+                        from util.make_up_universe import cache_daily_data
+                        cache_daily_data(self.kiwoom)
+                        
+                        self.data_cached_today = True
+                        self.last_data_cache_time = now
+                        
+                        logger.info("✅ 데이터 캐싱 완료")
+                        send_message("✅ 데이터 캐싱 완료")
+                    except Exception as cache_error:
+                        logger.error("데이터 캐싱 실패: %s", cache_error)
+                        send_message(f"❌ 데이터 캐싱 실패\n{cache_error}")
+                
                 # Universe 재구성 체크 (매일 00:00 ~ 00:05 사이)
                 if now.hour == 0 and now.minute < 5 and not self.universe_updated_today:
                     days_since_update = (now.date() - self.last_universe_update.date()).days
@@ -368,6 +399,7 @@ class RSIStrategy(threading.Thread):
                 # 다음 날로 넘어가면 플래그 리셋
                 if now.hour == 1:
                     self.universe_updated_today = False
+                    self.data_cached_today = False
                 
                 # (0)장중인지 확인
                 if not check_transaction_open():
