@@ -149,6 +149,11 @@ KIWOOM_MOCK_SECRETKEY=your_mock_secret_key
 KIWOOM_REAL_APPKEY=your_real_app_key
 KIWOOM_REAL_SECRETKEY=your_real_secret_key
 
+# API Rate Limit Configuration
+# 키움 API 호출 간격 (초 단위)
+KIWOOM_API_SLEEP_MOCK=0.2  # 모의투자: rate limit이 더 엄격
+KIWOOM_API_SLEEP_REAL=0.1  # 실전투자: 0.1초로 안정적
+
 # Trading Fees (모의투자와 실전투자 별도 설정)
 TRADING_FEE_PERCENT_MOCK=0.35  # 모의투자 수수료 0.35%
 TRADING_TAX_PERCENT_MOCK=0.0   # 모의투자 거래세 없음

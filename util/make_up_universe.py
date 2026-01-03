@@ -97,6 +97,16 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     # 2단계: 각 종목의 상세 정보 가져오기 (ka10001)
     logger.info("2/2: 종목별 상세 정보 조회 중 (ka10001)... (시간이 소요될 수 있습니다)")
     
+    # Rate limit 설정 (환경변수에서 읽기, 없으면 기본값 사용)
+    # 모의투자는 rate limit이 더 엄격 (0.2초), 실전투자는 0.1초
+    sleep_interval = float(
+        os.getenv(
+            'KIWOOM_API_SLEEP_MOCK' if kiwoom_client.mock else 'KIWOOM_API_SLEEP_REAL',
+            '0.2' if kiwoom_client.mock else '0.1'
+        )
+    )
+    logger.info(f"API 호출 간격: {sleep_interval}초 ({'모의투자' if kiwoom_client.mock else '실전투자'} 모드)")
+    
     stock_data = []
     failed_count = 0
     
@@ -128,7 +138,7 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
             failed_count += 1
         
         # Rate limit 방지
-        time.sleep(0.1)
+        time.sleep(sleep_interval)
     
     logger.info(f"데이터 수집 완료: {len(stock_data)}개 성공, {failed_count}개 실패")
     

@@ -81,6 +81,12 @@ self.kiwoom.get_balance()
 ```
 `api/Kiwoom.py`의 `_request()`: rate limit 시 retry + exponential backoff
 
+**모의투자 vs 실전투자 Rate Limit 차이**:
+- 모의투자: 0.2초 간격 권장 (rate limit이 더 엄격)
+- 실전투자: 0.1초 간격으로 안정적
+- 환경변수로 조절 가능: `KIWOOM_API_SLEEP_MOCK`, `KIWOOM_API_SLEEP_REAL`
+- `fetch_all_stocks_from_kiwoom()`에서 자동 선택
+
 ### 모의투자 블랙리스트
 모의투자에서 거래 불가 종목은 `strategy/RSIStrategy.py`:
 ```python
