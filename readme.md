@@ -100,6 +100,21 @@
   - `backtest/CUMULATIVE_RSI_ANALYSIS.md`: Cumulative RSI 전략
   - `backtest/MDD_REDUCTION_FINAL_RECOMMENDATION.md`: 최적 전략 권장
 
+### 최근 변경사항 (2026-01-03)
+- **유니버스 생성 최적화**: 키움 API 호출 간격을 0.2초→0.1초로 최적화하여 전체 종목(4,234개) 수집 시간을 14분→약 7분으로 단축
+- **데이터 단위 수정**: 키움 API `ka10001`의 시가총액(mrkt_cap)이 억원 단위임을 확인하고, 필터링 로직에서 백만원으로 변환(×100)하도록 수정
+  - 기존: API가 백만원을 반환한다고 잘못 가정하여 유니버스 필터링 실패 (1개 종목만 통과)
+  - 수정: `fetch_all_stocks_from_kiwoom()` 함수에서 시가총액 ×100 변환 추가 (예: 7,780억원 → 778,000백만원)
+  - 관련 파일: `util/make_up_universe.py`, `api/Kiwoom.py` 주석 및 docstring 업데이트
+- **거래 비용 환경변수 분리**: 모의투자와 실전투자의 거래 수수료·세금 설정을 별도 환경변수로 분리
+  - 모의투자: `TRADING_FEE_PERCENT_MOCK=0.35`, `TRADING_TAX_PERCENT_MOCK=0.0`
+  - 실전투자: `TRADING_FEE_PERCENT_REAL=0.015`, `TRADING_TAX_PERCENT_REAL=0.20`
+  - 전략 실행 시 `kiwoom.mock` 플래그에 따라 자동 선택
+- **함수명 변경**: `create_universe_from_kiwoom_api()` → `fetch_all_stocks_from_kiwoom()`로 명확화 (실제로는 유니버스 생성이 아닌 전체 종목 목록 가져오기)
+- **캐시 저장 로직 개선**: `cache_daily_data()` 함수의 `use_cache`/`save_cache` 파라미터 분리로 매일 장 종료 후 데이터 자동 저장 기능 수정
+- **CLI 옵션 추가**: `main.py`에 `-y/--yes` 플래그 추가로 실전투자 확인 프롬프트 스킵 가능 (자동화 환경용)
+- **오타 수정**: "캠싱" → "캐싱" (strategy/RSIStrategy.py 내 8곳)
+
 ### 이전 변경사항
 - REST 페이징 개선: `get_price_data`, `get_order`, `get_balance` 등에 `cont_yn` 파라미터를 추가하여 do-while 스타일로 첫 페이지를 반드시 조회하도록 변경함.
 - 페이징별 재시도: API의 과금·요청 한도(rate-limit) 응답(응답코드 `5` 및 메시지 `허용된 요청 개수를 초과하였습니다`)에 한해서만 페이지 단위 재시도 로직을 추가함.
@@ -128,8 +143,17 @@ cp .env.example .env
 
 2. `.env` 주요 항목 예시 (`.env.example` 참고):
 ```env
-KIWOOM_APPKEY=your_app_key
-KIWOOM_SECRETKEY=your_secret_key
+KIWOOM_MODE=mock  # 'mock' 또는 'real'
+KIWOOM_MOCK_APPKEY=your_mock_app_key
+KIWOOM_MOCK_SECRETKEY=your_mock_secret_key
+KIWOOM_REAL_APPKEY=your_real_app_key
+KIWOOM_REAL_SECRETKEY=your_real_secret_key
+
+# Trading Fees (모의투자와 실전투자 별도 설정)
+TRADING_FEE_PERCENT_MOCK=0.35  # 모의투자 수수료 0.35%
+TRADING_TAX_PERCENT_MOCK=0.0   # 모의투자 거래세 없음
+TRADING_FEE_PERCENT_REAL=0.015 # 실전투자 수수료 0.015%
+TRADING_TAX_PERCENT_REAL=0.20  # 실전투자 거래세 0.20% (매도만)
 
 # Logging
 KIW_LOG_DIR=./logs
@@ -184,8 +208,20 @@ export KIWOOM_SECRETKEY=...
 
 ### 실전 거래
 ```bash
+# 모의투자 (기본값)
 poetry run python main.py
+
+# 실전투자 (확인 프롬프트 표시)
+KIWOOM_MODE=real poetry run python main.py
+# 또는 .env 파일에서 KIWOOM_MODE=real 설정
+
+# 실전투자 자동 실행 (확인 프롬프트 스킵, 자동화용)
+KIWOOM_MODE=real poetry run python main.py -y
+# 또는
+KIWOOM_MODE=real poetry run python main.py --yes
 ```
+
+**주의**: `-y` 또는 `--yes` 옵션은 실전투자 확인 프롬프트를 건너뛰므로 자동화 환경에서만 사용하세요.
 
 ### 백테스트
 백테스트를 통해 전략을 검증할 수 있습니다:

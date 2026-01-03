@@ -2,11 +2,18 @@ import os
 import sys
 import time
 import threading
+import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 
 
 if __name__ == '__main__':
+    # 커맨드라인 인자 파싱
+    parser = argparse.ArgumentParser(description='System Trading Bot')
+    parser.add_argument('-y', '--yes', action='store_true',
+                       help='실전투자 확인 프롬프트 없이 바로 실행 (위험!)')
+    args = parser.parse_args()
+    
     # 모듈을 임포트하기 전에 .env를 먼저 로드합니다.
     # 이렇게 하면 로깅 설정 등 초기화 과정에서 .env 값을 사용할 수 있습니다.
     env_path = Path(__file__).parent / '.env'
@@ -50,10 +57,13 @@ if __name__ == '__main__':
     print(f"🚀 Starting System Trading in {mode_name} mode...")
     if not is_mock:
         print("⚠️  WARNING: Running in REAL trading mode! Real money is at risk.")
-        confirmation = input("Type 'YES' to confirm: ")
-        if confirmation != 'YES':
-            print("Aborted.")
-            sys.exit(0)
+        if not args.yes:
+            confirmation = input("Type 'YES' to confirm: ")
+            if confirmation != 'YES':
+                print("Aborted.")
+                sys.exit(0)
+        else:
+            print("⚠️  Auto-confirmed with -y option. Starting real trading...")
     
     # Kiwoom 클라이언트 생성
     kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=is_mock)
