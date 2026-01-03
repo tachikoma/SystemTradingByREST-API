@@ -7,7 +7,7 @@
 - **진입점 (`main.py`):** `Kiwoom` 클래스와 `RSIStrategy` 스레드를 초기화하고 실행합니다.
 - **핵심 로직 (`strategy/RSIStrategy.py`):** RSI와 이동평균선을 기반으로 매매 신호를 생성하고 주문을 실행하는 주식 트레이딩 알고리즘을 포함합니다. `threading.Thread`를 상속받아 백그라운드에서 실행됩니다.
 - **API 추상화 (`api/Kiwoom.py`):** 키움 REST API와 WebSocket을 사용하여 통신합니다. `requests` 라이브러리를 사용하여 HTTP 요청을 보내고, `websockets` 라이브러리를 사용하여 실시간 시세를 수신합니다.
-- **종목 선정 (`util/make_up_universe.py`):** 네이버 금융에서 KOSPI/KOSDAQ 종목 정보를 스크래핑하여 ROE, PER 등의 지표를 기반으로 상위 200개 종목을 선정합니다.
+- **종목 선정 (`util/make_up_universe.py`):** 키움 API(장 종료 후) 또는 네이버 금융(장 중) 크롤링으로 KOSPI/KOSDAQ 전체 종목 정보를 수집하여 거래량, 시가총액, 변동성 등의 지표를 기반으로 상위 100개 종목을 선정합니다. 매일 장 종료 후 자동으로 데이터를 캐싱하여 다음날 빠르게 시작할 수 있습니다.
 - **데이터베이스 (`util/db_helper.py`):** SQLite를 사용하여 종목 유니버스 및 과거 시세 데이터를 캐시하여 빠른 시작과 API 요청 제한을 회피합니다.
 
 ## 요구 사항

@@ -169,6 +169,90 @@ class Kiwoom:
         logger.error(f"All retries failed for code {code}.")
         return None
 
+    def get_stock_info(self, code, max_retries=3, retry_delay=0.5):
+        """
+        종목의 상세 기본정보를 조회합니다 (ka10001).
+        당일 거래량, 거래대금, 등락률, 현재가, 외국인비율 등을 포함합니다.
+        
+        Returns:
+            dict: 종목 상세 정보
+                - code: 종목코드
+                - name: 종목명
+                - cur_prc: 현재가 (String)
+                - trde_qty: 거래량 (String)
+                - trde_amt: 거래대금 (String, 백만원 단위)
+                - flu_rt: 등락률 (String, %)
+                - list_cnt: 상장주식수 (String)
+                - mrkt_cap: 시가총액 (String, 백만원 단위)
+                - for_exh_rt: 외국인비율 (String, %)
+                또는 None (실패 시)
+        """
+        path = "/api/dostk/stkinfo"
+        api_id = "ka10001"
+        params = {"stk_cd": code}
+
+        for attempt in range(max_retries):
+            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST")
+            
+            # 성공: stk_cd 키가 있으면 데이터 변환하여 반환
+            if res_data and isinstance(res_data, dict) and "stk_cd" in res_data:
+                # API 응답 형식을 표준 형식으로 변환
+                # 어제 로그 기준: 'stk_cd', 'stk_nm', 'cur_prc', 'trde_qty', 'flu_rt', 'for_exh_rt', 'cap' 등
+                try:
+                    # 거래대금 계산: 거래량 * 현재가 / 1,000,000 (백만원 단위)
+                    trde_qty = abs(float(res_data.get('trde_qty', 0)))
+                    cur_prc = abs(float(res_data.get('cur_prc', '0').replace('+', '').replace('-', '')))
+                    trde_amt = str(int((trde_qty * cur_prc) / 1_000_000))  # 백만원 단위
+                    
+                    # 시가총액은 'cap' 키 사용 (이미 백만원 단위)
+                    mrkt_cap = res_data.get('cap', '0')
+                    
+                    # 상장주식수는 'dstr_stk' 또는 계산 (시가총액 / 현재가 * 1,000,000)
+                    dstr_stk = res_data.get('dstr_stk', '')
+                    if dstr_stk and dstr_stk.strip():
+                        list_cnt = dstr_stk
+                    else:
+                        # 계산: 시가총액(백만원) * 1,000,000 / 현재가
+                        if cur_prc > 0:
+                            list_cnt = str(int(float(mrkt_cap) * 1_000_000 / cur_prc))
+                        else:
+                            list_cnt = '0'
+                    
+                    return {
+                        'code': res_data.get('stk_cd'),
+                        'name': res_data.get('stk_nm'),
+                        'cur_prc': res_data.get('cur_prc', '0').replace('+', '').replace('-', ''),
+                        'trde_qty': res_data.get('trde_qty', '0'),
+                        'trde_amt': trde_amt,
+                        'flu_rt': res_data.get('flu_rt', '0').replace('+', ''),
+                        'list_cnt': list_cnt,
+                        'mrkt_cap': mrkt_cap,
+                        'for_exh_rt': res_data.get('for_exh_rt', '0').replace('+', '')
+                    }
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to parse stock info for {code}: {e}")
+                    # 파싱 실패 시에도 원본 데이터 반환 시도
+                    pass
+            
+            # Rate limit 체크 및 재시도
+            if (
+                res_data is not None and
+                isinstance(res_data, dict) and
+                "return_code" in res_data and
+                res_data.get("return_code") == 5 and
+                RATE_LIMIT_MSG in res_data.get("return_msg", "")
+            ):
+                logger.warning(f"API rate limit exceeded for {code} (attempt {attempt+1}), retrying after {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+            
+            # 기타 실패
+            logger.warning(f"Failed to retrieve stock info for {code}: {res_data}")
+            break
+        
+        logger.error(f"All retries failed for code {code}")
+        return None
+
     def get_price_data(self, code, cont_yn='N', max_loops=1, max_retries=3, retry_delay=0.5):
         """
         특정 종목의 일별 OHLCV(시가/고가/저가/종가/거래량) 히스토리 데이터를 조회합니다.

@@ -15,11 +15,12 @@
    - `threading.Thread` 상속, 백그라운드 실행
    - 5분마다 동기화 (`SYNC_INTERVAL = 300`)
    - 30일마다 유니버스 재구성 (`UNIVERSE_UPDATE_DAYS = 30`)
+   - 매일 15:30~16:00 장 종료 후 데이터 자동 캐싱
 
 3. **Utility Layer** (`util/`): 공통 인프라
    - `db_helper.py`: SQLite 캐시 (유니버스, 가격 데이터)
    - `time_helper.py`: 한국 시간대 처리 (`ZoneInfo("Asia/Seoul")`)
-   - `make_up_universe.py`: 네이버 금융 크롤링 (ROE/PER 기반 200종목 선정)
+   - `make_up_universe.py`: 유니버스 생성 (키움 API 우선, 네이버 크롤링 fallback)
 
 ### 데이터 흐름
 ```
@@ -174,6 +175,22 @@ export KIW_LOG_DIR=./logs
 - **Kiwoom ↔ RSIStrategy**: `Kiwoom` 인스턴스를 Strategy 생성자에 주입
 - **WebSocket → Strategy**: `kiwoom.universe_realtime_transaction_info` Dict 업데이트
 - **DB Cache**: SQLite로 API 재호출 방지 (가격 데이터, 유니버스)
+
+### 유니버스 생성
+- **키움 API 기반** (권장): `get_universe(kiwoom_client, use_kiwoom_api=True)`
+  - ka10099: 전체 종목 리스트 (코스피 + 코스닥)
+  - ka10001: 종목별 상세 정보 (거래량, 거래대금, 등락률, 시가총액 등)
+  - 캐싱: `all_stocks_kiwoom.xlsx` (당일 재사용)
+  - Rate limit 대응: 0.1초 간격, 수천 종목 조회 시 시간 소요
+- **스마트 전략**:
+  - Universe 재구성: 30일마다 (종목 리스트 변경)
+  - 데이터 캐싱: 매일 장 종료 후 15:30~16:00 (최신 데이터 갱신)
+  - 장 중 크롤링 실패 시: 캐시 파일 사용
+- **네이버 크롤링** (fallback): API 실패 시 자동 전환
+- **파일 구조**:
+  - `all_stocks_kiwoom.xlsx`: 전체 종목 (키움 API, ~4,234개)
+  - `all_stocks_naver.xlsx`: 전체 종목 (네이버, ~4,233개)
+  - `universe.xlsx`: 필터링된 투자 종목 (100개)
 
 ## 백테스트 분석 도구
 전략 최적화용 스크립트들 (`backtest/`):

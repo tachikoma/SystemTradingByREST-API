@@ -23,6 +23,128 @@ MOCK_TRADE_BLACKLIST_CODES = [
 logger = logging.getLogger(__name__)
 
 
+def cache_daily_data(kiwoom_client):
+    """
+    매일 장 종료 후 키움 API로 당일 데이터를 수집하여 캐싱하는 함수
+    (Universe 재구성과 별개로 데이터만 갱신)
+    
+    Args:
+        kiwoom_client: Kiwoom API 클라이언트 인스턴스
+    
+    Note:
+        - Universe 재구성 (30일 주기): 종목 리스트 변경
+        - 데이터 캐싱 (매일): 기존 종목들의 최신 데이터만 갱신
+    """
+    logger.info("📊 키움 API로 당일 데이터 캐싱 시작...")
+    
+    try:
+        # 캐시를 읽지 않고 새로 생성하되, 수집 후에는 저장 (use_cache=False, save_cache=True)
+        df = fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=False, save_cache=True)
+        logger.info(f"✅ 당일 데이터 캐싱 완료: {len(df)}개 종목")
+        return df
+    except Exception as e:
+        logger.error(f"❌ 데이터 캐싱 실패: {e}")
+        raise
+
+
+def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True, cache_file='all_stocks_kiwoom.xlsx'):
+    """
+    키움 API를 활용하여 전체 종목 리스트를 수집하는 함수
+    (유니버스 생성용 기초 데이터)
+    
+    Args:
+        kiwoom_client: Kiwoom API 클라이언트 인스턴스
+        use_cache: 캐시 읽기 여부 (기본값: True)
+        save_cache: 캐시 저장 여부 (기본값: True)
+        cache_file: 캐시 파일 경로 (기본값: 'all_stocks_kiwoom.xlsx')
+    
+    Returns:
+        DataFrame: 전체 종목 정보가 담긴 데이터프레임
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import time
+    
+    today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+    
+    # 캐시 파일 확인
+    if use_cache and os.path.exists(cache_file):
+        file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
+        file_date_str = file_mod_time.strftime("%Y%m%d")
+        
+        if file_date_str == today_str:
+            logger.info(f"오늘 생성된 캐시 파일을 사용합니다: {cache_file}")
+            try:
+                return pd.read_excel(cache_file, index_col=0)
+            except Exception as e:
+                logger.warning(f"캐시 파일 읽기 실패: {e}. API로 새로 조회합니다.")
+    
+    logger.info("키움 API로 종목 정보를 수집합니다...")
+    
+    # 1단계: 전체 종목 리스트 가져오기 (ka10099)
+    logger.info("1/2: 종목 리스트 조회 중 (ka10099)...")
+    kospi_list = kiwoom_client.get_code_list_by_market("0")  # 코스피
+    kosdaq_list = kiwoom_client.get_code_list_by_market("10")  # 코스닥
+    
+    all_stocks = []
+    for stock in kospi_list:
+        all_stocks.append({**stock, 'market': '코스피'})
+    for stock in kosdaq_list:
+        all_stocks.append({**stock, 'market': '코스닥'})
+    
+    logger.info(f"총 {len(all_stocks)}개 종목 발견 (코스피: {len(kospi_list)}, 코스닥: {len(kosdaq_list)})")
+    
+    # 2단계: 각 종목의 상세 정보 가져오기 (ka10001)
+    logger.info("2/2: 종목별 상세 정보 조회 중 (ka10001)... (시간이 소요될 수 있습니다)")
+    
+    stock_data = []
+    failed_count = 0
+    
+    for idx, stock in enumerate(all_stocks, 1):
+        if idx % 100 == 0:
+            logger.info(f"진행 상황: {idx}/{len(all_stocks)}...")
+        
+        info = kiwoom_client.get_stock_info(stock['code'])
+        
+        if info:
+            try:
+                stock_data.append({
+                    '종목코드': stock['code'],
+                    '종목명': info.get('name', stock['name']),
+                    '시장구분': stock['market'],
+                    '현재가': int(info.get('cur_prc', 0)),
+                    '거래량': int(info.get('trde_qty', 0)),
+                    '거래대금': int(info.get('trde_amt', 0)),  # 백만원 단위
+                    '시가총액': int(info.get('mrkt_cap', 0)),  # 백만원 단위
+                    '등락률': float(info.get('flu_rt', 0)),
+                    '외국인비율': float(info.get('for_exh_rt', 0)),
+                    '상장주식수': int(info.get('list_cnt', 0)),
+                })
+            except (ValueError, TypeError) as e:
+                logger.warning(f"종목 {stock['code']} 데이터 파싱 실패: {e}")
+                failed_count += 1
+        else:
+            failed_count += 1
+        
+        # Rate limit 방지
+        time.sleep(0.1)
+    
+    logger.info(f"데이터 수집 완료: {len(stock_data)}개 성공, {failed_count}개 실패")
+    
+    # DataFrame 생성
+    df = pd.DataFrame(stock_data)
+    
+    # 캐시 저장
+    if save_cache:
+        try:
+            df.to_excel(cache_file)
+            logger.info(f"캐시 파일 저장: {cache_file}")
+        except Exception as e:
+            logger.warning(f"캐시 파일 저장 실패: {e}")
+    
+    return df
+
+
 def is_market_hours():
     """
     장시간인지 확인하는 함수
@@ -84,7 +206,7 @@ def execute_crawler():
     df_total.reset_index(inplace=True, drop=True)
 
     # 전체 크롤링 결과를 엑셀 출력
-    df_total.to_excel('NaverFinance.xlsx')
+    df_total.to_excel('all_stocks_naver.xlsx')
 
     # 크롤링 결과를 반환
     return df_total
@@ -145,14 +267,44 @@ def crawler(code, page):
     return df
 
 
-def get_universe():
+def get_universe(kiwoom_client=None, use_kiwoom_api=False):
     """
-    유니버스를 생성하는 함수
-    - 오늘 날짜 파일이 있으면 사용
-    - 없거나 오래되었으면 크롤링 시도
-    - 크롤링 실패 시 기존 파일 사용 (fallback)
+    유니버스를 생성하는 함수 (스마트 캐싱 전략)
+    
+    Args:
+        kiwoom_client: Kiwoom API 클라이언트 (장 종료 후 자동으로 사용)
+        use_kiwoom_api: 키움 API 강제 사용 (기본값: False, 자동 판단)
+    
+    Returns:
+        list: 종목명 리스트
+    
+    동작 방식 (스마트 전략):
+    1. 장 종료 후 (15:30 이후) → 키움 API로 당일 데이터 수집하여 캐싱
+    2. 장 중 → 네이버 크롤링 시도 (빠름) → 실패 시 캐시 사용
+    3. 수동으로 use_kiwoom_api=True 지정 시 → 항상 API 사용
     """
-    excel_file = 'NaverFinance.xlsx'
+    from util.time_helper import check_transaction_closed
+    
+    # 장 종료 후면 키움 API로 당일 데이터 갱신 (kiwoom_client가 있는 경우)
+    if kiwoom_client and (use_kiwoom_api or check_transaction_closed()):
+        mode = "강제 모드" if use_kiwoom_api else "장 종료 후 자동 갱신"
+        logger.info(f"키움 API로 유니버스 생성을 시도합니다... ({mode})")
+        try:
+            df = fetch_all_stocks_from_kiwoom(kiwoom_client)
+            logger.info(f"✅ 키움 API로 {len(df)}개 종목 정보 획득 및 캐싱 완료")
+            return _filter_and_create_universe(df)
+        except Exception as e:
+            logger.error(f"키움 API 유니버스 생성 실패: {e}")
+            if use_kiwoom_api:  # 강제 모드였다면 fallback
+                logger.info("네이버 크롤링으로 fallback합니다...")
+            else:  # 장 종료 후 자동 모드였다면 캐시 우선 시도
+                logger.info("캐시 파일 확인 후 크롤링을 시도합니다...")
+                cached_df = _try_load_cache()
+                if cached_df is not None:
+                    logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
+                    return _filter_and_create_universe(cached_df)
+            # 아래 네이버 크롤링 로직으로 계속 진행
+    excel_file = 'all_stocks_naver.xlsx'
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
     
     # 오늘 날짜 파일이 있는지 확인
@@ -177,27 +329,57 @@ def get_universe():
         print(f"크롤링을 실행합니다...")
         
         try:
-            # 크롤링 결과를 얻어옴
-            df = execute_crawler()
-            logger.info(f"크롤링 성공: {len(df)}개 종목")
-            
+            df = execute_crawler(excel_file)
         except Exception as e:
-            logger.error(f"크롤링 실패: {e}")
-            print(f"크롤링 실패: {e}")
-            
-            # 크롤링 실패 시 기존 파일 사용 (fallback)
-            if os.path.exists(excel_file):
-                logger.warning(f"크롤링 실패. 기존 {excel_file} 파일을 사용합니다.")
-                print(f"⚠️  크롤링 실패. 기존 파일을 사용합니다.")
-                try:
-                    df = pd.read_excel(excel_file, index_col=0)
-                except Exception as read_error:
-                    logger.error(f"기존 파일 읽기도 실패: {read_error}")
-                    raise Exception(f"크롤링 및 파일 읽기 모두 실패: {e}, {read_error}")
+            # 캐시 파일 사용 (네이버 + 키움 API 캐시 모두 시도)
+            logger.warning(f"크롤링 실패: {e}. 캐시 파일을 확인합니다...")
+            cached_df = _try_load_cache()
+            if cached_df is not None:
+                logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
+                df = cached_df
             else:
-                logger.error(f"크롤링 실패이고 기존 파일도 없습니다.")
-                raise Exception(f"크롤링 실패이고 기존 파일도 없습니다: {e}")
+                logger.error(f"크롤링 실패이고 사용 가능한 캐시도 없습니다.")
+                raise Exception(f"크롤링 실패이고 사용 가능한 캐시도 없습니다: {e}")
 
+    return _filter_and_create_universe(df)
+
+
+def _try_load_cache():
+    """
+    캐시 파일을 로드하는 내부 함수 (우선순위: 키움 API 캐시 → 네이버 크롤링 캐시)
+    
+    Returns:
+        DataFrame or None: 캐시 데이터 또는 None (실패 시)
+    """
+    cache_files = [
+        'all_stocks_kiwoom.xlsx',  # 키움 API 전체 종목 (우선)
+        'all_stocks_naver.xlsx'     # 네이버 크롤링 전체 종목
+    ]
+    
+    for cache_file in cache_files:
+        if os.path.exists(cache_file):
+            try:
+                df = pd.read_excel(cache_file, index_col=0)
+                file_mod_time = datetime.fromtimestamp(
+                    os.path.getmtime(cache_file), 
+                    tz=ZoneInfo("Asia/Seoul")
+                )
+                logger.info(f"캐시 파일 발견: {cache_file} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                print(f"⚠️  캐시 파일 사용: {cache_file}")
+                return df
+            except Exception as e:
+                logger.warning(f"{cache_file} 읽기 실패: {e}")
+                continue
+    
+    return None
+
+
+def _filter_and_create_universe(df):
+    """
+    DataFrame을 받아서 필터링하고 유니버스를 생성하는 내부 함수
+    네이버 크롤링과 키움 API 모두에서 공통으로 사용
+    """
+    # 데이터 정제
     mapping = {',': '', 'N/A': '0', '%': ''}
     df.replace(mapping, regex=True, inplace=True)
 
