@@ -46,11 +46,24 @@ main.py → Kiwoom(API) ← RSIStrategy(Thread)
 ### 시간 처리
 **항상** `util.time_helper.get_korea_time()` 사용:
 ```python
-from util.time_helper import get_korea_time, check_transaction_open
+from util.time_helper import get_korea_time, check_transaction_open, is_market_closed_day
 now = get_korea_time()  # timezone-aware KST
-if check_transaction_open():  # 장 중(09:00-15:20) 체크
+if check_transaction_open():  # 장 중(09:00-15:20) 체크 + 휴장일 자동 제외
+if is_market_closed_day():  # 주말/공휴일 체크
 ```
 ❌ `datetime.now()` 직접 사용 금지 (서버 시간대 의존)
+
+**한국 증시 시간대 구조**:
+- `09:00-15:20`: 정규시장 매매 가능 시간
+- `15:20-15:30`: 장 종료 동시호가 (신규 주문 불가)
+- `15:30`: 공식 장 마감 (종가 확정)
+- `15:30-16:00`: 데이터 캐싱 시간대
+
+**휴장일 처리 (2026-01-05 적용)**:
+- `check_transaction_open()`: 주말/공휴일 자동 필터링 (휴장일은 항상 False 반환)
+- `MARKET_HOLIDAYS_2026`: 2026년 한국 주식시장 휴장일 리스트 (`util/time_helper.py`)
+- **매년 초 업데이트 필요** - 한국거래소 영업일 달력 참고
+- 임시 휴장일 발생 시 리스트에 추가 후 재배포
 
 ### 환경변수 로딩 순서
 `main.py`의 초기화 순서 **반드시 준수**:

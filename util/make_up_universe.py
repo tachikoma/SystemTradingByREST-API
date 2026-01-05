@@ -158,16 +158,21 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
 
 def is_market_hours():
     """
-    장시간인지 확인하는 함수
-    평일 09:00 ~ 15:30 사이를 장시간으로 판단
+    장시간인지 확인하는 함수 (크롤링 가능 시간 체크용)
+    평일 09:00 ~ 15:30 사이를 장시간으로 판단 (휴장일 제외)
+    
+    주의: 15:30까지 포함하는 이유는 동시호가 시간대에도 크롤링 가능하기 때문
+          실제 매매는 15:20까지만 가능 (check_transaction_open 참고)
     """
+    from util.time_helper import is_market_closed_day
+    
     now = datetime.now(ZoneInfo("Asia/Seoul"))
     
-    # 주말 체크
-    if now.weekday() >= 5:  # 5=토요일, 6=일요일
+    # 휴장일 체크 (주말 + 공휴일)
+    if is_market_closed_day():
         return False
     
-    # 장시작: 09:00, 장마감: 15:30
+    # 장시작: 09:00, 장마감: 15:30 (공식 마감 시간)
     market_open = datetime_time(9, 0)
     market_close = datetime_time(15, 30)
     

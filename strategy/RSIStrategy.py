@@ -359,6 +359,7 @@ class RSIStrategy(threading.Thread):
                 logger.info("Korea time: %s", now)
                 
                 # 장 종료 후 데이터 캐싱 (15:30 ~ 16:00 사이)
+                # 15:30 = 공식 장 마감 시간 (동시호가 종료), 이후 당일 종가 확정
                 if now.hour == 15 and 30 <= now.minute < 60 and not self.data_cached_today:
                     logger.info("💾 장 종료 후 데이터 캐싱 시작...")
                     send_message("💾 장 종료 후 데이터 캐싱 시작")
