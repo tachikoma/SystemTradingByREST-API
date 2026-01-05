@@ -50,9 +50,10 @@ class RSIStrategy(threading.Thread):
         self.UNIVERSE_UPDATE_DAYS = 30  # 30일마다 재구성
         self.universe_updated_today = False
         
-        # 데이터 캐싱 관련 변수
-        self.last_data_cache_time = None
-        self.data_cached_today = False
+        # 전체 데이터 캐싱 관련 변수 (30일 주기)
+        self.last_full_cache_time = None
+        self.full_cache_in_progress = False
+        self.full_cache_done_today = False
         
         # 모의투자 매매제한 종목 블랙리스트 (모의투자에서만 사용)
         self.mock_trade_blacklist = set()
@@ -84,6 +85,9 @@ class RSIStrategy(threading.Thread):
     def init_strategy(self):
         """전략 초기화 기능을 수행하는 함수"""
         try:
+            # 전체 캐시 상태 체크 및 필요 시 즉시 캐싱
+            self.check_and_cache_if_needed()
+            
             # 유니버스 조회, 없으면 생성
             self.check_and_get_universe(True)
 
@@ -112,6 +116,47 @@ class RSIStrategy(threading.Thread):
             # 텔레그램 메시지 전송
             send_message(f"⚠️ 전략 초기화 실패\n{traceback.format_exc()}")
 
+    def check_and_cache_if_needed(self):
+        """프로그램 시작 시 캐시 상태 체크 및 필요 시 전체 캐싱"""
+        import os
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        
+        cache_file = 'all_stocks_kiwoom.xlsx'
+        now = get_korea_time()
+        
+        # 캐시 파일이 있는지 확인
+        if os.path.exists(cache_file):
+            file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
+            days_old = (now.date() - file_mod_time.date()).days
+            
+            logger.info(f"캐시 파일 발견: {days_old}일 전 데이터")
+            
+            # 30일 이내 캐시는 사용 가능
+            if days_old < self.UNIVERSE_UPDATE_DAYS:
+                logger.info(f"✅ 캐시 파일 사용 가능 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 이내)")
+                self.last_full_cache_time = file_mod_time
+                return
+            else:
+                logger.warning(f"⚠️ 캐시 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
+        else:
+            logger.warning("⚠️ 캐시 파일 없음")
+        
+        # 캐시가 없거나 오래된 경우 → 즉시 전체 캐싱
+        logger.info("💾 프로그램 시작: 전체 종목 캐싱 시작...")
+        send_message(f"💾 프로그램 시작: 전체 종목 캐싱 시작\n소요 예상: 약 66분 (모의투자) / 약 22분 (실전투자)")
+        
+        try:
+            from util.make_up_universe import cache_daily_data
+            cache_daily_data(self.kiwoom)
+            
+            self.last_full_cache_time = now
+            logger.info("✅ 전체 종목 캐싱 완료")
+            send_message("✅ 전체 종목 캐싱 완료")
+        except Exception as cache_error:
+            logger.error("전체 종목 캐싱 실패: %s", cache_error)
+            send_message(f"❌ 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
+    
     def load_mock_blacklist(self):
         """DB에서 모의투자 블랙리스트를 로드하는 함수"""
         if not self.kiwoom.mock:
@@ -358,25 +403,35 @@ class RSIStrategy(threading.Thread):
                 now = get_korea_time()
                 logger.info("Korea time: %s", now)
                 
-                # 장 종료 후 데이터 캐싱 (15:30 ~ 16:00 사이)
-                # 15:30 = 공식 장 마감 시간 (동시호가 종료), 이후 당일 종가 확정
-                if now.hour == 15 and 30 <= now.minute < 60 and not self.data_cached_today:
-                    logger.info("💾 장 종료 후 데이터 캐싱 시작...")
-                    send_message("💾 장 종료 후 데이터 캐싱 시작")
+                # 전체 종목 캐싱 (23:50 ~ 23:59 사이, 30일 주기)
+                # Universe 재구성 전날 밤에 미리 전체 종목 데이터 캐싱 (66분 소요)
+                if now.hour == 23 and 50 <= now.minute < 60 and not self.full_cache_done_today:
+                    days_since_cache = 999  # 최초 실행 시 무조건 캐싱
+                    if self.last_full_cache_time:
+                        days_since_cache = (now.date() - self.last_full_cache_time.date()).days
                     
-                    try:
-                        # 키움 API로 당일 데이터 수집 (force_cache=True)
-                        from util.make_up_universe import cache_daily_data
-                        cache_daily_data(self.kiwoom)
+                    # 30일 주기 또는 최초 실행 시 전체 캐싱
+                    if days_since_cache >= self.UNIVERSE_UPDATE_DAYS:
+                        logger.info("💾 전체 종목 캐싱 시작 (마지막 캐싱: %s)", 
+                                   self.last_full_cache_time.date() if self.last_full_cache_time else '최초')
+                        send_message(f"💾 전체 종목 캐싱 시작\n마지막 캐싱: {days_since_cache}일 전\n소요 예상: 약 66분 (모의투자) / 약 10분 (실전투자)")
                         
-                        self.data_cached_today = True
-                        self.last_data_cache_time = now
-                        
-                        logger.info("✅ 데이터 캐싱 완료")
-                        send_message("✅ 데이터 캐싱 완료")
-                    except Exception as cache_error:
-                        logger.error("데이터 캐싱 실패: %s", cache_error)
-                        send_message(f"❌ 데이터 캐싱 실패\n{cache_error}")
+                        self.full_cache_in_progress = True
+                        try:
+                            # 전체 4,233개 종목 캐싱
+                            from util.make_up_universe import cache_daily_data
+                            cache_daily_data(self.kiwoom)
+                            
+                            self.full_cache_done_today = True
+                            self.last_full_cache_time = now
+                            self.full_cache_in_progress = False
+                            
+                            logger.info("✅ 전체 종목 캐싱 완료")
+                            send_message("✅ 전체 종목 캐싱 완료")
+                        except Exception as cache_error:
+                            self.full_cache_in_progress = False
+                            logger.error("전체 종목 캐싱 실패: %s", cache_error)
+                            send_message(f"❌ 전체 종목 캐싱 실패\n{cache_error}")
                 
                 # Universe 재구성 체크 (매일 00:00 ~ 00:05 사이)
                 if now.hour == 0 and now.minute < 5 and not self.universe_updated_today:
@@ -400,7 +455,7 @@ class RSIStrategy(threading.Thread):
                 # 다음 날로 넘어가면 플래그 리셋
                 if now.hour == 1:
                     self.universe_updated_today = False
-                    self.data_cached_today = False
+                    self.full_cache_done_today = False
                 
                 # (0)장중인지 확인
                 if not check_transaction_open():

@@ -67,17 +67,21 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
     
-    # 캐시 파일 확인
+    # 캐시 파일 확인 (30일 이내 파일 사용 가능)
     if use_cache and os.path.exists(cache_file):
         file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
         file_date_str = file_mod_time.strftime("%Y%m%d")
+        days_old = (datetime.now(ZoneInfo("Asia/Seoul")).date() - file_mod_time.date()).days
         
-        if file_date_str == today_str:
-            logger.info(f"오늘 생성된 캐시 파일을 사용합니다: {cache_file}")
+        # 30일 이내 캐시 파일은 사용 가능
+        if days_old < 30:
+            logger.info(f"캐시 파일 사용: {cache_file} ({days_old}일 전 데이터, 30일 이내)")
             try:
                 return pd.read_excel(cache_file, index_col=0)
             except Exception as e:
                 logger.warning(f"캐시 파일 읽기 실패: {e}. API로 새로 조회합니다.")
+        else:
+            logger.warning(f"캐시 파일이 너무 오래됨: {days_old}일 전. API로 새로 조회합니다.")
     
     logger.info("키움 API로 종목 정보를 수집합니다...")
     
