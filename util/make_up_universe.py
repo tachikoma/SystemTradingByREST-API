@@ -394,7 +394,7 @@ def _try_load_cache():
     return None
 
 
-def _filter_and_create_universe(df):
+def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
     """
     DataFrame을 받아서 필터링하고 유니버스를 생성하는 내부 함수
     네이버 크롤링과 키움 API 모두에서 공통으로 사용
@@ -470,7 +470,19 @@ def _filter_and_create_universe(df):
     df = df.sort_values(by=['종합_순위'])
 
     # 필터링한 데이터프레임의 index 번호를 새로 매김
-    df.reset_index(inplace=True, drop=True)
+    df = df.reset_index(drop=True)
+
+    # 안전한 DataFrame 조작을 위해 복사본 사용
+    df = df.copy()
+
+    # 캐시에서 읽을 때 엑셀을 index_col=0으로 읽는 케이스를 지원
+    # index에 종목코드가 들어있다면 이를 명시적 컬럼으로 복원
+    if '종목코드' not in df.columns:
+        df = df.reset_index()
+        # reset_index로 생성된 첫 컬럼을 `종목코드`로 표준화
+        first_col = df.columns[0]
+        if first_col != '종목코드':
+            df = df.rename(columns={first_col: '종목코드'})
 
     # 상위 100개만 추출
     df = df.loc[:99]
@@ -483,11 +495,121 @@ def _filter_and_create_universe(df):
         raise Exception(error_msg)
 
     # 유니버스 생성 결과를 엑셀 출력
-    df.to_excel('universe.xlsx')
-    
-    universe_list = df['종목명'].tolist()
-    logger.info(f"Universe 생성 완료: {len(universe_list)}개 종목")
-    
+    # 우선 df는 필터링 및 정렬을 마친 상위 100개(또는 지정된 수) 후보입니다.
+    # 추가 조치: 현재 보유/주문 종목(kiwoom_client)을 병합하여 보유종목이 누락되지 않도록 함
+    try:
+        if kiwoom_client is not None:
+            held_codes = set()
+            order_codes = set()
+            try:
+                held_codes = set(getattr(kiwoom_client, 'balance', {}).keys())
+            except Exception:
+                held_codes = set()
+            try:
+                order_codes = set(getattr(kiwoom_client, 'order', {}).keys())
+            except Exception:
+                order_codes = set()
+
+            # 코드 -> 종목명 맵을 빠르게 조회
+            existing_codes = set(df['종목코드'].astype(str).tolist()) if '종목코드' in df.columns else set()
+
+            # 보유/주문 중 df에 없는 종목을 df에 추가(간단한 레코드로 추가)
+            missing_codes = (held_codes | order_codes) - existing_codes
+            added_rows = []
+            for code in missing_codes:
+                # 모의투자 블랙리스트 처리는 호출측에서 하도록 함
+                code_name = None
+                # 우선 Kiwoom client의 balance에서 종목명 사용
+                try:
+                    code_name = kiwoom_client.balance.get(code, {}).get('종목명')
+                except Exception:
+                    code_name = None
+                # 필요 시 API로 종목명 조회(안정성: 예외 처리)
+                if not code_name:
+                    try:
+                        code_name = kiwoom_client.get_master_code_name(code) or f"{code}"
+                    except Exception:
+                        code_name = f"{code}"
+
+                # 최소한의 행을 추가 (필요 컬럼에 NAs)
+                new_row = {col: None for col in df.columns}
+                if '종목코드' in df.columns:
+                    new_row['종목코드'] = code
+                # 종목명 컬럼이 존재하면 채움
+                if '종목명' in df.columns:
+                    new_row['종목명'] = code_name
+                added_rows.append(new_row)
+
+            if added_rows:
+                # concat으로 인한 FutureWarning 회피: 행 단위로 안전하게 추가
+                # 컬럼 타입에 맞는 기본값으로 채워 삽입 (all-NA 컬럼 생성 방지)
+                col_kinds = {col: df[col].dtype.kind for col in df.columns}
+                for new_row in added_rows:
+                    row_values = []
+                    for col in df.columns:
+                        if col in new_row and new_row[col] is not None:
+                            row_values.append(new_row[col])
+                        else:
+                            kind = col_kinds.get(col, 'O')
+                            if kind in ('i', 'u', 'f', 'c'):  # numeric types
+                                row_values.append(0)
+                            elif kind == 'b':
+                                row_values.append(False)
+                            else:
+                                row_values.append('')
+                    df.loc[len(df)] = row_values
+
+            # 이제 전체 후보에서 보유/주문을 우선 보존하되, max_codes를 초과하면
+            # 보유/주문이 아닌 기존 후보 중 거래량이 작은 순으로 제거
+            # 거래량 컬럼이름 다양성 고려
+            vol_col = None
+            for c in ['거래량', 'volume', '누적거래량']:
+                if c in df.columns:
+                    vol_col = c
+                    break
+
+            # mark held/order rows
+            df['_is_held_or_order'] = df['종목코드'].astype(str).isin(held_codes | order_codes) if '종목코드' in df.columns else False
+
+            # 만약 후보수가 초과하면 제거 수행
+            if len(df) > max_codes:
+                excess = len(df) - max_codes
+                # 제거 후보: 보유/주문이 아닌 행
+                # 제거 후보: 보유/주문이 아닌 행 (명시적 복사)
+                removable_df = df.loc[~df['_is_held_or_order']].copy()
+                if vol_col:
+                    # NaN을 0으로 대체한 별도 열을 생성하여 원본을 건드리지 않음
+                    vol_series = pd.to_numeric(removable_df[vol_col], errors='coerce').fillna(0)
+                    removable_sorted = removable_df.assign(_vol_numeric=vol_series).sort_values(by='_vol_numeric', ascending=True)
+                else:
+                    removable_sorted = removable_df
+
+                # 실제로 제거할 인덱스
+                to_remove_idx = removable_sorted.index.tolist()[:excess]
+                if len(to_remove_idx) < excess:
+                    logger.warning("병합 후 슬롯 부족: 제거 후보 부족 (필요:%d, 가능:%d)", excess, len(to_remove_idx))
+
+                # 제거
+                if to_remove_idx:
+                    df = df.drop(index=to_remove_idx).reset_index(drop=True)
+
+            # 최종적으로 max_codes까지 자름(안전망)
+            df = df.head(max_codes)
+
+            # cleanup
+            if '_is_held_or_order' in df.columns:
+                df = df.drop(columns=['_is_held_or_order'])
+
+    except Exception as e:
+        logger.warning(f"보유/주문 병합 중 경고 발생: {e}")
+
+    try:
+        df.to_excel('universe.xlsx')
+    except Exception as e:
+        logger.warning(f"universe.xlsx 저장 실패: {e}")
+
+    universe_list = df['종목명'].tolist() if '종목명' in df.columns else df.iloc[:, 0].astype(str).tolist()
+    logger.info(f"Universe 생성 완료: {len(universe_list)}개 종목 (병합 후)")
     return universe_list
 
 

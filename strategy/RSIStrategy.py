@@ -294,6 +294,9 @@ class RSIStrategy(threading.Thread):
                         logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code_dict["code"])
                         continue
                     temp_universe[code_dict["code"]] = code_name
+
+            # 보유 종목 병합은 주기적 검토 함수(`ensure_holdings_in_universe`)에서 처리합니다.
+            # 여기서는 유니버스 생성 결과만을 DB에 저장하고 메모리에 로드합니다.
             # 코드, 종목명, 생성일자자를 열로 가지는 DaaFrame 생성
             universe_df = pd.DataFrame({
                 'code': temp_universe.keys(),
@@ -581,21 +584,53 @@ class RSIStrategy(threading.Thread):
     
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
-        
-        # universe 딕셔너리의 key값들은 종목코드들을 의미
-        codes = self.universe.keys()
-        
-        # 모의투자일 때 블랙리스트 제외
-        if self.kiwoom.mock:
-            codes = [code for code in codes if code not in self.mock_trade_blacklist]
-        else:
-            codes = list(codes)
+        # 우선순위: 1) 보유종목, 2) 주문중인 종목, 3) 기존 universe 종목
+        try:
+            held = list(self.kiwoom.balance.keys())
+        except Exception:
+            held = []
+        try:
+            orders = list(self.kiwoom.order.keys())
+        except Exception:
+            orders = []
 
-        # 종목코드들을 ';'을 기준으로 묶어주는 작업
-        codes = ";".join(map(str, codes))
+        # 기존 universe 목록
+        existing = [c for c in list(self.universe.keys())]
 
-        # 종목코드들의 실시간 체결정보 수신을 요청
-        self.kiwoom.set_real_reg(codes, "0")
+        # 모의투자일 때 블랙리스트 제외 처리
+        def filter_blacklist(seq):
+            if self.kiwoom.mock:
+                return [c for c in seq if c not in self.mock_trade_blacklist]
+            return list(seq)
+
+        held = filter_blacklist(held)
+        orders = filter_blacklist(orders)
+        existing = filter_blacklist(existing)
+
+        # 병합하되 우선순위를 지키며 REALTIME_MAX_CODES 까지 선택
+        selected = []
+        for seq in (held, orders, existing):
+            for c in seq:
+                if c not in selected:
+                    selected.append(c)
+                if len(selected) >= self.REALTIME_MAX_CODES:
+                    break
+            if len(selected) >= self.REALTIME_MAX_CODES:
+                break
+
+        if len(selected) == 0:
+            logger.info("등록할 실시간 종목 없음")
+            return
+
+        if len(selected) > self.REALTIME_MAX_CODES:
+            logger.warning("실시간 등록 종목 수가 제한(%d)을 초과하여 잘라냄: 선택=%d", self.REALTIME_MAX_CODES, len(selected))
+
+        codes = ";".join(map(str, selected[:self.REALTIME_MAX_CODES]))
+        logger.info("실시간 등록 종목(%d): %s", len(selected[:self.REALTIME_MAX_CODES]), selected[:self.REALTIME_MAX_CODES])
+        try:
+            self.kiwoom.set_real_reg(codes, "0")
+        except Exception as e:
+            logger.error("실시간 등록 요청 실패: %s", e)
 
     def ensure_holdings_in_universe(self):
         """보유 또는 주문중인 종목이 universe에 없을 경우 임시로 로드하여 모니터링 대상에 포함시킵니다.
