@@ -475,6 +475,7 @@ class RSIStrategy(threading.Thread):
                     logger.info("=== 주기적 동기화 시작 ===")
                     try:
                         # API 호출 사이에 대기시간을 두어 rate limit 방지
+                        time.sleep(0.3)
                         self.kiwoom.get_order()
                         time.sleep(0.3)  # API 호출 간격 확보
                         
