@@ -462,6 +462,11 @@ class RSIStrategy(threading.Thread):
                     logger.info("장시간이 아니므로 5분간 대기합니다.")
                     time.sleep(5 * 60)
                     continue
+                # 보유/주문 종목이 유니버스에 없더라도 모니터링하도록 보장
+                try:
+                    self.ensure_holdings_in_universe()
+                except Exception as e:
+                    logger.error("ensure_holdings_in_universe 호출 중 오류: %s", e)
 
                 # 주기적 동기화 체크 (웹소켓 실시간 데이터 보완용)
                 current_time = time.time()
@@ -589,6 +594,65 @@ class RSIStrategy(threading.Thread):
 
         # 종목코드들의 실시간 체결정보 수신을 요청
         self.kiwoom.set_real_reg(codes, "0")
+
+    def ensure_holdings_in_universe(self):
+        """보유 또는 주문중인 종목이 universe에 없을 경우 임시로 로드하여 모니터링 대상에 포함시킵니다.
+
+        - DB에 이미 일봉 데이터가 있으면 로드하고, 없으면 Kiwoom API로 가져와 DB에 저장합니다.
+        - 임시로 `self.universe`에 추가하며, 바로 실시간 등록을 갱신합니다.
+        """
+        try:
+            # balance와 order에 있는 코드를 합쳐서 확인
+            codes_to_ensure = set(list(self.kiwoom.balance.keys()) + list(self.kiwoom.order.keys()))
+            added = []
+            for code in codes_to_ensure:
+                if not code:
+                    continue
+                if code in self.universe:
+                    continue
+
+                # 모의투자 블랙리스트면 모니터링 제외
+                if self.kiwoom.mock and code in self.mock_trade_blacklist:
+                    logger.info("블랙리스트로 인해 모니터링 제외: %s", code)
+                    continue
+
+                try:
+                    # DB에 데이터가 있으면 로드
+                    if check_table_exist(self.strategy_name, code):
+                        sql = "select * from `{}`".format(code)
+                        cur = execute_sql(self.strategy_name, sql)
+                        cols = [column[0] for column in cur.description]
+                        price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
+                        price_df = price_df.set_index('index')
+                    else:
+                        # API로 가격 데이터 조회 후 DB에 저장
+                        price_df = self.kiwoom.get_price_data(code)
+                        time.sleep(0.3)
+                        insert_df_to_db(self.strategy_name, code, price_df)
+
+                    # 종목명 획득 시도
+                    try:
+                        code_name = self.kiwoom.get_master_code_name(code)
+                    except Exception:
+                        code_name = self.kiwoom.balance.get(code, {}).get('종목명', 'N/A')
+
+                    # 임시로 universe에 추가
+                    self.universe[code] = {
+                        'code_name': code_name,
+                        'price_df': price_df
+                    }
+                    added.append(code)
+                except Exception as e:
+                    logger.error("보유/주문 종목을 universe에 추가 실패 (%s): %s", code, e)
+
+            if added:
+                logger.info("임시로 universe에 추가된 보유/주문 종목: %s", added)
+                try:
+                    self.set_universe_real_time()
+                except Exception as e:
+                    logger.error("실시간 재등록 실패: %s", e)
+        except Exception as e:
+            logger.error("ensure_holdings_in_universe 실패: %s", e)
 
     def calculate_rsi(self, code):
         """RSI를 계산하는 공통 함수
