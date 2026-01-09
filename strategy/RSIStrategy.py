@@ -26,6 +26,7 @@ class RSIStrategy(threading.Thread):
     RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
+    REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (API 제한)
     
     def __init__(self, kiwoom):
         threading.Thread.__init__(self)
@@ -617,7 +618,48 @@ class RSIStrategy(threading.Thread):
                     continue
 
                 try:
-                    # DB에 데이터가 있으면 로드
+                    # --- 실시간 등록 갯수 제한 처리 ---
+                    # 현재 universe와 보유/주문 코드를 합친 목표 집합 계산
+                    existing_universe = set(self.universe.keys())
+                    desired_set = existing_universe.union(codes_to_ensure)
+                    if len(desired_set) > self.REALTIME_MAX_CODES:
+                        # 제거 가능한 후보: 보유/주문이 아닌 기존 universe 종목
+                        removable = [c for c in existing_universe if c not in codes_to_ensure]
+
+                        excess = len(desired_set) - self.REALTIME_MAX_CODES
+                        if len(removable) >= excess:
+                            # 제거 우선순위: 거래량(마지막 행의 'volume') 적은 순으로 제거
+                            def last_volume(code_key):
+                                try:
+                                    df_tmp = self.universe.get(code_key, {}).get('price_df')
+                                    if df_tmp is None or len(df_tmp) == 0:
+                                        return 0
+                                    # 컬럼 이름 다양성 대비
+                                    for col in ['volume', '누적거래량']:
+                                        if col in df_tmp.columns:
+                                            return int(df_tmp.iloc[-1][col])
+                                    return 0
+                                except Exception:
+                                    return 0
+
+                            removable_sorted = sorted(removable, key=lambda x: last_volume(x))
+                            to_remove = removable_sorted[:excess]
+                            for r in to_remove:
+                                try:
+                                    del self.universe[r]
+                                except Exception:
+                                    pass
+                            logger.info("실시간 등록 제한으로 제거된 기존 universe 종목: %s", to_remove)
+                        else:
+                            # removable이 부족하면 모두 제거하고, 남는 슬롯만큼만 신규 추가 허용
+                            for r in removable:
+                                try:
+                                    del self.universe[r]
+                                except Exception:
+                                    pass
+                            logger.warning("충분한 제거 후보 없음: %d개 제거, 그러나 여전히 슬롯 부족 가능", len(removable))
+
+                    # --- DB 또는 API에서 가격 데이터 로드 ---
                     if check_table_exist(self.strategy_name, code):
                         sql = "select * from `{}`".format(code)
                         cur = execute_sql(self.strategy_name, sql)
@@ -636,12 +678,15 @@ class RSIStrategy(threading.Thread):
                     except Exception:
                         code_name = self.kiwoom.balance.get(code, {}).get('종목명', 'N/A')
 
-                    # 임시로 universe에 추가
-                    self.universe[code] = {
-                        'code_name': code_name,
-                        'price_df': price_df
-                    }
-                    added.append(code)
+                    # 임시로 universe에 추가 (다만 MAX 제한 이후엔 추가 실패 가능)
+                    if len(self.universe.keys()) < self.REALTIME_MAX_CODES:
+                        self.universe[code] = {
+                            'code_name': code_name,
+                            'price_df': price_df
+                        }
+                        added.append(code)
+                    else:
+                        logger.warning("실시간 등록 최대치(%d) 초과로 보유/주문 종목 추가 건너뜀: %s", self.REALTIME_MAX_CODES, code)
                 except Exception as e:
                     logger.error("보유/주문 종목을 universe에 추가 실패 (%s): %s", code, e)
 
