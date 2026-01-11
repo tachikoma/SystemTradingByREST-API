@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  systemtrading:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DB_DIR=/app/data
+    volumes:
+      - .:/app:delegated
+      - ./logs:/app/logs
+      - ./data:/app/data:delegated
+    restart: unless-stopped
+    command: ["poetry", "run", "python", "main.py"]
+
+  systemtrading-prod:
+    build:
+      context: .
+      args: {}
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DB_DIR=/app/data
+    # Use named volumes for production persistence (better performance on macOS and managed by Docker)
+    volumes:
+      - db_data:/app/data
+      - logs_data:/app/logs
+    restart: unless-stopped
+    command: ["poetry", "run", "python", "main.py"]
+
+  volumes:
+    db_data:
+    logs_data:

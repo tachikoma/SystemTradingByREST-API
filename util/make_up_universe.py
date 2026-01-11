@@ -6,6 +6,12 @@ from datetime import datetime, time as datetime_time
 from zoneinfo import ZoneInfo
 import logging
 import os
+from pathlib import Path
+
+
+# Directory for cache/data files (Excel, universe outputs)
+DB_DIR = os.getenv("DB_DIR", "./data")
+Path(DB_DIR).mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://finance.naver.com/sise/sise_market_sum.nhn?sosok='
 CODES = [0, 1]  # KOSPI:0, KOSDAQ:1
@@ -68,16 +74,17 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
     
     # 캐시 파일 확인 (30일 이내 파일 사용 가능)
-    if use_cache and os.path.exists(cache_file):
-        file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
+    cache_path = cache_file if os.path.isabs(cache_file) else os.path.join(DB_DIR, cache_file)
+    if use_cache and os.path.exists(cache_path):
+        file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_path), tz=ZoneInfo("Asia/Seoul"))
         file_date_str = file_mod_time.strftime("%Y%m%d")
         days_old = (datetime.now(ZoneInfo("Asia/Seoul")).date() - file_mod_time.date()).days
         
         # 30일 이내 캐시 파일은 사용 가능
         if days_old < 30:
-            logger.info(f"캐시 파일 사용: {cache_file} ({days_old}일 전 데이터, 30일 이내)")
+            logger.info(f"캐시 파일 사용: {Path(cache_path).resolve()} ({days_old}일 전 데이터, 30일 이내)")
             try:
-                return pd.read_excel(cache_file, index_col=0)
+                return pd.read_excel(cache_path, index_col=0)
             except Exception as e:
                 logger.warning(f"캐시 파일 읽기 실패: {e}. API로 새로 조회합니다.")
         else:
@@ -152,8 +159,8 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     # 캐시 저장
     if save_cache:
         try:
-            df.to_excel(cache_file)
-            logger.info(f"캐시 파일 저장: {cache_file}")
+            df.to_excel(cache_path)
+            logger.info(f"캐시 파일 저장: {Path(cache_path).resolve()}")
         except Exception as e:
             logger.warning(f"캐시 파일 저장 실패: {e}")
     
@@ -185,7 +192,7 @@ def is_market_hours():
     return market_open <= current_time <= market_close
 
 
-def execute_crawler():
+def execute_crawler(cache_file=None):
     # KOSPI, KOSDAQ 종목을 하나로 합치는데 사용할 변수
     df_total = []
 
@@ -226,7 +233,13 @@ def execute_crawler():
     df_total.reset_index(inplace=True, drop=True)
 
     # 전체 크롤링 결과를 엑셀 출력
-    df_total.to_excel('all_stocks_naver.xlsx')
+    out_file = cache_file or 'all_stocks_naver.xlsx'
+    out_path = out_file if os.path.isabs(out_file) else os.path.join(DB_DIR, out_file)
+    df_total.to_excel(out_path)
+    try:
+        logger.info(f"크롤링 결과 저장: {Path(out_path).resolve()}")
+    except Exception:
+        pass
 
     # 크롤링 결과를 반환
     return df_total
@@ -326,26 +339,27 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
             # 아래 네이버 크롤링 로직으로 계속 진행
     excel_file = 'all_stocks_naver.xlsx'
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+    excel_path = excel_file if os.path.isabs(excel_file) else os.path.join(DB_DIR, excel_file)
     
     # 오늘 날짜 파일이 있는지 확인
     file_is_today = False
-    if os.path.exists(excel_file):
-        file_mod_time = datetime.fromtimestamp(os.path.getmtime(excel_file), tz=ZoneInfo("Asia/Seoul"))
+    if os.path.exists(excel_path):
+        file_mod_time = datetime.fromtimestamp(os.path.getmtime(excel_path), tz=ZoneInfo("Asia/Seoul"))
         file_date_str = file_mod_time.strftime("%Y%m%d")
         file_is_today = (file_date_str == today_str)
         
         if file_is_today:
-            logger.info(f"오늘 생성된 {excel_file} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
-            print(f"오늘 생성된 {excel_file} 파일을 사용합니다.")
+            logger.info(f"오늘 생성된 {excel_path} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
+            print(f"오늘 생성된 {excel_path} 파일을 사용합니다.")
             try:
-                df = pd.read_excel(excel_file, index_col=0)
+                df = pd.read_excel(excel_path, index_col=0)
             except Exception as e:
                 logger.error(f"파일 읽기 실패: {e}. 크롤링을 시도합니다.")
                 file_is_today = False  # 파일 읽기 실패하면 크롤링 시도
     
     # 오늘 파일이 없거나 읽기 실패 시 크롤링 시도
     if not file_is_today:
-        logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(excel_file)}, 오늘 파일: {file_is_today})")
+        logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(excel_path)}, 오늘 파일: {file_is_today}, path={Path(excel_path).resolve()})")
         print(f"크롤링을 실행합니다...")
         
         try:
@@ -375,20 +389,25 @@ def _try_load_cache():
         'all_stocks_kiwoom.xlsx',  # 키움 API 전체 종목 (우선)
         'all_stocks_naver.xlsx'     # 네이버 크롤링 전체 종목
     ]
-    
+
     for cache_file in cache_files:
-        if os.path.exists(cache_file):
+        cache_path = cache_file if os.path.isabs(cache_file) else os.path.join(DB_DIR, cache_file)
+        if os.path.exists(cache_path):
             try:
-                df = pd.read_excel(cache_file, index_col=0)
+                df = pd.read_excel(cache_path, index_col=0)
                 file_mod_time = datetime.fromtimestamp(
-                    os.path.getmtime(cache_file), 
+                    os.path.getmtime(cache_path), 
                     tz=ZoneInfo("Asia/Seoul")
                 )
-                logger.info(f"캐시 파일 발견: {cache_file} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
-                print(f"⚠️  캐시 파일 사용: {cache_file}")
+                try:
+                    logger.info(f"캐시 파일 발견: {Path(cache_path).resolve()} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                    print(f"⚠️  캐시 파일 사용: {Path(cache_path).resolve()}")
+                except Exception:
+                    logger.info(f"캐시 파일 발견: {cache_path} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                    print(f"⚠️  캐시 파일 사용: {cache_path}")
                 return df
             except Exception as e:
-                logger.warning(f"{cache_file} 읽기 실패: {e}")
+                logger.warning(f"{cache_path} 읽기 실패: {e}")
                 continue
     
     return None
@@ -604,7 +623,12 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
         logger.warning(f"보유/주문 병합 중 경고 발생: {e}")
 
     try:
-        df.to_excel('universe.xlsx')
+        out_universe = os.path.join(DB_DIR, 'universe.xlsx')
+        df.to_excel(out_universe)
+        try:
+            logger.info(f"Universe 저장: {Path(out_universe).resolve()}")
+        except Exception:
+            logger.info(f"Universe 저장: {out_universe}")
     except Exception as e:
         logger.warning(f"universe.xlsx 저장 실패: {e}")
 

@@ -143,3 +143,6 @@ IDEA.py
 .DS_Store
 .vscode
 backtest/output
+
+# Local SQLite data directory
+data/
