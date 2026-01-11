@@ -6,6 +6,12 @@ from datetime import datetime, time as datetime_time
 from zoneinfo import ZoneInfo
 import logging
 import os
+from pathlib import Path
+
+
+# Directory for cache/data files (Excel, universe outputs)
+DB_DIR = os.getenv("DB_DIR", "./data")
+Path(DB_DIR).mkdir(parents=True, exist_ok=True)
 import time
 from util.time_helper import check_transaction_closed
 from util.logging_config import get_logger

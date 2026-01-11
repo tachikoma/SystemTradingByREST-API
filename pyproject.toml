@@ -29,6 +29,10 @@ backtest = [
     "matplotlib>=3.10.7,<4.0.0"
 ]
 
+backtest = [
+    "matplotlib (>=3.10.7,<4.0.0)"
+]
+
 [tool.poetry]
 package-mode = false
 

@@ -1,5 +1,14 @@
 import os
 import sqlite3
+from pathlib import Path
+
+
+DB_DIR = os.getenv("DB_DIR", "./data")
+Path(DB_DIR).mkdir(parents=True, exist_ok=True)
+
+
+def _db_path(db_name: str) -> str:
+    return str(Path(DB_DIR) / f"{db_name}.db")
 import logging
 from typing import Dict, Optional
 from util.logging_config import get_logger
