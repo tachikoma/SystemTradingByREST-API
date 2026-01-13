@@ -40,6 +40,10 @@ logger = get_logger(__name__)
 # 실제 네이버 필드 id는 사이트 변경에 따라 달라질 수 있으므로 최소한의 주요 항목을 포함
 DEFAULT_FIELD_IDS = ['open', 'high', 'low', 'market_sum', 'trd_amt', 'cur_prc']
 
+# 기본 필드 아이디(네이버 필드 id 목록이 변경되었을 때의 폴백)
+# 실제 네이버 필드 id는 사이트 변경에 따라 달라질 수 있으므로 최소한의 주요 항목을 포함
+DEFAULT_FIELD_IDS = ['open', 'high', 'low', 'market_sum', 'trd_amt', 'cur_prc']
+
 
 def cache_daily_data(kiwoom_client):
     """
