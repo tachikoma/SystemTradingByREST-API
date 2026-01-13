@@ -1,4 +1,5 @@
 import os
+import time
 import pytest
 from api.Kiwoom import Kiwoom
 
@@ -13,18 +14,37 @@ def kiwoom_client():
     if os.environ.get("RUN_INTEGRATION") != "1":
         pytest.skip("Integration tests disabled (set RUN_INTEGRATION=1 to enable)")
 
-    appkey = os.environ.get("KIW_APPKEY")
-    secret = os.environ.get("KIW_SECRET")
-    if not appkey or not secret:
-        pytest.skip("Kiwoom credentials not provided in env vars")
+    # mock 모드 여부 결정: 여러 환경변수명 호환
+    mode_env = os.environ.get("KIW_MODE") or os.environ.get("KIWOOM_MODE") or os.environ.get("KIW_MOCK")
+    mock = False
+    if mode_env:
+        m = mode_env.lower()
+        if m in ("mock", "m", "1", "true", "yes"):
+            mock = True
 
-    # 실제 API 사용(mock=False). 생성자에서 인증을 수행하고 웹소켓 스레드를 시작합니다.
-    # 픽스처는 종료 시점에 웹소켓을 중지하려고 시도합니다.
-    client = Kiwoom(appkey, secret, mock=False)
+    # 앱키/시크릿 선택: mock 전용 키 이름 또는 기본 키를 허용
+    if mock:
+        appkey = os.environ.get("KIW_MOCK_APPKEY") or os.environ.get("KIWOOM_MOCK_APPKEY") or os.environ.get("KIW_APPKEY")
+        secret = os.environ.get("KIW_MOCK_SECRET") or os.environ.get("KIWOOM_MOCK_SECRETKEY") or os.environ.get("KIW_SECRET")
+    else:
+        appkey = os.environ.get("KIW_APPKEY") or os.environ.get("KIWOOM_REAL_APPKEY")
+        secret = os.environ.get("KIW_SECRET") or os.environ.get("KIWOOM_REAL_SECRETKEY")
+
+    if not appkey or not secret:
+        pytest.skip("Kiwoom credentials not provided in env vars for selected mode")
+
+    # Kiwoom 클라이언트 생성 (mock 플래그 전달)
+    client = Kiwoom(appkey, secret, mock=mock)
     yield client
 
-    # Teardown: try to stop websocket and clean up
+    # Teardown: stop websocket and wait for clean shutdown
     try:
         client.stop_websocket()
+        # 최대 대기 시간 (초) - 환경변수로 조정 가능
+        timeout = float(os.environ.get("KIW_WS_SHUTDOWN_TIMEOUT", 5))
+        deadline = time.time() + timeout
+        # websocket_thread가 존재하고 살아있다면 최대 timeout까지 짧게 폴링하여 종료를 기다립니다
+        while getattr(client, 'websocket_thread', None) and client.websocket_thread.is_alive() and time.time() < deadline:
+            time.sleep(0.1)
     except Exception:
         pass
