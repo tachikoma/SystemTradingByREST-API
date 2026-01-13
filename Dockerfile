@@ -10,8 +10,15 @@ WORKDIR /app
 ENV POETRY_VERSION=2.2.1
 ENV POETRY_VIRTUALENVS_CREATE=false
 COPY pyproject.toml poetry.lock* /app/
+ARG DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive TZ=Asia/Seoul
+COPY pyproject.toml poetry.lock* /app/
+# Install build deps, Poetry, install project dependencies, then remove build deps
+# Use debconf-set-selections to preconfigure tzdata so apt doesn't prompt during build
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl ca-certificates git \
+    && apt-get install -y --no-install-recommends debconf-utils tzdata build-essential ca-certificates git curl \
+    && echo "tzdata tzdata/Areas select Asia" | debconf-set-selections \
+    && echo "tzdata tzdata/Zones/Asia select Seoul" | debconf-set-selections \
     && curl -sSL https://install.python-poetry.org | POETRY_HOME=/opt/poetry python3 - \
     && ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry \
     && poetry config virtualenvs.create false \
