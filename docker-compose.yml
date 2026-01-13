@@ -6,6 +6,7 @@ services:
     env_file:
       - .env
     environment:
+      - TZ=Asia/Seoul
       - PYTHONUNBUFFERED=1
       - DB_DIR=/app/data
     volumes:
@@ -22,6 +23,7 @@ services:
     env_file:
       - .env
     environment:
+      - TZ=Asia/Seoul
       - PYTHONUNBUFFERED=1
       - DB_DIR=/app/data
     # Use named volumes for production persistence (better performance on macOS and managed by Docker)

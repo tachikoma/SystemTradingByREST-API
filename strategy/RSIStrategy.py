@@ -261,7 +261,14 @@ class RSIStrategy(threading.Thread):
             return
 
         if force_update or not check_table_exist(self.strategy_name, 'universe'):
-            logger.info("Universe table does not exist. Creating new universe.")
+            # 명확한 로그: 강제 갱신 요청인지, 테이블이 존재하지 않아 생성하는지 구분 출력
+            table_exists = check_table_exist(self.strategy_name, 'universe')
+            if force_update and table_exists:
+                logger.info("Force update requested: existing universe table will be replaced (force_update=True).")
+            elif force_update and not table_exists:
+                logger.info("Force update requested and no existing universe table: creating new universe (force_update=True).")
+            else:
+                logger.info("Universe table does not exist. Creating new universe.")
             
             try:
                 # 스마트 유니버스 생성: 장 종료 후면 API로 당일 데이터 갱신, 장 중이면 크롤링

@@ -36,4 +36,5 @@ def execute_sql(db_name, sql, param={}):
 
 
 if __name__ == "__main__":
-    pass
+    result = check_table_exist("RSIStrategy", "universe")
+    print(f"Table 'universe' exists: {result}")
