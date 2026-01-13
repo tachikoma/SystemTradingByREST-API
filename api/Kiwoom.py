@@ -120,24 +120,45 @@ class Kiwoom:
 
 
 
-    def get_code_list_by_market(self, market_type):
+    def get_code_list_by_market(self, market_type, max_retries=3, retry_delay=0.5):
         """
         지정한 마켓 유형에 대한 종목 코드와 이름 목록을 반환합니다.
         `market_type`: '0' (KOSPI), '10' (KOSDAQ) 등
+
+        재시도 로직: API에서 요청 한도 초과 응답(return_code == 5 및
+        return_msg에 RATE_LIMIT_MSG 포함)을 반환할 때만 재시도합니다.
         """
         path = "/api/dostk/stkinfo"
         api_id = "ka10099"
         params = {"mrkt_tp": market_type}
 
-        res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST")
-
         code_list = []
-        if res_data and isinstance(res_data, dict) and "list" in res_data:
-            for item in res_data["list"]:
-                code_list.append({"code": item["code"], "name": item["name"]})
-        else:
-            logger.warning(f"Failed to retrieve code list for market {market_type} or unexpected response format: {res_data}")
 
+        for attempt in range(max_retries):
+            res_data, res_headers = self._request(path=path, api_id=api_id, params=params, method="POST")
+
+            if res_data and isinstance(res_data, dict) and "list" in res_data:
+                for item in res_data["list"]:
+                    code_list.append({"code": item.get("code"), "name": item.get("name")})
+                return code_list
+
+            # 요청 한도 초과 응답일 경우에만 재시도
+            if (
+                res_data is not None and
+                isinstance(res_data, dict) and
+                "return_code" in res_data and
+                res_data.get("return_code") == 5 and
+                RATE_LIMIT_MSG in res_data.get("return_msg", "")
+            ):
+                logger.warning(f"API rate limit exceeded for market {market_type} (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+
+            # 기타 실패는 재시도하지 않음
+            logger.warning(f"Failed to retrieve code list for market {market_type} or unexpected response format: {res_data}")
+            break
+
+        logger.error(f"All retries failed for market {market_type}.")
         return code_list
 
     def get_master_code_name(self, code, max_retries=3, retry_delay=0.5):
@@ -1004,11 +1025,72 @@ class Kiwoom:
         """WebSocket 스레드와 이벤트 루프를 안전하게 중지합니다."""
         self._websocket_stop_event.set()
         self.is_websocket_connected = False
-        if self.asyncio_loop:
-            self.asyncio_loop.call_soon_threadsafe(self.asyncio_loop.stop)
+        loop = getattr(self, 'asyncio_loop', None)
+        # 안전 셧다운: 루프가 살아있다면 셧다운 코루틴을 해당 루프에서 실행하도록 요청
+        if loop and not loop.is_closed():
+            try:
+                # _shutdown_websocket는 루프 내부에서 웹소켓을 닫고 관련 태스크를 정리합니다
+                fut = asyncio.run_coroutine_threadsafe(self._shutdown_websocket(), loop)
+                # 기본 대기시간은 5초
+                try:
+                    fut.result(timeout=5)
+                except Exception as e:
+                    logger.warning(f"Exception while waiting for websocket shutdown: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to schedule websocket shutdown on loop: {e}")
+
+        # 스레드 종료 대기
         if self.websocket_thread and self.websocket_thread.is_alive():
             self.websocket_thread.join(timeout=5)
-            logger.info("WebSocket thread stopped.")
+            if self.websocket_thread.is_alive():
+                logger.warning("WebSocket thread did not stop within timeout")
+            else:
+                logger.info("WebSocket thread stopped.")
+
+    async def _shutdown_websocket(self):
+        """루프 내부에서 실행되는 안전한 웹소켓 셧다운 코루틴.
+
+        - 열린 웹소켓을 닫음
+        - 웹소켓 관련 대기중인 태스크들을 취소하고 대기
+        - 내부 상태 정리 후 루프 중지 신호를 냄
+        """
+        try:
+            # 1) 웹소켓이 열려있다면 닫기 (recv 대기 해제)
+            if getattr(self, 'websocket', None):
+                try:
+                    await self.websocket.close()
+                except Exception as e:
+                    logger.warning(f"websocket.close() failed during shutdown: {e}")
+
+            # 2) 현재 루프의 모든 태스크를 취소하되, 현재 셧다운 태스크는 제외
+            try:
+                current = asyncio.current_task()
+                tasks = [t for t in asyncio.all_tasks() if t is not current]
+                if tasks:
+                    for t in tasks:
+                        try:
+                            t.cancel()
+                        except Exception:
+                            pass
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as e:
+                logger.debug(f"Error while cancelling tasks during websocket shutdown: {e}")
+
+        finally:
+            # 상태 정리
+            try:
+                self.websocket = None
+                self.is_websocket_connected = False
+                self._websocket_logged_in = False
+                self._websocket_login_sent = False
+            except Exception:
+                pass
+            # 루프 중지 요청 (실행 중인 루프에서 호출되므로 안전)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.stop()
+            except Exception:
+                pass
 
     async def _send_websocket_message(self, message):
         """WebSocket 서버로 메시지를 전송합니다. 필요 시 재연결과 사전 LOGIN 처리를 합니다."""
