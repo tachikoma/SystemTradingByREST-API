@@ -9,11 +9,11 @@ services:
       - PYTHONUNBUFFERED=1
       - DB_DIR=/app/data
     volumes:
-      - .:/app:delegated
+      # - .:/app:delegated
       - ./logs:/app/logs
       - ./data:/app/data:delegated
     restart: unless-stopped
-    command: ["poetry", "run", "python", "main.py"]
+    #command: ["poetry", "run", "python", "main.py"]
 
   systemtrading-prod:
     build:
@@ -29,8 +29,8 @@ services:
       - db_data:/app/data
       - logs_data:/app/logs
     restart: unless-stopped
-    command: ["poetry", "run", "python", "main.py"]
+    # command: ["poetry", "run", "python", "main.py"]
 
-  volumes:
-    db_data:
-    logs_data:
+volumes:
+  db_data:
+  logs_data:

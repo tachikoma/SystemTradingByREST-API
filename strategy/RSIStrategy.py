@@ -123,7 +123,13 @@ class RSIStrategy(threading.Thread):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         
-        cache_file = 'all_stocks_kiwoom.xlsx'
+        # DB_DIR 적용: .env의 DB_DIR을 우선 사용
+        db_dir = os.getenv('DB_DIR', '/app/data')
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except Exception:
+            pass
+        cache_file = os.path.join(db_dir, 'all_stocks_kiwoom.xlsx')
         now = get_korea_time()
 
         # 환경변수로 초기 전체 캐싱을 건너뛸 수 있음
