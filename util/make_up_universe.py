@@ -10,7 +10,6 @@ import os
 BASE_URL = 'https://finance.naver.com/sise/sise_market_sum.nhn?sosok='
 CODES = [0, 1]  # KOSPI:0, KOSDAQ:1
 START_PAGE = 1
-fields = []
 now = datetime.now(ZoneInfo("Asia/Seoul"))
 formattedDate = now.strftime("%Y%m%d")
 
@@ -21,6 +20,10 @@ MOCK_TRADE_BLACKLIST_CODES = [
 ]
 
 logger = logging.getLogger(__name__)
+
+# 기본 필드 아이디(네이버 필드 id 목록이 변경되었을 때의 폴백)
+# 실제 네이버 필드 id는 사이트 변경에 따라 달라질 수 있으므로 최소한의 주요 항목을 포함
+DEFAULT_FIELD_IDS = ['open', 'high', 'low', 'market_sum', 'trd_amt', 'cur_prc']
 
 
 def cache_daily_data(kiwoom_client):
@@ -185,33 +188,54 @@ def is_market_hours():
     return market_open <= current_time <= market_close
 
 
-def execute_crawler():
+def execute_crawler(output_file='all_stocks_naver.xlsx'):
     # KOSPI, KOSDAQ 종목을 하나로 합치는데 사용할 변수
     df_total = []
 
     # CODES에 담긴 KOSPI, KOSDAQ 종목 모두를 크롤링하기 위해 for문을 사용
     for code in CODES:
 
-        # 전체 페이지 개수를 가져오기 위한 코드
-        res = requests.get(BASE_URL + str(CODES[0]))
+        # 전체 페이지 개수를 가져오기 위한 코드 (마켓별로 `code` 사용)
+        res = requests.get(BASE_URL + str(code))
         page_soup = BeautifulSoup(res.text, 'lxml')
 
         # '맨뒤'에 해당하는 태그를 기준으로 전체 페이지 개수 추출하기
-        total_page_num = page_soup.select_one('td.pgRR > a')
-        total_page_num = int(total_page_num.get('href').split('=')[-1])
+        total_page_elem = page_soup.select_one('td.pgRR > a')
+        if total_page_elem is None:
+            logger.warning(f"전체 페이지 정보를 찾을 수 없어 market={code}을(를) 1페이지만 처리합니다.")
+            total_page_num = 1
+        else:
+            try:
+                total_page_num = int(total_page_elem.get('href').split('=')[-1])
+            except Exception as e:
+                logger.warning(f"전체 페이지 수 파싱 실패 (href={total_page_elem.get('href')}): {e}. 1로 처리합니다.")
+                total_page_num = 1
 
         # 조회할 수 있는 항목정보들 추출
         ipt_html = page_soup.select_one('div.subcnt_sise_item_top')
 
-        # 전역변수 fields에 항목들을 담아 다른 함수에서도 접근가능하도록 만듬
-        global fields
-        fields = [item.get('value') for item in ipt_html.select('input')]
+        # 페이지에서 조회할 항목정보들 추출 (로컬 변수로 관리)
+        if ipt_html is None:
+            logger.warning(f"항목 정보(div.subcnt_sise_item_top)를 찾을 수 없습니다. 기본 필드로 폴백합니다. (market={code})")
+            fields = DEFAULT_FIELD_IDS
+        else:
+            fields = [item.get('value') for item in ipt_html.select('input')]
 
-        # page마다 존재하는 모든 종목들의 항목정보를 크롤링해서 result에 저장(여기서 crawler 함수가 한 페이씩 크롤링해오는 역할을 담당)
-        result = [crawler(code, str(page)) for page in range(1, total_page_num + 1)]
+        # page마다 존재하는 모든 종목들의 항목정보를 크롤링해서 result에 저장
+        result = []
+        for page in range(1, total_page_num + 1):
+            try:
+                page_df = crawler(code, str(page), fields)
+                if page_df is not None and not page_df.empty:
+                    result.append(page_df)
+            except Exception as e:
+                logger.warning(f"페이지 크롤링 실패 (market={code}, page={page}): {e}")
 
         # 전체 페이지를 저장한 result를 하나의 데이터프레임으로 만듬
-        df = pd.concat(result, axis=0, ignore_index=True)
+        if result:
+            df = pd.concat(result, axis=0, ignore_index=True)
+        else:
+            df = pd.DataFrame()
         
         # 시장구분 컬럼 추가 (0=코스피, 1=코스닥)
         df['시장구분'] = '코스피' if code == 0 else '코스닥'
@@ -226,15 +250,17 @@ def execute_crawler():
     df_total.reset_index(inplace=True, drop=True)
 
     # 전체 크롤링 결과를 엑셀 출력
-    df_total.to_excel('all_stocks_naver.xlsx')
+    df_total.to_excel(output_file)
 
     # 크롤링 결과를 반환
     return df_total
 
 
-def crawler(code, page):
+def crawler(code, page, fields):
+    """Parse a single page using explicit `fields` (stateless).
 
-    global fields
+    `fields` is now required to make the function pure and deterministic.
+    """
 
     # Naver finance에 전달할 값들 세팅(요청을 보낼 때는 menu, fieldIds, returnUrl을 지정해서 보내야 함)
     data = {'menu': 'market_sum',
