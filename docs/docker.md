@@ -24,15 +24,15 @@ docker build --platform=linux/amd64 -t systemtrading:latest .
 docker run --rm --env-file .env -v "$(pwd)/logs:/app/logs" systemtrading:latest
 ```
 
-**docker-compose (개발)**
+**docker compose (개발)**
 ```bash
-# 개발 모드: 코드 변경 시 자동으로 반영하려면 볼륨을 유지
-docker-compose up --build
+# 개발 모드: 특정 서비스만 데몬으로 실행하려면 `-d <service>` 사용
+docker compose up --build -d systemtrading
 ```
 
-**docker-compose (프로덕션)**
+**docker compose (프로덕션)**
 ```bash
-docker-compose -f docker-compose.yml up --build -d systemtrading-prod
+docker compose -f docker-compose.yml up --build -d systemtrading-prod
 ```
 
 **로그와 데이터**
