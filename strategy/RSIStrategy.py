@@ -33,6 +33,22 @@ class RSIStrategy(threading.Thread):
         self.strategy_name = "RSIStrategy"
         self.kiwoom = kiwoom
 
+        # Kiwoom API 호출 허용 플래그 (환경변수로 제어 가능)
+        # ALLOW_KIWOOM_CALLS=1 또는 true/yes 로 설정하면 외부 API 호출을 허용합니다.
+        allow_flag = os.getenv('ALLOW_KIWOOM_CALLS', '0')
+        self.allow_kiwoom_calls = str(allow_flag).lower() in ('1', 'true', 'yes')
+        if self.allow_kiwoom_calls:
+            logger.info("Kiwoom API calls enabled via ALLOW_KIWOOM_CALLS")
+        else:
+            logger.info("Kiwoom API calls disabled (set ALLOW_KIWOOM_CALLS=1 to enable)")
+
+        # DB 기반 코드->종목명 캐시 로드 (전략 DB 사용)
+        try:
+            # master_list DB에서 전체 코드->종목명 맵을 로드
+            self.universe_map = load_all_stock_names('master_list')
+        except Exception:
+            self.universe_map = {}
+
         # 유니버스 정보를 담을 딕셔너리
         self.universe = {}
 
@@ -173,6 +189,59 @@ class RSIStrategy(threading.Thread):
                 logger.info("모의투자 블랙리스트 로드: %d개 종목", len(self.mock_trade_blacklist))
         except Exception as e:
             logger.error("블랙리스트 로드 실패: %s", e)
+
+    def resolve_stock_name(self, code):
+        """종목명 해석 우선순위: 메모리 캐시(self.universe_map) -> DB -> (옵션) Kiwoom API
+
+        반환값: 종목명(str) 또는 None
+        """
+        if not code:
+            return None
+
+        # 1) 메모리 캐시
+        try:
+            name = self.universe_map.get(code)
+            if name:
+                return name
+        except Exception:
+            name = None
+
+        # 2) DB 조회
+        try:
+            name = get_stock_name(self.strategy_name, code)
+            if name:
+                # 메모리 캐시에 보관
+                try:
+                    self.universe_map[code] = name
+                except Exception:
+                    pass
+                return name
+        except Exception:
+            pass
+
+        # 3) Kiwoom API 호출 (허용된 경우)
+        if self.allow_kiwoom_calls:
+            try:
+                # 안전 래퍼가 있으면 사용
+                if hasattr(self.kiwoom, 'get_master_code_name_safe'):
+                    name = self.kiwoom.get_master_code_name_safe(code)
+                else:
+                    name = self.kiwoom.get_master_code_name(code)
+                if name:
+                    try:
+                        # master_list DB에 저장
+                        upsert_stock_name('master_list', code, name)
+                    except Exception:
+                        pass
+                    try:
+                        self.universe_map[code] = name
+                    except Exception:
+                        pass
+                    return name
+            except Exception:
+                pass
+
+        return None
 
     def add_to_mock_blacklist(self, code, code_name, reason):
         """모의투자 블랙리스트에 종목을 추가하는 함수"""
@@ -559,11 +628,13 @@ class RSIStrategy(threading.Thread):
                         # 매도 주문 성공 시 일단 universe에 임시로 추가 (체결 완료될 때까지 유지)
                         self.universe[code] = holding_info[code]
                         logger.info("✅ 청산 주문 접수 완료: %s (%s)", code, code_name)
-                        send_message(f"✅ 청산 주문 접수\n종목: {code} ({code_name})\n수량: {quantity}주\n주문번호: {order_result.get('order_no', 'N/A')}")
+                        display = f"{code_name} ({code})" if code_name and code_name != 'N/A' else f"{code}"
+                        send_message(f"✅ 청산 주문 접수\n종목: {display}\n수량: {quantity}주\n주문번호: {order_result.get('order_no', 'N/A')}")
                     else:
                         error_msg = order_result.get('error_message', 'Unknown error')
                         logger.error("❌ 청산 주문 실패: %s (%s) - %s", code, code_name, error_msg)
-                        send_message(f"❌ 청산 주문 실패\n종목: {code} ({code_name})\n오류: {error_msg}")
+                        display = f"{code_name} ({code})" if code_name and code_name != 'N/A' else f"{code}"
+                        send_message(f"❌ 청산 주문 실패\n종목: {display}\n오류: {error_msg}")
                         # 실패해도 universe에 추가하여 다음에 다시 시도
                         self.universe[code] = holding_info[code]
                     
@@ -886,15 +957,19 @@ class RSIStrategy(threading.Thread):
                 # send_order()에서 이미 self.kiwoom.order[code]를 설정함
                 # 웹소켓 응답이 오면 자동으로 업데이트되고, 체결 완료 시 자동 삭제됨
                 
+                name = self.resolve_stock_name(code)
+                display = f"{name} ({code})" if name else f"{code}"
                 message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)".format(
-                    code, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee)
+                    display, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee)
                 logger.info(message)
                 send_message(message)
             else:
                 error_code = order_result.get('error_code', 'UNKNOWN')
                 error_message = order_result.get('error_message', '알 수 없는 오류')
+                name = self.resolve_stock_name(code)
+                display = f"{name} ({code})" if name else f"{code}"
                 error_msg = "❌ <b>매도 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
-                    code, quantity, ask, error_code, error_message)
+                    display, quantity, ask, error_code, error_message)
                 logger.error("매도 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
                 send_message(error_msg)
             
@@ -1016,16 +1091,20 @@ class RSIStrategy(threading.Thread):
                 # send_order()에서 이미 self.kiwoom.order[code]를 설정했으므로
                 # 여기서는 중복 설정하지 않음 (웹소켓 응답이 오면 자동 업데이트됨)
                 
-                # 텔레그램 메시지 전송
+                # 텔레그램 메시지 전송 (종목명 우선 표시)
+                name = self.resolve_stock_name(code)
+                display = f"{name} ({code})" if name else f"{code}"
                 message = "📈 <b>매수 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
-                    code, order_result.get('order_no', 'N/A'), quantity, bid, self.deposit)
+                    display, order_result.get('order_no', 'N/A'), quantity, bid, self.deposit)
                 logger.info(message)
                 send_message(message)
             else:
                 error_code = order_result.get('error_code', 'UNKNOWN')
                 error_message = order_result.get('error_message', '알 수 없는 오류')
+                name = self.resolve_stock_name(code)
+                display = f"{name} ({code})" if name else f"{code}"
                 error_msg = "❌ <b>매수 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
-                    code, quantity, bid, error_code, error_message)
+                    display, quantity, bid, error_code, error_message)
                 logger.error("매수 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
                 send_message(error_msg)
                 

@@ -151,6 +151,20 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     
     # DataFrame 생성
     df = pd.DataFrame(stock_data)
+    # --- master_list DB에 코드/종목명 저장(캐시 초기화용) ---
+    try:
+        from util.db_helper import upsert_stock_name
+        for row in stock_data:
+            try:
+                code = str(row.get('종목코드') or row.get('종목_code') or row.get('code'))
+                name = str(row.get('종목명') or row.get('종목명', None) or row.get('종목_name') or row.get('name') or '')
+                if code and name:
+                    upsert_stock_name('master_list', code, name)
+            except Exception:
+                continue
+    except Exception:
+        # DB 연동 실패 시에도 전체 기능은 유지되도록 무시
+        logger.debug("master_list 업서트 스텝 건너뜀 (DB 오류)")
     
     # 캐시 저장
     if save_cache:

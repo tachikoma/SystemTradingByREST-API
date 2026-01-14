@@ -190,6 +190,15 @@ class Kiwoom:
         logger.error(f"All retries failed for code {code}.")
         return None
 
+    def get_master_code_name_safe(self, code):
+        """예외를 흘려보내지 않는 안전한 래퍼: 내부적으로 get_master_code_name을 호출하고
+        실패 시 None을 반환합니다."""
+        try:
+            return self.get_master_code_name(code)
+        except Exception as e:
+            logger.exception("get_master_code_name_safe 실패: %s", e)
+            return None
+
     def get_stock_info(self, code, max_retries=3, retry_delay=0.5):
         """
         종목의 상세 기본정보를 조회합니다 (ka10001).
