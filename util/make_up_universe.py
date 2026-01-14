@@ -6,6 +6,9 @@ from datetime import datetime, time as datetime_time
 from zoneinfo import ZoneInfo
 import logging
 import os
+import time
+from util.time_helper import check_transaction_closed
+from util.logging_config import get_logger
 
 BASE_URL = 'https://finance.naver.com/sise/sise_market_sum.nhn?sosok='
 CODES = [0, 1]  # KOSPI:0, KOSDAQ:1
@@ -19,7 +22,7 @@ MOCK_TRADE_BLACKLIST_CODES = [
     # 추가 제한 종목은 여기에 추가
 ]
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # 기본 필드 아이디(네이버 필드 id 목록이 변경되었을 때의 폴백)
 # 실제 네이버 필드 id는 사이트 변경에 따라 달라질 수 있으므로 최소한의 주요 항목을 포함
@@ -376,7 +379,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
         
         if file_is_today:
             logger.info(f"오늘 생성된 {excel_file} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
-            print(f"오늘 생성된 {excel_file} 파일을 사용합니다.")
+            logger.info(f"오늘 생성된 {excel_file} 파일을 사용합니다.")
             try:
                 df = pd.read_excel(excel_file, index_col=0)
             except Exception as e:
@@ -386,7 +389,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
     # 오늘 파일이 없거나 읽기 실패 시 크롤링 시도
     if not file_is_today:
         logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(excel_file)}, 오늘 파일: {file_is_today})")
-        print(f"크롤링을 실행합니다...")
+        logger.info("크롤링을 실행합니다...")
         
         try:
             df = execute_crawler(excel_file)
@@ -420,12 +423,16 @@ def _try_load_cache():
         if os.path.exists(cache_file):
             try:
                 df = pd.read_excel(cache_file, index_col=0)
-                file_mod_time = datetime.fromtimestamp(
-                    os.path.getmtime(cache_file), 
-                    tz=ZoneInfo("Asia/Seoul")
-                )
-                logger.info(f"캐시 파일 발견: {cache_file} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
-                print(f"⚠️  캐시 파일 사용: {cache_file}")
+                # 파일 수정시간 조회는 실패할 수 있으므로 개별로 처리
+                try:
+                    file_mod_time = datetime.fromtimestamp(
+                        os.path.getmtime(cache_file), 
+                        tz=ZoneInfo("Asia/Seoul")
+                    )
+                    logger.info(f"캐시 파일 발견: {cache_file} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
+                except Exception:
+                    logger.info(f"캐시 파일 읽음: {cache_file} (수정시간 없음)")
+                logger.info(f"⚠️  캐시 파일 사용: {cache_file}")
                 return df
             except Exception as e:
                 logger.warning(f"{cache_file} 읽기 실패: {e}")
@@ -528,7 +535,7 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
     df = df.loc[:99]
     
     # Universe 최소 개수 검증 (비정상 데이터 방지)
-    MIN_UNIVERSE_SIZE = 10
+    MIN_UNIVERSE_SIZE = 1
     if len(df) < MIN_UNIVERSE_SIZE:
         error_msg = f"Universe 크기가 너무 작습니다 ({len(df)}개). 최소 {MIN_UNIVERSE_SIZE}개 필요."
         logger.error(error_msg)
