@@ -91,12 +91,13 @@ def configure_logging(log_dir: Optional[str] = None, file_name: str = 'kiwoom.lo
 
     fh = RotatingFileHandler(log_file, maxBytes=rotation_bytes, backupCount=backup_count, encoding='utf-8')
     fh.setLevel(level)
-    fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
+    fmt = logging.Formatter('%(asctime)s %(levelname)s [%(name)s] %(message)s', datefmt='%Y-%m-%dT%H:%M:%S%z')
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
     sh = logging.StreamHandler()
-    sh.setLevel(logging.WARNING)
+    sh_level = logging.DEBUG if root.level == logging.DEBUG else logging.INFO
+    sh.setLevel(sh_level)
     sh.setFormatter(fmt)
     root.addHandler(sh)
 

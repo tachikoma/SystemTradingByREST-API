@@ -219,14 +219,16 @@ class RSIStrategy(threading.Thread):
         try:
             name = self.universe_map.get(code)
             if name:
+                logger.debug("resolve_stock_name: memory cache hit %s -> %s", code, name)
                 return name
         except Exception:
             name = None
 
-        # 2) DB 조회
+        # 2) DB 조회: master_list 우선 조회
         try:
-            name = get_stock_name(self.strategy_name, code)
+            name = get_stock_name('master_list', code)
             if name:
+                logger.debug("resolve_stock_name: master_list DB hit %s -> %s", code, name)
                 # 메모리 캐시에 보관
                 try:
                     self.universe_map[code] = name
@@ -237,6 +239,7 @@ class RSIStrategy(threading.Thread):
             pass
 
         # 3) Kiwoom API 호출 (허용된 경우)
+        logger.debug("resolve_stock_name: allow_kiwoom_calls=%s for code=%s", self.allow_kiwoom_calls, code)
         if self.allow_kiwoom_calls:
             try:
                 # 안전 래퍼가 있으면 사용
@@ -244,6 +247,7 @@ class RSIStrategy(threading.Thread):
                     name = self.kiwoom.get_master_code_name_safe(code)
                 else:
                     name = self.kiwoom.get_master_code_name(code)
+                logger.debug("resolve_stock_name: Kiwoom API returned %s for %s", name, code)
                 if name:
                     try:
                         # master_list DB에 저장
@@ -955,17 +959,23 @@ class RSIStrategy(threading.Thread):
             if np.isnan(rsi) or np.isinf(rsi):
                 logger.warning("RSI 값이 유효하지 않습니다 (%s): %s", code, rsi)
                 return False
+
+            # 종목명 표시용 문자열
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
             
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
-            # 실제 수령액 = 매도금액 / SELL_FEE_RATE
-            # 손익분기점 = 매입가 * SELL_FEE_RATE (이 가격 이상에서 팔아야 손실 없음)
             breakeven_price = math.ceil(purchase_price * self.SELL_FEE_RATE)
+
+            # 로그: RSI 및 조건 여부 (DEBUG)
+            condition_met = (rsi > self.RSI_SELL_THRESHOLD and close > breakeven_price)
+            logger.debug("check_sell_signal %s RSI=%.2f close=%d breakeven=%d condition=%s", display, rsi, close, breakeven_price, condition_met)
             
             # 매도 조건: RSI 과열 + 수수료/세금 고려해도 수익
-            if rsi > self.RSI_SELL_THRESHOLD and close > breakeven_price:
+            if condition_met:
                 estimated_profit_rate = ((close - breakeven_price) / purchase_price) * 100
                 logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d, breakeven=%d, 예상수익률=%.2f%%)", 
-                           code, rsi, close, purchase_price, breakeven_price, estimated_profit_rate)
+                           display, rsi, close, purchase_price, breakeven_price, estimated_profit_rate)
                 return True
             else:
                 return False
@@ -1058,10 +1068,17 @@ class RSIStrategy(threading.Thread):
             ma20 = df[-1:]['ma20'].values[0]
             ma60 = df[-1:]['ma60'].values[0]
             ma200 = df[-1:]['ma200'].values[0]
+
+            # display name for logging
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
+            
+            # 로그: RSI 및 지표값 (DEBUG)
+            logger.debug("check_buy_signal %s RSI=%.2f ma20=%.2f ma60=%.2f ma200=%.2f", display, rsi, ma20, ma60, ma200)
             
             # 값들이 유효한지 체크
             if np.isnan(rsi) or np.isinf(rsi) or np.isnan(ma20) or np.isinf(ma20) or np.isnan(ma60) or np.isinf(ma60) or np.isnan(ma200) or np.isinf(ma200):
-                logger.warning("계산된 값이 유효하지 않습니다 (%s): rsi=%s, ma20=%s, ma60=%s, ma200=%s", code, rsi, ma20, ma60, ma200)
+                logger.warning("계산된 값이 유효하지 않습니다 (%s): rsi=%s, ma20=%s, ma60=%s, ma200=%s", display, rsi, ma20, ma60, ma200)
                 return False
             
             # 2 거래일 전 날짜(index)를 구함
@@ -1095,8 +1112,10 @@ class RSIStrategy(threading.Thread):
             return False
 
         # (2-1) 모의투자일 때 블랙리스트 체크
+        name = self.resolve_stock_name(code)
+        display = f"{name}({code})" if name else code
         if self.kiwoom.mock and code in self.mock_trade_blacklist:
-            logger.debug("블랙리스트 종목 매수 시도 차단: %s", code)
+            logger.debug("블랙리스트 종목 매수 시도 차단: %s", display)
             return
 
         # (3)매수 신호 확인(조건에 부합하면 주문 접수)

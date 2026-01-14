@@ -2,8 +2,9 @@ import os
 import sqlite3
 import logging
 from typing import Dict, Optional
+from util.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 from pathlib import Path
 
 

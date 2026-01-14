@@ -10,8 +10,9 @@ import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
+from util.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class BacktestEngine:
@@ -34,6 +35,7 @@ class BacktestEngine:
         enable_stop_loss: bool = False,  # 손절 비활성화 (기본값)
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%) - 극단적 상황용
         time_stop_loss_days: int = 180,  # 시간 손절 기준 (일) - 매우 보수적
+        symbol_names: Dict[str, str] = None,
     ):
         self.initial_capital = initial_capital
         self.max_holdings = max_holdings
@@ -54,6 +56,7 @@ class BacktestEngine:
         
         # 포트폴리오 상태
         self.cash = initial_capital
+        self.symbol_names = symbol_names or {}
         self.holdings: Dict[str, Dict] = {}  # {code: {'quantity': int, 'avg_price': float, 'buy_date': str}}
         
         # 거래 기록
@@ -146,6 +149,10 @@ class BacktestEngine:
             ma20 = current['ma20']
             ma60 = current['ma60']
             ma200 = current['ma200']
+
+            # display (name(code)) for logging
+            display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
+            logger.debug("check_buy_signal %s date=%s rsi=%.2f ma20=%.2f ma60=%.2f ma200=%.2f", display, date, rsi, ma20, ma60, ma200)
             
             # 2거래일 전 종가
             close_2days_ago = df.iloc[idx - 2]['close']
@@ -198,6 +205,10 @@ class BacktestEngine:
             
             close = current['close']
             rsi = current['rsi']
+
+            # display (name(code)) for logging
+            display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
+            logger.debug("check_sell_signal %s date=%s rsi=%.2f close=%d", display, date, rsi, close)
             
             # 값 유효성 체크
             if np.isnan(rsi):
@@ -339,7 +350,8 @@ class BacktestEngine:
             'total_cost': total_cost
         })
         
-        logger.info(f"[{date}] 매수: {code}, 가격: {price:,.0f}, 수량: {quantity}, 총액: {total_cost:,.0f}")
+        display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
+        logger.info(f"[{date}] 매수: {display}, 가격: {price:,.0f}, 수량: {quantity}, 총액: {total_cost:,.0f}")
     
     def execute_sell(self, code: str, price: float, date: str):
         """매도 주문 실행
@@ -387,7 +399,8 @@ class BacktestEngine:
             'profit_rate': profit_rate
         })
         
-        logger.info(f"[{date}] 매도: {code}, 가격: {price:,.0f}, 수량: {quantity}, "
+        display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
+        logger.info(f"[{date}] 매도: {display}, 가격: {price:,.0f}, 수량: {quantity}, "
                    f"수익: {profit:,.0f} ({profit_rate:.2f}%)")
     
     def calculate_portfolio_value(self, date: str, price_data: Dict[str, pd.DataFrame]) -> float:
