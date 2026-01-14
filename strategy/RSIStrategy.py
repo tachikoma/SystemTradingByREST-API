@@ -224,7 +224,39 @@ class RSIStrategy(threading.Thread):
         except Exception:
             name = None
 
-        # 2) DB 조회: master_list 우선 조회
+        # 2) 현재 로드된 universe (메모리) 우선 조회
+        try:
+            uni_item = self.universe.get(code)
+            if uni_item:
+                code_name = uni_item.get('code_name') if isinstance(uni_item, dict) else None
+                if code_name:
+                    logger.debug("resolve_stock_name: universe in-memory hit %s -> %s", code, code_name)
+                    try:
+                        self.universe_map[code] = code_name
+                    except Exception:
+                        pass
+                    return code_name
+        except Exception:
+            pass
+
+        # 3) 전략 DB의 universe 테이블에서 조회 (있다면 우선 사용)
+        try:
+            if check_table_exist(self.strategy_name, 'universe'):
+                sql = "select code_name from universe where code = '{}' LIMIT 1".format(code)
+                cur = execute_sql(self.strategy_name, sql)
+                row = cur.fetchone()
+                if row and row[0]:
+                    name = row[0]
+                    logger.debug("resolve_stock_name: strategy DB universe hit %s -> %s", code, name)
+                    try:
+                        self.universe_map[code] = name
+                    except Exception:
+                        pass
+                    return name
+        except Exception:
+            pass
+
+        # 4) DB 조회: master_list 우선 조회
         try:
             name = get_stock_name('master_list', code)
             if name:
