@@ -1,6 +1,13 @@
 import os
 import time
+import sys
+import pathlib
 import pytest
+
+# pytest 실행 시 프로젝트 루트를 import 경로에 추가하여
+# `from api.Kiwoom import Kiwoom` 같은 최상위 import가 동작하도록 함
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+
 from api.Kiwoom import Kiwoom
 
 
