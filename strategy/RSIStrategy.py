@@ -288,7 +288,9 @@ class RSIStrategy(threading.Thread):
             execute_sql(self.strategy_name, insert_sql)
             
             logger.warning("모의투자 블랙리스트 추가: %s (%s) - %s", code, code_name, reason)
-            send_message(f"🚫 <b>모의투자 블랙리스트 추가</b>\n종목: {code_name} ({code})\n사유: {reason}")
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
+            send_message(f"🚫 <b>모의투자 블랙리스트 추가</b>\n종목: {display}\n사유: {reason}")
             
             # universe에서 제거
             if code in self.universe:
@@ -677,12 +679,14 @@ class RSIStrategy(threading.Thread):
                         # 매도 주문 성공 시 일단 universe에 임시로 추가 (체결 완료될 때까지 유지)
                         self.universe[code] = holding_info[code]
                         logger.info("✅ 청산 주문 접수 완료: %s (%s)", code, code_name)
-                        display = f"{code_name} ({code})" if code_name and code_name != 'N/A' else f"{code}"
+                        name = self.resolve_stock_name(code)
+                        display = f"{name}({code})" if name else code
                         send_message(f"✅ 청산 주문 접수\n종목: {display}\n수량: {quantity}주\n주문번호: {order_result.get('order_no', 'N/A')}")
                     else:
                         error_msg = order_result.get('error_message', 'Unknown error')
                         logger.error("❌ 청산 주문 실패: %s (%s) - %s", code, code_name, error_msg)
-                        display = f"{code_name} ({code})" if code_name and code_name != 'N/A' else f"{code}"
+                        name = self.resolve_stock_name(code)
+                        display = f"{name}({code})" if name else code
                         send_message(f"❌ 청산 주문 실패\n종목: {display}\n오류: {error_msg}")
                         # 실패해도 universe에 추가하여 다음에 다시 시도
                         self.universe[code] = holding_info[code]
@@ -1007,7 +1011,7 @@ class RSIStrategy(threading.Thread):
                 # 웹소켓 응답이 오면 자동으로 업데이트되고, 체결 완료 시 자동 삭제됨
                 
                 name = self.resolve_stock_name(code)
-                display = f"{name} ({code})" if name else f"{code}"
+                display = f"{name}({code})" if name else code
                 message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)".format(
                     display, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee)
                 logger.info(message)
@@ -1016,7 +1020,7 @@ class RSIStrategy(threading.Thread):
                 error_code = order_result.get('error_code', 'UNKNOWN')
                 error_message = order_result.get('error_message', '알 수 없는 오류')
                 name = self.resolve_stock_name(code)
-                display = f"{name} ({code})" if name else f"{code}"
+                display = f"{name}({code})" if name else code
                 error_msg = "❌ <b>매도 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
                     display, quantity, ask, error_code, error_message)
                 logger.error("매도 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
@@ -1142,7 +1146,7 @@ class RSIStrategy(threading.Thread):
                 
                 # 텔레그램 메시지 전송 (종목명 우선 표시)
                 name = self.resolve_stock_name(code)
-                display = f"{name} ({code})" if name else f"{code}"
+                display = f"{name}({code})" if name else code
                 message = "📈 <b>매수 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
                     display, order_result.get('order_no', 'N/A'), quantity, bid, self.deposit)
                 logger.info(message)
@@ -1151,7 +1155,7 @@ class RSIStrategy(threading.Thread):
                 error_code = order_result.get('error_code', 'UNKNOWN')
                 error_message = order_result.get('error_message', '알 수 없는 오류')
                 name = self.resolve_stock_name(code)
-                display = f"{name} ({code})" if name else f"{code}"
+                display = f"{name}({code})" if name else code
                 error_msg = "❌ <b>매수 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
                     display, quantity, bid, error_code, error_message)
                 logger.error("매수 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
