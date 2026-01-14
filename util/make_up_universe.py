@@ -346,8 +346,6 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
     2. 장 중 → 네이버 크롤링 시도 (빠름) → 실패 시 캐시 사용
     3. 수동으로 use_kiwoom_api=True 지정 시 → 항상 API 사용
     """
-    from util.time_helper import check_transaction_closed
-    
     # 장 종료 후면 키움 API로 당일 데이터 갱신 (kiwoom_client가 있는 경우)
     if kiwoom_client and (use_kiwoom_api or check_transaction_closed()):
         mode = "강제 모드" if use_kiwoom_api else "장 종료 후 자동 갱신"
