@@ -139,8 +139,25 @@ class RSIStrategy(threading.Thread):
         from datetime import datetime
         from zoneinfo import ZoneInfo
         
-        cache_file = 'all_stocks_kiwoom.xlsx'
+        # DB_DIR 적용: .env의 DB_DIR을 우선 사용
+        db_dir = os.getenv('DB_DIR', '/app/data')
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except Exception:
+            pass
+        cache_file = os.path.join(db_dir, 'all_stocks_kiwoom.xlsx')
         now = get_korea_time()
+
+        # 환경변수로 초기 전체 캐싱을 건너뛸 수 있음
+        # 예: DISABLE_INITIAL_CACHE=1 또는 DISABLE_INITIAL_CACHE=true
+        disable_initial = os.getenv('DISABLE_INITIAL_CACHE', '0')
+        if str(disable_initial).lower() in ('1', 'true', 'yes'):
+            logger.warning("초기 전체 종목 캐싱이 환경변수로 비활성화되었습니다 (DISABLE_INITIAL_CACHE=%s)", disable_initial)
+            try:
+                send_message("⚠️ 초기 전체 종목 캐싱 비활성화: DISABLE_INITIAL_CACHE set")
+            except Exception:
+                pass
+            return
         
         # 캐시 파일이 있는지 확인
         if os.path.exists(cache_file):
@@ -325,8 +342,40 @@ class RSIStrategy(threading.Thread):
         Args:
             force_update: True이면 기존 universe를 무시하고 새로 생성
         """
+        # 환경변수로 초기 Universe 생성/갱신을 건너뛸 수 있음
+        disable_initial = os.getenv('DISABLE_INITIAL_CACHE', '0')
+        if str(disable_initial).lower() in ('1', 'true', 'yes'):
+            logger.warning("초기 Universe 생성이 환경변수로 비활성화되었습니다 (DISABLE_INITIAL_CACHE=%s)", disable_initial)
+            try:
+                send_message("⚠️ 초기 Universe 생성 비활성화: DISABLE_INITIAL_CACHE set")
+            except Exception:
+                pass
+            # 기존 universe 테이블이 있으면 로드하고, 없으면 건너뜀
+            if check_table_exist(self.strategy_name, 'universe'):
+                logger.info("기존 Universe 테이블을 로드합니다.")
+                sql = "select * from universe"
+                cur = execute_sql(self.strategy_name, sql)
+                universe_list_db = cur.fetchall()
+                for item in universe_list_db:
+                    idx, code, code_name, created_at = item
+                    if self.kiwoom.mock and code in self.mock_trade_blacklist:
+                        continue
+                    self.universe[code] = {'code_name': code_name}
+            else:
+                logger.warning("기존 Universe 테이블이 없습니다. 초기 생성은 건너뜁니다.")
+
+            # 초기 생성/갱신 요청이 비활성화되었으므로 여기서 종료
+            return
+
         if force_update or not check_table_exist(self.strategy_name, 'universe'):
-            logger.info("Universe table does not exist. Creating new universe.")
+            # 명확한 로그: 강제 갱신 요청인지, 테이블이 존재하지 않아 생성하는지 구분 출력
+            table_exists = check_table_exist(self.strategy_name, 'universe')
+            if force_update and table_exists:
+                logger.info("Force update requested: existing universe table will be replaced (force_update=True).")
+            elif force_update and not table_exists:
+                logger.info("Force update requested and no existing universe table: creating new universe (force_update=True).")
+            else:
+                logger.info("Universe table does not exist. Creating new universe.")
             
             try:
                 # 스마트 유니버스 생성: 장 종료 후면 API로 당일 데이터 갱신, 장 중이면 크롤링
