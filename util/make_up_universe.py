@@ -533,7 +533,7 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
     df = df.loc[:99]
     
     # Universe 최소 개수 검증 (비정상 데이터 방지)
-    MIN_UNIVERSE_SIZE = 1
+    MIN_UNIVERSE_SIZE = 10
     if len(df) < MIN_UNIVERSE_SIZE:
         error_msg = f"Universe 크기가 너무 작습니다 ({len(df)}개). 최소 {MIN_UNIVERSE_SIZE}개 필요."
         logger.error(error_msg)
