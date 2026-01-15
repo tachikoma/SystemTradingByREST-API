@@ -4,9 +4,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, time as datetime_time
 from zoneinfo import ZoneInfo
-import logging
 import os
-import time
 from util.time_helper import check_transaction_closed
 from util.logging_config import get_logger
 from pathlib import Path
@@ -274,8 +272,7 @@ def execute_crawler(output_file='all_stocks_naver.xlsx'):
     df_total.reset_index(inplace=True, drop=True)
 
     # 전체 크롤링 결과를 엑셀 출력
-    out_file = output_file
-    out_path = out_file if os.path.isabs(out_file) else os.path.join(DB_DIR, out_file)
+    out_path = out_file if os.path.isabs(output_file) else os.path.join(DB_DIR, output_file)
     df_total.to_excel(out_path)
     try:
         logger.info(f"크롤링 결과 저장: {Path(out_path).resolve()}")
@@ -372,7 +369,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
             if use_kiwoom_api:  # 강제 모드였다면 fallback
                 logger.info("네이버 크롤링으로 fallback합니다...")
             else:  # 장 종료 후 자동 모드였다면 캐시 우선 시도
-                logger.info("캐시 파일 확인 후 크롤링을 시도합니다...")
+                logger.info("캐시 파일 확인합니다...")
                 cached_df = _try_load_cache()
                 if cached_df is not None:
                     logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
@@ -398,6 +395,20 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                 logger.error(f"파일 읽기 실패: {e}. 크롤링을 시도합니다.")
                 file_is_today = False  # 파일 읽기 실패하면 크롤링 시도
     
+    # 크롤링 스킵: 평일 08:00-09:00에는 네이버 크롤링 데이터가 신뢰 불가
+    from util.time_helper import is_market_closed_day
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+    if not use_kiwoom_api and (not is_market_closed_day()):
+        if datetime_time(8, 0) <= now_kst.time() < datetime_time(9, 0):
+            logger.info("평일 08:00-09:00: 네이버 크롤링을 스킵합니다. 캐시 사용을 시도합니다.")
+            cached_df = _try_load_cache()
+            if cached_df is not None:
+                logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목 (크롤링 스킵)")
+                df = cached_df
+                file_is_today = True
+            else:
+                raise Exception("평일 08:00-09:00 이므로 크롤링을 스킵합니다. 사용 가능한 캐시가 없습니다.")
+
     # 오늘 파일이 없거나 읽기 실패 시 크롤링 시도
     if not file_is_today:
         logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(excel_path)}, 오늘 파일: {file_is_today}, path={Path(excel_path).resolve()})")

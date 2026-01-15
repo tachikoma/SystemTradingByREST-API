@@ -42,7 +42,7 @@ def execute_sql(db_name, sql, param={}):
 def _ensure_master_list_table(db_name: str):
     """`master_list` 테이블을 보장한다: code TEXT PRIMARY KEY, name TEXT"""
     try:
-        with sqlite3.connect('{}.db'.format(db_name)) as con:
+        with sqlite3.connect(_db_path(db_name)) as con:
             cur = con.cursor()
             cur.execute(
                 """CREATE TABLE IF NOT EXISTS master_list (
@@ -59,7 +59,7 @@ def upsert_stock_name(db_name: str, code: str, name: str) -> None:
     """종목 코드-명 정보를 INSERT OR REPLACE 한다."""
     try:
         _ensure_master_list_table(db_name)
-        with sqlite3.connect('{}.db'.format(db_name)) as con:
+        with sqlite3.connect(_db_path(db_name)) as con:
             cur = con.cursor()
             cur.execute("INSERT OR REPLACE INTO master_list (code, name) VALUES (?, ?)", (code, name))
             con.commit()
@@ -71,7 +71,7 @@ def get_stock_name(db_name: str, code: str) -> Optional[str]:
     """DB에서 종목명을 조회한다. 없으면 None 반환."""
     try:
         _ensure_master_list_table(db_name)
-        with sqlite3.connect('{}.db'.format(db_name)) as con:
+        with sqlite3.connect(_db_path(db_name)) as con:
             cur = con.cursor()
             cur.execute("SELECT name FROM master_list WHERE code = ?", (code,))
             row = cur.fetchone()
@@ -86,7 +86,7 @@ def load_all_stock_names(db_name: str) -> Dict[str, str]:
     result: Dict[str, str] = {}
     try:
         _ensure_master_list_table(db_name)
-        with sqlite3.connect('{}.db'.format(db_name)) as con:
+        with sqlite3.connect(_db_path(db_name)) as con:
             cur = con.cursor()
             cur.execute("SELECT code, name FROM master_list")
             for code, name in cur.fetchall():

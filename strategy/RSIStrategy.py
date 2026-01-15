@@ -403,7 +403,7 @@ class RSIStrategy(threading.Thread):
                             universe_created_at = created_at
                         
                         if self.kiwoom.mock and code in self.mock_trade_blacklist:
-                            logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code)
+                            logger.info("블랙리스트 종목 제외: %s(%s)", code_name, code)
                             continue
                         self.universe[code] = {
                             'code_name': code_name
@@ -447,7 +447,7 @@ class RSIStrategy(threading.Thread):
                 if code_name in universe_list:
                     # 모의투자일 때 블랙리스트 체크
                     if self.kiwoom.mock and code_dict["code"] in self.mock_trade_blacklist:
-                        logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code_dict["code"])
+                        logger.info("블랙리스트 종목 제외: %s(%s)", code_name, code_dict["code"])
                         continue
                     temp_universe[code_dict["code"]] = code_name
 
@@ -490,7 +490,7 @@ class RSIStrategy(threading.Thread):
                 
                 # 모의투자일 때 블랙리스트 체크
                 if self.kiwoom.mock and code in self.mock_trade_blacklist:
-                    logger.info("블랙리스트 종목 제외: %s (%s)", code_name, code)
+                    logger.info("블랙리스트 종목 제외: %s(%s)", code_name, code)
                     continue
                 self.universe[code] = {
                     'code_name': code_name
@@ -515,7 +515,9 @@ class RSIStrategy(threading.Thread):
     def check_and_get_price_data(self):
         """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""
         for idx, code in enumerate(self.universe.keys()):
-            logger.info("(%d/%d) %s", idx + 1, len(self.universe), code)
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
+            logger.info("(%d/%d) %s", idx + 1, len(self.universe), display)
             
             # 테이블 존재 여부 확인
             table_exists = check_table_exist(self.strategy_name, code)
@@ -526,7 +528,7 @@ class RSIStrategy(threading.Thread):
                 time.sleep(0.3)  # API 호출 후 대기
                 insert_df_to_db(self.strategy_name, code, price_df)
                 self.universe[code]['price_df'] = price_df
-                logger.debug("Created price table for %s", code)
+                logger.debug("Created price table for %s", display)
                 continue
             
             # 케이스 2: 장 종료 후 데이터 업데이트 필요한지 확인
@@ -542,7 +544,7 @@ class RSIStrategy(threading.Thread):
                     time.sleep(0.3)  # API 호출 후 대기
                     insert_df_to_db(self.strategy_name, code, price_df)
                     self.universe[code]['price_df'] = price_df
-                    logger.debug("Updated price data for %s", code)
+                    logger.debug("Updated price data for %s", display)
                     continue
             
             # 케이스 3: DB에서 기존 데이터 로드 (API 호출 없음, 대기 불필요)
@@ -553,7 +555,7 @@ class RSIStrategy(threading.Thread):
             price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
             price_df = price_df.set_index('index')
             self.universe[code]['price_df'] = price_df
-            logger.debug("Loaded price data from DB for %s", code)
+            logger.debug("Loaded price data from DB for %s", display)
 
     def run(self):
         """실질적 수행 역할을 하는 함수"""
@@ -634,12 +636,12 @@ class RSIStrategy(threading.Thread):
                     logger.info("=== 주기적 동기화 시작 ===")
                     try:
                         # API 호출 사이에 대기시간을 두어 rate limit 방지
-                        time.sleep(0.3)
+                        time.sleep(0.4)
                         self.kiwoom.get_order()
-                        time.sleep(0.3)  # API 호출 간격 확보
+                        time.sleep(0.4)  # API 호출 간격 확보
                         
                         self.kiwoom.get_balance()
-                        time.sleep(0.3)  # API 호출 간격 확보
+                        time.sleep(0.4)  # API 호출 간격 확보
                         
                         self.update_deposit()
                         
@@ -704,7 +706,7 @@ class RSIStrategy(threading.Thread):
                     code_name = holding_info[code].get('code_name', 'N/A')
                     quantity = self.kiwoom.balance[code]['보유수량']
                     
-                    logger.info("청산 주문: %s (%s) %d주", code, code_name, quantity)
+                    logger.info("청산 주문: %s(%s) %d주", code_name, code, quantity)
                     
                     # 시장가 매도 (order_classification='03')
                     order_result = self.kiwoom.send_order(
@@ -714,13 +716,13 @@ class RSIStrategy(threading.Thread):
                     if order_result.get('success'):
                         # 매도 주문 성공 시 일단 universe에 임시로 추가 (체결 완료될 때까지 유지)
                         self.universe[code] = holding_info[code]
-                        logger.info("✅ 청산 주문 접수 완료: %s (%s)", code, code_name)
+                        logger.info("✅ 청산 주문 접수 완료: %s(%s)", code_name, code)
                         name = self.resolve_stock_name(code)
                         display = f"{name}({code})" if name else code
                         send_message(f"✅ 청산 주문 접수\n종목: {display}\n수량: {quantity}주\n주문번호: {order_result.get('order_no', 'N/A')}")
                     else:
                         error_msg = order_result.get('error_message', 'Unknown error')
-                        logger.error("❌ 청산 주문 실패: %s (%s) - %s", code, code_name, error_msg)
+                        logger.error("❌ 청산 주문 실패: %s(%s) - %s", code_name, code, error_msg)
                         name = self.resolve_stock_name(code)
                         display = f"{name}({code})" if name else code
                         send_message(f"❌ 청산 주문 실패\n종목: {display}\n오류: {error_msg}")
@@ -730,7 +732,7 @@ class RSIStrategy(threading.Thread):
                     time.sleep(0.2)  # API 호출 간격
                     
                 except Exception as e:
-                    logger.exception("청산 주문 중 오류 (%s): %s", code, e)
+                    logger.exception("청산 주문 중 오류 %s(%s): %s", code_name, code, e)
                     # 오류 발생 시에도 universe에 추가하여 다음에 다시 시도
                     self.universe[code] = holding_info[code]
         else:
@@ -882,9 +884,9 @@ class RSIStrategy(threading.Thread):
                         }
                         added.append(code)
                     else:
-                        logger.warning("실시간 등록 최대치(%d) 초과로 보유/주문 종목 추가 건너뜀: %s", self.REALTIME_MAX_CODES, code)
+                        logger.warning("실시간 등록 최대치(%d) 초과로 보유/주문 종목 추가 건너뜀: %s(%s)", self.REALTIME_MAX_CODES, code_name, code)
                 except Exception as e:
-                    logger.error("보유/주문 종목을 universe에 추가 실패 (%s): %s", code, e)
+                    logger.error("보유/주문 종목을 universe에 추가 실패 %s(%s): %s", code_name, code, e)
 
             if added:
                 logger.info("임시로 universe에 추가된 보유/주문 종목: %s", added)
@@ -1065,13 +1067,15 @@ class RSIStrategy(threading.Thread):
                 display = f"{name}({code})" if name else code
                 error_msg = "❌ <b>매도 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
                     display, quantity, ask, error_code, error_message)
-                logger.error("매도 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
+                logger.error("매도 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
                 send_message(error_msg)
             
         except KeyError as e:
-            logger.error("매도 주문 처리 중 키 오류 (%s): %s", code, e)
+            code_name = self.resolve_stock_name(code)
+            logger.error("매도 주문 처리 중 키 오류 %s(%s): %s", code_name, code, e)
         except Exception as e:
-            logger.error("매도 주문 처리 중 예상치 못한 오류 (%s): %s", code, e)
+            code_name = self.resolve_stock_name(code)
+            logger.error("매도 주문 처리 중 예상치 못한 오류 %s(%s): %s", code_name, code, e)
 
     def check_buy_signal_and_order(self, code):
         """매수 대상인지 확인하고 주문을 접수하는 함수"""
@@ -1116,14 +1120,14 @@ class RSIStrategy(threading.Thread):
             # 2 거래일 전 날짜(index)를 구함
             today_str = get_korea_time().strftime('%Y%m%d')
             if today_str not in df.index:
-                logger.warning("오늘 날짜가 DataFrame에 없습니다 (%s): %s", code, today_str)
+                logger.warning("오늘 날짜가 DataFrame에 없습니다 (%s): %s", display, today_str)
                 return False
             
             idx = df.index.get_loc(today_str) - 2
             
             # 인덱스가 유효한지 체크
             if idx < 0 or idx >= len(df):
-                logger.warning("2 거래일 전 데이터 접근 불가 (%s): idx=%d, len=%d", code, idx, len(df))
+                logger.warning("2 거래일 전 데이터 접근 불가 (%s): idx=%d, len=%d", display, idx, len(df))
                 return False
             
             # 위 index로부터 2 거래일 전 종가를 얻어옴
@@ -1131,16 +1135,20 @@ class RSIStrategy(threading.Thread):
             
             # 2 거래일 전 종가와 현재가를 비교함
             if close_2days_ago == 0:
-                logger.warning("2 거래일 전 종가가 0입니다 (%s)", code)
+                logger.warning("2 거래일 전 종가가 0입니다 (%s)", display)
                 return False
             
             price_diff = (close - close_2days_ago) / close_2days_ago * 100
             
         except (KeyError, IndexError) as e:
-            logger.error("매수 신호 확인 중 오류 (%s): %s", code, e)
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
+            logger.error("매수 신호 확인 중 오류 (%s): %s", display, e)
             return False
         except Exception as e:
-            logger.error("매수 신호 확인 중 예상치 못한 오류 (%s): %s", code, e)
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
+            logger.error("매수 신호 확인 중 예상치 못한 오류 (%s): %s", display, e)
             return False
 
         # (2-1) 모의투자일 때 블랙리스트 체크
@@ -1166,7 +1174,7 @@ class RSIStrategy(threading.Thread):
             try:
                 bid = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매수호가']
             except KeyError:
-                logger.error("매수호가 정보를 가져올 수 없습니다: %s", code)
+                logger.error("매수호가 정보를 가져올 수 없습니다: %s", display)
                 return
 
             # (6)주문 수량 계산(소수점은 제거하기 위해 버림)
@@ -1209,7 +1217,7 @@ class RSIStrategy(threading.Thread):
                 display = f"{name}({code})" if name else code
                 error_msg = "❌ <b>매수 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
                     display, quantity, bid, error_code, error_message)
-                logger.error("매수 주문 실패: code=%s, error_code=%s, error_msg=%s", code, error_code, error_message)
+                logger.error("매수 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
                 send_message(error_msg)
                 
                 # 모의투자 매매제한 종목(RC4007) 감지 및 블랙리스트 추가
