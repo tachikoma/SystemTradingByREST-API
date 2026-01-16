@@ -139,7 +139,7 @@ chart*.py
 *.db
 
 # except manually
-IDEA.py
+.idea
 .DS_Store
 .vscode
 backtest/output
