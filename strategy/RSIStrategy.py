@@ -130,9 +130,17 @@ class RSIStrategy(threading.Thread):
 
         except Exception as e:
             logger.exception("Strategy init failed: %s", traceback.format_exc())
-            # 텔레그램 메시지 전송
-            send_message(f"⚠️ 전략 초기화 실패\n{traceback.format_exc()}")
+            # 텔레그램으로 마스킹된 트레이스백 전송 (길면 파일 첨부)
+            try:
+                send_telegram_traceback(traceback.format_exc())
+            except Exception:
+                # 실패 시 최소한의 알림 전송
+                try:
+                    send_message("⚠️ 전략 초기화 실패 (트레이스백 전송 실패, 상세 로그는 서버에서 확인하세요.)")
+                except Exception:
+                    pass
 
+    @notify_on_exception(fallback_return=None)
     def check_and_cache_if_needed(self):
         """프로그램 시작 시 캐시 상태 체크 및 필요 시 전체 캐싱"""
         import os
@@ -191,6 +199,7 @@ class RSIStrategy(threading.Thread):
             logger.error("전체 종목 캐싱 실패: %s", cache_error)
             send_message(f"❌ 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
     
+    @notify_on_exception(fallback_return=None)
     def load_mock_blacklist(self):
         """DB에서 모의투자 블랙리스트를 로드하는 함수"""
         if not self.kiwoom.mock:
@@ -336,6 +345,7 @@ class RSIStrategy(threading.Thread):
         except Exception as e:
             logger.error("블랙리스트 추가 실패: %s", e)
 
+    @notify_on_exception(fallback_return=None)
     def check_and_get_universe(self, force_update=False):
         """유니버스가 존재하는지 확인하고 없으면 생성하는 함수
         
@@ -512,6 +522,7 @@ class RSIStrategy(threading.Thread):
                 logger.warning("No universe created_at found, using current time")
                 self.last_universe_update = get_korea_time()
 
+    @notify_on_exception(fallback_return=None)
     def check_and_get_price_data(self):
         """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""
         for idx, code in enumerate(self.universe.keys()):
@@ -679,9 +690,16 @@ class RSIStrategy(threading.Thread):
 
             except Exception as e:
                 logger.exception("Run loop exception: %s", traceback.format_exc())
-                # 텔레그램 메시지 전송
-                send_message(f"⚠️ 전략 실행 중 오류\n{traceback.format_exc()}")
+                # 텔레그램으로 마스킹된 트레이스백 전송 (길면 파일 첨부)
+                try:
+                    send_telegram_traceback(traceback.format_exc())
+                except Exception:
+                    try:
+                        send_message("⚠️ 전략 실행 중 오류 (트레이스백 전송 실패, 상세 로그는 서버에서 확인하세요.)")
+                    except Exception:
+                        pass
 
+    @notify_on_exception(fallback_return=None)
     def update_universe_with_holdings(self):
         """Universe 업데이트 및 제외된 보유 종목 청산"""
         # 현재 보유 종목 백업
@@ -744,6 +762,7 @@ class RSIStrategy(threading.Thread):
         # 실시간 체결정보 재등록
         self.set_universe_real_time()
     
+    @notify_on_exception(fallback_return=None)
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
         # 우선순위: 1) 보유종목, 2) 주문중인 종목, 3) 기존 universe 종목
@@ -794,6 +813,7 @@ class RSIStrategy(threading.Thread):
         except Exception as e:
             logger.error("실시간 등록 요청 실패: %s", e)
 
+    @notify_on_exception(fallback_return=None)
     def ensure_holdings_in_universe(self):
         """보유 또는 주문중인 종목이 universe에 없을 경우 임시로 로드하여 모니터링 대상에 포함시킵니다.
 
@@ -897,6 +917,7 @@ class RSIStrategy(threading.Thread):
         except Exception as e:
             logger.error("ensure_holdings_in_universe 실패: %s", e)
 
+    @notify_on_exception(fallback_return=(None, None))
     def calculate_rsi(self, code):
         """RSI를 계산하는 공통 함수
         
@@ -1021,6 +1042,7 @@ class RSIStrategy(threading.Thread):
             logger.error("매도 신호 확인 중 예상치 못한 오류 (%s): %s", code, e)
             return False
 
+    @notify_on_exception(fallback_return=None)
     def order_sell(self, code):
         """매도 주문 접수 함수"""
         try:
@@ -1077,6 +1099,7 @@ class RSIStrategy(threading.Thread):
             code_name = self.resolve_stock_name(code)
             logger.error("매도 주문 처리 중 예상치 못한 오류 %s(%s): %s", code_name, code, e)
 
+    @notify_on_exception(fallback_return=None)
     def check_buy_signal_and_order(self, code):
         """매수 대상인지 확인하고 주문을 접수하는 함수"""
         # 매수 가능 시간 확인
@@ -1229,6 +1252,7 @@ class RSIStrategy(threading.Thread):
         else:
             return
 
+    @notify_on_exception(fallback_return=None)
     def update_deposit(self, max_retries=3, retry_delay=1):
         """실시간으로 예수금을 동기화하는 함수
         

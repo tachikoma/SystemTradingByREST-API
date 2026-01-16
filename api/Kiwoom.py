@@ -1,4 +1,6 @@
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import json
 import datetime
 from zoneinfo import ZoneInfo
@@ -11,6 +13,7 @@ import websockets
 import threading
 from util.logging_config import get_logger
 import logging
+from util.notifier import notify_on_exception
 
 # Kiwoom API 응답에서 사용되는 요청 한도 초과 메시지 키워드
 RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
@@ -34,6 +37,19 @@ class Kiwoom:
         self.secretkey = secretkey
         self.access_token = None
         self.token_expires_in = None
+
+        # HTTP 세션과 재시도 정책 설정
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=0.5,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET", "POST"]),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
         self.order = {}
         self.balance = {}
@@ -70,9 +86,20 @@ class Kiwoom:
             "appkey": self.appkey,
             "secretkey": self.secretkey
         }
-        res = requests.post(url, headers=headers, data=json.dumps(data))
-        if res.status_code == 200:
-            response_data = res.json()
+        try:
+            res = self.session.post(url, headers=headers, data=json.dumps(data), timeout=15)
+            if res.status_code == 200:
+                response_data = res.json()
+            else:
+                logger.error(f"Authentication failed: {res.text}")
+                self.access_token = None
+                return
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Authentication request failed: {e}")
+            self.access_token = None
+            return
+
+        if response_data:
             if return_code := response_data.get("return_code") != 0:
                 logger.warning(response_data.get("return_msg"))
             self.access_token = response_data["token"]
@@ -84,7 +111,7 @@ class Kiwoom:
                 self.token_expires_in = datetime.datetime.strptime(response_data["expires_dt"], '%Y%m%d%H%M%S')
             logger.info("Authentication successful.")
         else:
-            logger.error(f"Authentication failed: {res.text}")
+            # handled in exception branch or above
             self.access_token = None
 
     def _request(self, path, api_id, params, method="POST", extra_headers=None):
@@ -106,17 +133,28 @@ class Kiwoom:
             headers.update(extra_headers)
 
         url = f"{self.base_url}{path}"
+        try:
+            if method == "POST":
+                res = self.session.post(url, headers=headers, data=json.dumps(params), timeout=15)
+            else:  # GET 요청 처리
+                res = self.session.get(url, headers=headers, params=params, timeout=15)
 
-        if method == "POST":
-            res = requests.post(url, headers=headers, data=json.dumps(params))
-        else:  # GET 요청 처리
-            res = requests.get(url, headers=headers, params=params)
-
-        if res.status_code == 200:
-            return res.json(), res.headers  # 페이징을 위한 헤더 반환
-        else:
-            logger.error(f"Request failed: {res.text}, {res.headers}")
-            return res.json(), res.headers
+            if res.status_code == 200:
+                # 정상 응답
+                try:
+                    return res.json(), res.headers
+                except Exception:
+                    logger.error(f"Failed to parse JSON response from {url}")
+                    return None, res.headers
+            else:
+                logger.error(f"Request failed: {res.text}, {res.headers}")
+                try:
+                    return res.json(), res.headers
+                except Exception:
+                    return None, res.headers
+        except requests.exceptions.RequestException as e:
+            logger.error(f"HTTP request exception for {url}: {e}")
+            return None, {}
 
 
 
@@ -916,6 +954,7 @@ class Kiwoom:
         finally:
             self.asyncio_loop.close()
 
+    @notify_on_exception(fallback_return=None)
     async def _websocket_main_loop(self):
         """WebSocket 연결의 메인 루프입니다: 연결/재연결 및 메시지 처리 로직을 담당합니다."""
         while not self._websocket_stop_event.is_set():
@@ -976,6 +1015,7 @@ class Kiwoom:
                     await asyncio.sleep(2)
         logger.info("WebSocket loop stopped.")
 
+    @notify_on_exception(fallback_return=None)
     async def _reregister_real_data(self):
         """WebSocket 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다."""
         if self._real_reg_info:
@@ -998,6 +1038,7 @@ class Kiwoom:
             await self._send_websocket_message(message)
             logger.info(f"Real-time data re-registered for codes: {self._real_reg_info['code_list']}")
 
+    @notify_on_exception(fallback_return=None)
     async def _websocket_connect(self):
         try:
             # 연결하기 전에 토큰이 유효한지 확인합니다
@@ -1016,6 +1057,7 @@ class Kiwoom:
             self.is_websocket_connected = False
             self.websocket = None
 
+    @notify_on_exception(fallback_return=None)
     async def _ensure_valid_token_async(self):
         """`self.access_token`이 유효한지 확인합니다. 만료되었으면 블로킹 되는 `_authenticate`를
         쓰레드풀에서 실행하여 토큰을 갱신합니다.
@@ -1056,6 +1098,7 @@ class Kiwoom:
             else:
                 logger.info("WebSocket thread stopped.")
 
+    @notify_on_exception(fallback_return=None)
     async def _shutdown_websocket(self):
         """루프 내부에서 실행되는 안전한 웹소켓 셧다운 코루틴.
 
@@ -1101,6 +1144,7 @@ class Kiwoom:
             except Exception:
                 pass
 
+    @notify_on_exception(fallback_return=None)
     async def _send_websocket_message(self, message):
         """WebSocket 서버로 메시지를 전송합니다. 필요 시 재연결과 사전 LOGIN 처리를 합니다."""
         # 메시지가 문자열인지 확인하고, `trnm`을 검사하기 위해 파싱된 객체도 유지합니다
@@ -1152,6 +1196,7 @@ class Kiwoom:
             logger.error("재연결 시도 후에도 WebSocket으로 메시지 전송에 실패했습니다.")
             # 다음 연결에서 다시 LOGIN을 시도할 수 있도록 login_sent 플래그를 리셋합니다
             self._websocket_login_sent = False
+    @notify_on_exception(fallback_return=None)
     async def _handle_websocket_message(self, message):
         """들어오는 WebSocket 메시지를 처리합니다."""
         try:
