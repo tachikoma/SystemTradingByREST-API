@@ -1,0 +1,19 @@
+###############################################
+# Sample logrotate config for this project
+# Copy this file to /etc/logrotate.d/systemtrading
+# Replace /path/to/project with the absolute path to your repo
+###############################################
+
+# Rotate nohup logs kept under the project's logs directory
+/path/to/project/logs/*_nohup.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+
+# Example: if your project is at /Users/me/projects/SystemTrading
+# use /Users/me/projects/SystemTrading/logs/*_nohup.log above.
