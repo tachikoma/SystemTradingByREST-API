@@ -186,18 +186,18 @@ class RSIStrategy(threading.Thread):
         
         # 캐시가 없거나 오래된 경우 → 즉시 전체 캐싱
         logger.info("💾 프로그램 시작: 전체 종목 캐싱 시작...")
-        send_message(f"💾 프로그램 시작: 전체 종목 캐싱 시작\n소요 예상: 약 66분 (모의투자) / 약 22분 (실전투자)")
+        send_message(f"💾 프로그램 시작: 전체 종목 캐싱 시작\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
         
         try:
             from util.make_up_universe import cache_daily_data
             cache_daily_data(self.kiwoom)
             
             self.last_full_cache_time = now
-            logger.info("✅ 전체 종목 캐싱 완료")
-            send_message("✅ 전체 종목 캐싱 완료")
+            logger.info("✅ 시작 전체 종목 캐싱 완료")
+            send_message("✅ 시작 전체 종목 캐싱 완료")
         except Exception as cache_error:
-            logger.error("전체 종목 캐싱 실패: %s", cache_error)
-            send_message(f"❌ 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
+            logger.error("❌ 시작 전체 종목 캐싱 실패: %s", cache_error)
+            send_message(f"❌ 시작 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
     
     @notify_on_exception(fallback_return=None)
     def load_mock_blacklist(self):
@@ -352,34 +352,11 @@ class RSIStrategy(threading.Thread):
         Args:
             force_update: True이면 기존 universe를 무시하고 새로 생성
         """
-        # 환경변수로 초기 Universe 생성/갱신을 건너뛸 수 있음
-        disable_initial = os.getenv('DISABLE_INITIAL_CACHE', '0')
-        if str(disable_initial).lower() in ('1', 'true', 'yes'):
-            logger.warning("초기 Universe 생성이 환경변수로 비활성화되었습니다 (DISABLE_INITIAL_CACHE=%s)", disable_initial)
-            try:
-                send_message("⚠️ 초기 Universe 생성 비활성화: DISABLE_INITIAL_CACHE set")
-            except Exception:
-                pass
-            # 기존 universe 테이블이 있으면 로드하고, 없으면 건너뜀
-            if check_table_exist(self.strategy_name, 'universe'):
-                logger.info("기존 Universe 테이블을 로드합니다.")
-                sql = "select * from universe"
-                cur = execute_sql(self.strategy_name, sql)
-                universe_list_db = cur.fetchall()
-                for item in universe_list_db:
-                    idx, code, code_name, created_at = item
-                    if self.kiwoom.mock and code in self.mock_trade_blacklist:
-                        continue
-                    self.universe[code] = {'code_name': code_name}
-            else:
-                logger.warning("기존 Universe 테이블이 없습니다. 초기 생성은 건너뜁니다.")
 
-            # 초기 생성/갱신 요청이 비활성화되었으므로 여기서 종료
-            return
-
-        if force_update or not check_table_exist(self.strategy_name, 'universe'):
+        table_exists = check_table_exist(self.strategy_name, 'universe')
+        
+        if force_update or not table_exists:
             # 명확한 로그: 강제 갱신 요청인지, 테이블이 존재하지 않아 생성하는지 구분 출력
-            table_exists = check_table_exist(self.strategy_name, 'universe')
             if force_update and table_exists:
                 logger.info("Force update requested: existing universe table will be replaced (force_update=True).")
             elif force_update and not table_exists:
@@ -397,7 +374,7 @@ class RSIStrategy(threading.Thread):
                 send_message(f"❌ Universe 생성 실패\n{e}")
                 
                 # 기존 universe 테이블이 있으면 로드하여 계속 사용
-                if check_table_exist(self.strategy_name, 'universe'):
+                if table_exists:
                     logger.warning("기존 Universe를 계속 사용합니다.")
                     send_message("⚠️ 기존 Universe를 계속 사용합니다.")
                     # 기존 universe 로드 (아래 else 블록 로직 사용)
@@ -576,18 +553,17 @@ class RSIStrategy(threading.Thread):
                 now = get_korea_time()
                 logger.info("Korea time: %s", now)
                 
-                # 전체 종목 캐싱 (23:50 ~ 23:59 사이, 30일 주기)
-                # Universe 재구성 전날 밤에 미리 전체 종목 데이터 캐싱 (66분 소요)
-                if now.hour == 23 and 50 <= now.minute < 60 and not self.full_cache_done_today:
-                    days_since_cache = 999  # 최초 실행 시 무조건 캐싱
+                # 전체 종목 데이터 캐싱 (15:40 ~ 17:00 사이, 30일 주기, 66분(모의투자)/10분(실전투자) 소요)
+                if not is_market_closed_day() and now.hour == 15 and 40 <= now.minute < 17 and not self.full_cache_done_today:                
+                    days_since_cache = self.UNIVERSE_UPDATE_DAYS + 1 # 최초 실행 시 무조건 캐싱
                     if self.last_full_cache_time:
                         days_since_cache = (now.date() - self.last_full_cache_time.date()).days
                     
                     # 30일 주기 또는 최초 실행 시 전체 캐싱
                     if days_since_cache >= self.UNIVERSE_UPDATE_DAYS:
-                        logger.info("💾 전체 종목 캐싱 시작 (마지막 캐싱: %s)", 
+                        logger.info("💾 장 종료 전체 종목 캐싱 시작 (마지막 캐싱: %s)", 
                                    self.last_full_cache_time.date() if self.last_full_cache_time else '최초')
-                        send_message(f"💾 전체 종목 캐싱 시작\n마지막 캐싱: {days_since_cache}일 전\n소요 예상: 약 66분 (모의투자) / 약 10분 (실전투자)")
+                        send_message(f"💾 장 종료 전체 종목 캐싱 시작\n마지막 캐싱: {days_since_cache}일 전\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
                         
                         self.full_cache_in_progress = True
                         try:
@@ -599,12 +575,12 @@ class RSIStrategy(threading.Thread):
                             self.last_full_cache_time = now
                             self.full_cache_in_progress = False
                             
-                            logger.info("✅ 전체 종목 캐싱 완료")
-                            send_message("✅ 전체 종목 캐싱 완료")
+                            logger.info("✅ 장 종료 전체 종목 캐싱 완료")
+                            send_message("✅ 장 종료 전체 종목 캐싱 완료")
                         except Exception as cache_error:
                             self.full_cache_in_progress = False
-                            logger.error("전체 종목 캐싱 실패: %s", cache_error)
-                            send_message(f"❌ 전체 종목 캐싱 실패\n{cache_error}")
+                            logger.error("❌ 장 종료 전체 종목 캐싱 실패: %s", cache_error)
+                            send_message(f"❌ 장 종료 전체 종목 캐싱 실패\n{cache_error}")
                 
                 # Universe 재구성 체크 (매일 00:00 ~ 00:05 사이)
                 if now.hour == 0 and now.minute < 5 and not self.universe_updated_today:
@@ -1022,9 +998,9 @@ class RSIStrategy(threading.Thread):
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
             breakeven_price = math.ceil(purchase_price * self.SELL_FEE_RATE)
 
-            # 로그: RSI 및 조건 여부 (DEBUG)
+            # 로그: RSI 및 조건 여부 
             condition_met = (rsi > self.RSI_SELL_THRESHOLD and close > breakeven_price)
-            logger.debug("check_sell_signal %s RSI=%.2f close=%d breakeven=%d condition=%s", display, rsi, close, breakeven_price, condition_met)
+            logger.info("check_sell_signal %s RSI=%.2f close=%d breakeven=%d condition=%s", display, rsi, close, breakeven_price, condition_met)
             
             # 매도 조건: RSI 과열 + 수수료/세금 고려해도 수익
             if condition_met:
@@ -1132,8 +1108,8 @@ class RSIStrategy(threading.Thread):
             name = self.resolve_stock_name(code)
             display = f"{name}({code})" if name else code
             
-            # 로그: RSI 및 지표값 (DEBUG)
-            logger.debug("check_buy_signal %s RSI=%.2f ma20=%.2f ma60=%.2f ma200=%.2f", display, rsi, ma20, ma60, ma200)
+            # 로그: RSI 및 지표값 
+            logger.info("check_buy_signal %s RSI=%.2f ma20=%.2f ma60=%.2f ma200=%.2f", display, rsi, ma20, ma60, ma200)
             
             # 값들이 유효한지 체크
             if np.isnan(rsi) or np.isinf(rsi) or np.isnan(ma20) or np.isinf(ma20) or np.isnan(ma60) or np.isinf(ma60) or np.isnan(ma200) or np.isinf(ma200):
