@@ -2,6 +2,8 @@
 RSI 전략 백테스트 엔진
 
 RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를 수행합니다.
+
+주의: RSI 계산은 RSIStrategy와 동등하게 Wilder smoothing(EWMA, alpha=1/period, adjust=False)를 사용합니다.
 """
 
 import pandas as pd
@@ -76,16 +78,31 @@ class BacktestEngine:
         """
         if period is None:
             period = self.rsi_period
-            
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        
-        # ZeroDivision 방지
-        rs = gain / loss.replace(0, np.nan)
+
+        # Wilder smoothing (EWMA with alpha=1/period, adjust=False)
+        delta = prices.diff(1)
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+
+        # Use Wilder's smoothing (exponential with alpha=1/period)
+        avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+
+        # Relative strength
+        rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
-        rsi = rsi.fillna(0)
-        
+
+        # Edge-case handling to match RSIStrategy behavior
+        both_zero = (avg_gain == 0) & (avg_loss == 0)
+        loss_zero = (avg_loss == 0) & (~both_zero)
+        gain_zero = (avg_gain == 0) & (~both_zero)
+
+        rsi = rsi.copy()
+        rsi[both_zero] = 50.0
+        rsi[loss_zero] = 100.0
+        rsi[gain_zero] = 0.0
+
+        # Note: keep NaN for initial periods (min_periods behavior) to match RSIStrategy
         return rsi
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -99,8 +116,10 @@ class BacktestEngine:
         """
         df = df.copy()
         
-        # RSI 계산
-        df['rsi'] = self.calculate_rsi(df['close'], self.rsi_period)
+        # RSI 계산 (Wilder smoothing). 두 컬럼을 모두 만들어 RSIStrategy와 호환 유지
+        rsi_series = self.calculate_rsi(df['close'], self.rsi_period)
+        df[f'RSI({self.rsi_period})'] = rsi_series
+        df['rsi'] = rsi_series
         
         # 이동평균 계산
         df['ma20'] = df['close'].rolling(window=self.ma_short, min_periods=1).mean()
@@ -167,8 +186,8 @@ class BacktestEngine:
             # 매수 조건 확인
             # 1) ma20 > ma60 (단기 이평 > 장기 이평)
             # 2) close > ma200 (장기 추세 상승)
-            # 3) RSI < 5 (과매도)
-            # 4) 2일 전 대비 -2% 이상 하락
+            # 3) RSI < rsi_buy_threshold (과매도)
+            # 4) 2일 전 대비 price_drop_threshold 이상 하락
             if ma20 > ma60 and close > ma200 and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
                 return True, close
             
