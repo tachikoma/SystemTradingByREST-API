@@ -922,13 +922,17 @@ class RSIStrategy(threading.Thread):
             close = realtime_info['현재가']
             volume = realtime_info['누적거래량']
             
-            # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가하기 위해 리스트로 만듦
-            today_price_data = [open_price, high, low, close, volume]
-            
+            # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가
             df = universe_item['price_df'].copy()
-            
-            # 과거 가격 데이터에 금일 날짜로 데이터 추가
-            df.loc[get_korea_time().strftime('%Y%m%d')] = today_price_data
+            today_date = get_korea_time().strftime('%Y%m%d')
+            today_price_data = {
+                'open': open_price,
+                'high': high,
+                'low': low,
+                'close': close,
+                'volume': volume,
+            }
+            df.loc[today_date] = pd.Series(today_price_data)
             
             # RSI(N) 계산 - 표준 RSI 공식 사용 (BacktestEngine과 동일)
             date_index = df.index.astype('str')
@@ -937,52 +941,38 @@ class RSIStrategy(threading.Thread):
             delta = df['close'].diff(1)
             
             # 상승분 (gain)과 하락분 (loss) 분리
-            gain = np.where(delta > 0, delta, 0.0)
-            loss = np.where(delta < 0, -delta, 0.0)
+            # pandas Series.where를 사용하여 delta[0]=NaN이 보존되도록 함
+            gain = delta.where(delta > 0, 0.0)
+            loss = (-delta).where(delta < 0, 0.0)
+            # 첫 인덱스의 delta는 비교상 NaN이 되므로 ewm의 min_periods 기준을
+            # 기대 동작(초기화 시점이 period 위치가 되도록)으로 맞추기 위해
+            # 첫 원소는 명시적으로 NaN으로 설정
+            if len(gain) > 0:
+                gain.iloc[0] = np.nan
+                loss.iloc[0] = np.nan
 
-            # Wilder 재귀(RSI) 방식으로 평균을 계산
-            closes = df['close'].to_numpy(dtype=float)
-            n = len(closes)
             period = int(self.RSI_PERIOD)
 
-            avg_gain = np.full(n, np.nan, dtype=float)
-            avg_loss = np.full(n, np.nan, dtype=float)
+            # Wilder's smoothing: ewm with alpha=1/period and adjust=False
+            # min_periods=period 으로 초기부적합값을 NaN으로 유지
+            avg_gain = gain.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
 
-            # 초기값: period 구간의 단순 평균을 t = period 위치에 둠
-            # (delta[0]은 NaN이므로 gains[1:period+1] 사용)
-            if n > period:
-                start = 1
-                end = period + 1
-                init_gains = gain[start:end]
-                init_losses = loss[start:end]
-                if len(init_gains) == period:
-                    avg_gain[period] = np.mean(init_gains)
-                    avg_loss[period] = np.mean(init_losses)
+            # RS 및 RSI 계산
+            rs = avg_gain / avg_loss
+            rsi = 100.0 - (100.0 / (1.0 + rs))
 
-                    # 재귀 업데이트
-                    for t in range(period + 1, n):
-                        avg_gain[t] = (avg_gain[t-1] * (period - 1) + gain[t]) / period
-                        avg_loss[t] = (avg_loss[t-1] * (period - 1) + loss[t]) / period
+            # 특수 케이스 처리: 부동소수점 안전하게
+            both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
+            loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
+            gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
 
-            # RSI 계산 및 특수 케이스 처리
-            rsi = np.full(n, np.nan, dtype=float)
-            for t in range(n):
-                ag = avg_gain[t]
-                al = avg_loss[t]
-                if np.isnan(ag) or np.isnan(al):
-                    continue
-                # 명시적 예외 처리
-                if al == 0.0 and ag == 0.0:
-                    rsi[t] = 50.0
-                elif al == 0.0:
-                    rsi[t] = 100.0
-                elif ag == 0.0:
-                    rsi[t] = 0.0
-                else:
-                    rs = ag / al
-                    rsi[t] = 100.0 - (100.0 / (1.0 + rs))
+            rsi = rsi.astype(float)
+            rsi.loc[both_zero] = 50.0
+            rsi.loc[loss_zero] = 100.0
+            rsi.loc[gain_zero] = 0.0
 
-            df['RSI({})'.format(self.RSI_PERIOD)] = pd.Series(rsi, index=date_index)
+            df['RSI({})'.format(self.RSI_PERIOD)] = rsi
             
             return df, close
             
