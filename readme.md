@@ -131,6 +131,9 @@
     - 환경변수로 로그 디렉터리, 레벨 및 회전 정책을 제어하도록 지원(`.env.example`에 예시 추가).
 - 시간 처리: 모든 시간 판정에 `util.time_helper.get_korea_time()` 사용으로 한국 시간대 기준 일관성 유지.
 
+### 2026-01-20: RSI 계산법 변경
+- `strategy/RSIStrategy.py`의 RSI 계산을 SMA(rolling.mean)에서 Wilder 재귀 방식으로 변경함. 이로 인해 일부 단기(period가 작을 때) RSI 값이 달라질 수 있음.
+
 ## 요구사항
 1. Python 3.11 이상
 2. 의존성 설치 (Poetry 권장):

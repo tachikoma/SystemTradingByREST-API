@@ -937,22 +937,52 @@ class RSIStrategy(threading.Thread):
             delta = df['close'].diff(1)
             
             # 상승분 (gain)과 하락분 (loss) 분리
-            gain = np.where(delta > 0, delta, 0)
-            loss = np.where(delta < 0, -delta, 0)
-            
-            # 평균 계산
-            avg_gain = pd.DataFrame(gain, index=date_index).rolling(window=self.RSI_PERIOD).mean()
-            avg_loss = pd.DataFrame(loss, index=date_index).rolling(window=self.RSI_PERIOD).mean()
-            
-            # RS (Relative Strength) 계산
-            # ZeroDivisionError 방지
-            with np.errstate(divide='ignore', invalid='ignore'):
-                rs = avg_gain / avg_loss.replace(0, np.nan)
-                # 표준 RSI 공식: 100 - (100 / (1 + RS))
-                RSI = 100 - (100 / (1 + rs))
-                RSI = RSI.fillna(0)  # NaN을 0으로 대체
-            
-            df['RSI(2)'] = RSI
+            gain = np.where(delta > 0, delta, 0.0)
+            loss = np.where(delta < 0, -delta, 0.0)
+
+            # Wilder 재귀(RSI) 방식으로 평균을 계산
+            closes = df['close'].to_numpy(dtype=float)
+            n = len(closes)
+            period = int(self.RSI_PERIOD)
+
+            avg_gain = np.full(n, np.nan, dtype=float)
+            avg_loss = np.full(n, np.nan, dtype=float)
+
+            # 초기값: period 구간의 단순 평균을 t = period 위치에 둠
+            # (delta[0]은 NaN이므로 gains[1:period+1] 사용)
+            if n > period:
+                start = 1
+                end = period + 1
+                init_gains = gain[start:end]
+                init_losses = loss[start:end]
+                if len(init_gains) == period:
+                    avg_gain[period] = np.mean(init_gains)
+                    avg_loss[period] = np.mean(init_losses)
+
+                    # 재귀 업데이트
+                    for t in range(period + 1, n):
+                        avg_gain[t] = (avg_gain[t-1] * (period - 1) + gain[t]) / period
+                        avg_loss[t] = (avg_loss[t-1] * (period - 1) + loss[t]) / period
+
+            # RSI 계산 및 특수 케이스 처리
+            rsi = np.full(n, np.nan, dtype=float)
+            for t in range(n):
+                ag = avg_gain[t]
+                al = avg_loss[t]
+                if np.isnan(ag) or np.isnan(al):
+                    continue
+                # 명시적 예외 처리
+                if al == 0.0 and ag == 0.0:
+                    rsi[t] = 50.0
+                elif al == 0.0:
+                    rsi[t] = 100.0
+                elif ag == 0.0:
+                    rsi[t] = 0.0
+                else:
+                    rs = ag / al
+                    rsi[t] = 100.0 - (100.0 / (1.0 + rs))
+
+            df['RSI({})'.format(self.RSI_PERIOD)] = pd.Series(rsi, index=date_index)
             
             return df, close
             
