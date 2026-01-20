@@ -519,9 +519,22 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
         (~df.종목명.str.contains("홀딩스", na=False)) &  # 홀딩스 제외
         (~df.종목명.str.contains("스팩", na=False)) &    # 스팩 제외
         (~df.종목명.str.contains("리츠", na=False)) &    # 리츠 제외
-        (~df.종목명.str.contains("우", na=False)) &      # 우선주 제외
         (~df.종목명.str.contains("캐피탈", na=False))    # 캐피탈 제외 (모의투자 제한 많음)
     ]
+
+    # 우선주 필터링: 종목명에 단순히 '우'가 포함된다고 제거하면
+    # '우진', '우리금융지주' 등 일반 종목이 잘못 제외될 수 있음.
+    # 보통주는 종목코드가 '0'으로 끝나는 경우가 대부분이므로
+    # 종목코드가 있으면 코드 끝자리가 '0'인 종목만 남기고, 없으면 기존 이름 기반 필터 유지
+    try:
+        if '종목코드' in df.columns:
+            df = df[df['종목코드'].astype(str).str.endswith('0')]
+        else:
+            # 보수적 폴백: 기존 '우' 문자열 검사 사용
+            df = df[~df.종목명.str.contains("우", na=False)]
+    except Exception:
+        # 필터 적용 중 예외가 발생하면 원래 데이터프레임을 유지
+        logger.warning("우선주 필터 적용 중 오류 발생: 종목코드 기반 필터링을 건너뜁니다.")
 
     # 2. 변동성 지표 계산
     # - 등락률 절대값: 당일 변동성
