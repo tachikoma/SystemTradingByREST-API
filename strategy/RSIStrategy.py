@@ -999,12 +999,12 @@ class RSIStrategy(threading.Thread):
             
             purchase_price = self.kiwoom.balance[code]['매입가']
             
-            # 금일의 RSI(2) 구하기
+            # 금일의 RSI(N) 구하기
             if len(df) == 0:
                 logger.warning("DataFrame이 비어있습니다: %s", code)
                 return False
             
-            rsi = df[-1:]['RSI(2)'].values[0]
+            rsi = df[-1:][f'RSI({self.RSI_PERIOD})'].values[0]
             
             # RSI가 NaN이거나 inf인지 체크
             if np.isnan(rsi) or np.isinf(rsi):
@@ -1119,7 +1119,7 @@ class RSIStrategy(threading.Thread):
             df['ma60'] = df['close'].rolling(window=self.MA_LONG, min_periods=1).mean()
             df['ma200'] = df['close'].rolling(window=self.MA_TREND, min_periods=1).mean()
             
-            rsi = df[-1:]['RSI(2)'].values[0]
+            rsi = df[-1:][f'RSI({self.RSI_PERIOD})'].values[0]
             ma20 = df[-1:]['ma20'].values[0]
             ma60 = df[-1:]['ma60'].values[0]
             ma200 = df[-1:]['ma200'].values[0]
