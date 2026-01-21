@@ -48,9 +48,51 @@ def wilder_rsi_reference(prices, period):
     return rsi
 
 
-def make_strategy_with_prices(prices, period=2):
+def cutler_rsi_reference(prices, period):
+    prices = np.asarray(prices, dtype=float)
+    n = prices.size
+    delta = np.empty(n)
+    delta[0] = np.nan
+    delta[1:] = prices[1:] - prices[:-1]
+    gains = np.where(delta > 0, delta, 0.0)
+    losses = np.where(delta < 0, -delta, 0.0)
+
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    p = int(period)
+    if n >= p + 1:
+        # rolling mean over window of size p on gains/losses aligned to price index
+        # For price index t, the rolling window is gains[t-p+1:t+1] but we follow simple pandas-like alignment
+        for t in range(p, n):
+            window_g = gains[t-p+1:t+1]
+            window_l = losses[t-p+1:t+1]
+            if len(window_g) == p:
+                avg_gain[t] = window_g.mean()
+                avg_loss[t] = window_l.mean()
+
+    rsi = np.full(n, np.nan)
+    for t in range(n):
+        ag = avg_gain[t]
+        al = avg_loss[t]
+        if np.isnan(ag) or np.isnan(al):
+            continue
+        if al == 0.0 and ag == 0.0:
+            rsi[t] = 50.0
+        elif al == 0.0:
+            rsi[t] = 100.0
+        elif ag == 0.0:
+            rsi[t] = 0.0
+        else:
+            rs = ag / al
+            rsi[t] = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+
+def make_strategy_with_prices(prices, period=2, method='wilder'):
     # Prepare RSIStrategy instance without full init
     s = RSIStrategy.__new__(RSIStrategy)
+    # allow test to select method under test
+    s.RSI_METHOD = method
     s.RSI_PERIOD = period
     s.universe = {}
     # dummy kiwoom with required structure
@@ -82,13 +124,18 @@ def make_strategy_with_prices(prices, period=2):
 ])
 def test_rsi_matches_reference(prices):
     period = 2
-    s, code = make_strategy_with_prices(prices, period=period)
+    # validate both methods
+    for method in ('wilder', 'cutler'):
+        s, code = make_strategy_with_prices(prices, period=period, method=method)
     df, _ = s.calculate_rsi(code)
     assert df is not None
     actual = df[f'RSI({period})'].to_numpy(dtype=float)
 
     # Build full price series used by calculate_rsi (initial rows + appended current)
     full_prices = np.asarray(prices, dtype=float)
-    expected = wilder_rsi_reference(full_prices, period)
+    if method == 'wilder':
+        expected = wilder_rsi_reference(full_prices, period)
+    else:
+        expected = cutler_rsi_reference(full_prices, period)
 
     np.testing.assert_allclose(actual, expected, equal_nan=True, rtol=0, atol=1e-8)

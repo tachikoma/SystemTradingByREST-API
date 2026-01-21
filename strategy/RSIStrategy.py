@@ -14,6 +14,8 @@ from util.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+import numpy as np
+import pandas as pd
 
 class RSIStrategy(threading.Thread):
     # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
@@ -27,6 +29,8 @@ class RSIStrategy(threading.Thread):
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
     REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (API 제한)
+    # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (Wilder/EWMA)
+    RSI_METHOD = 'cutler'
     
     def __init__(self, kiwoom):
         threading.Thread.__init__(self)
@@ -96,6 +100,20 @@ class RSIStrategy(threading.Thread):
                    fee_percent, tax_percent)
         logger.info("계산된 비율: BUY_FEE_RATE=%.6f (%.2f%%), SELL_FEE_RATE=%.6f (%.2f%%)", 
                    self.BUY_FEE_RATE, fee_percent, self.SELL_FEE_RATE, fee_percent + tax_percent)
+
+        # RSI_METHOD can be overridden via environment variable (.env)
+        try:
+            rsi_method_env = os.getenv('RSI_METHOD', None)
+            if rsi_method_env:
+                rm = str(rsi_method_env).strip().lower()
+                if rm in ('cutler', 'wilder'):
+                    self.RSI_METHOD = rm
+                else:
+                    logger.warning("Invalid RSI_METHOD '%s' in environment; using %s", rsi_method_env, self.RSI_METHOD)
+        except Exception:
+            pass
+
+        logger.info("RSI 계산 방식: %s", self.RSI_METHOD)
 
         self.init_strategy()
 
@@ -953,24 +971,45 @@ class RSIStrategy(threading.Thread):
 
             period = int(self.RSI_PERIOD)
 
-            # Wilder's smoothing: ewm with alpha=1/period and adjust=False
-            # min_periods=period 으로 초기부적합값을 NaN으로 유지
-            avg_gain = gain.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
-            avg_loss = loss.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+            method = getattr(self, 'RSI_METHOD', 'cutler')
+            method = method.lower() if isinstance(method, str) else 'cutler'
 
-            # RS 및 RSI 계산
-            rs = avg_gain / avg_loss
-            rsi = 100.0 - (100.0 / (1.0 + rs))
+            if method == 'cutler':
+                # Cutler 방식: 단순 이동평균(SMA)을 사용한 평균 상승/하락
+                avg_gain = gain.rolling(window=period, min_periods=period).mean()
+                avg_loss = loss.rolling(window=period, min_periods=period).mean()
 
-            # 특수 케이스 처리: 부동소수점 안전하게
-            both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
-            loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
-            gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
+                # RS 및 RSI 계산 (division 에러 무시하여 NaN 유지)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    rs = avg_gain / avg_loss
+                    rsi = 100.0 - (100.0 / (1.0 + rs))
 
-            rsi = rsi.astype(float)
-            rsi.loc[both_zero] = 50.0
-            rsi.loc[loss_zero] = 100.0
-            rsi.loc[gain_zero] = 0.0
+                # 핵심: 분모가 0이면(오직 상승만 있을 때) RSI=100으로 처리
+                # 상승/하락 모두 0이면 50으로 처리
+                rsi = rsi.astype(float)
+                rsi.loc[avg_loss == 0.0] = 100.0
+                both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
+                rsi.loc[both_zero_mask] = 50.0
+
+            else:
+                # Wilder's smoothing: ewm with alpha=1/period and adjust=False
+                # min_periods=period 으로 초기부적합값을 NaN으로 유지
+                avg_gain = gain.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+                avg_loss = loss.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+
+                # RS 및 RSI 계산
+                rs = avg_gain / avg_loss
+                rsi = 100.0 - (100.0 / (1.0 + rs))
+
+                # 특수 케이스 처리: 부동소수점 안전하게
+                both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
+                loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
+                gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
+
+                rsi = rsi.astype(float)
+                rsi.loc[both_zero] = 50.0
+                rsi.loc[loss_zero] = 100.0
+                rsi.loc[gain_zero] = 0.0
 
             df['RSI({})'.format(self.RSI_PERIOD)] = rsi
             
