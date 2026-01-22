@@ -16,6 +16,7 @@ logger = get_logger(__name__)
 
 import numpy as np
 import pandas as pd
+import json
 
 class RSIStrategy(threading.Thread):
     # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
@@ -116,6 +117,52 @@ class RSIStrategy(threading.Thread):
         logger.info("RSI 계산 방식: %s", self.RSI_METHOD)
 
         self.init_strategy()
+
+
+def _get_debug_config():
+    enabled = str(os.getenv('KIW_DEBUG_RSI', '0')).lower() in ('1', 'true', 'yes')
+    try:
+        sample = int(os.getenv('KIW_DEBUG_RSI_SAMPLE_RATE', '1'))
+        if sample < 1:
+            sample = 1
+    except Exception:
+        sample = 1
+    return enabled, sample
+
+
+def log_rsi_debug(symbol, stage, payload):
+    """Structured one-line JSON debug log for RSI internals.
+
+    Args:
+        symbol: 종목 코드
+        stage: 'pre_calc' | 'init_seed' | 'post_calc'
+        payload: dict of additional fields
+    """
+    enabled, sample = _get_debug_config()
+    if not enabled:
+        return
+
+    # sampling: deterministic by hashing symbol+stage+ts
+    if sample > 1:
+        try:
+            import hashlib
+            key = f"{symbol}-{stage}-{payload.get('ts','') or ''}"
+            h = int(hashlib.md5(key.encode()).hexdigest(), 16)
+            if h % sample != 0:
+                return
+        except Exception:
+            pass
+
+    out = {
+        'symbol': symbol,
+        'stage': stage,
+        'ts': payload.get('ts'),
+        'payload': payload,
+    }
+    try:
+        logger.debug("RSI_DEBUG: %s", json.dumps(out, default=str, ensure_ascii=False))
+    except Exception:
+        logger.debug("RSI_DEBUG (fallback): %s %s", symbol, stage)
 
     def init_strategy(self):
         """전략 초기화 기능을 수행하는 함수"""
@@ -954,7 +1001,38 @@ class RSIStrategy(threading.Thread):
             
             # RSI(N) 계산 - 표준 RSI 공식 사용 (BacktestEngine과 동일)
             date_index = df.index.astype('str')
-            
+
+            # --- Pre-calc debug log: input series and recent prices ---
+            try:
+                last_prices = df['close'].astype(float).tail(20).tolist()
+            except Exception:
+                last_prices = []
+            history_close = None
+            try:
+                if len(df) >= 2:
+                    history_close = float(df['close'].iloc[-2])
+            except Exception:
+                history_close = None
+
+            realtime_price = None
+            try:
+                realtime_price = float(close) if close is not None else None
+            except Exception:
+                realtime_price = None
+
+            pre_payload = {
+                'ts': get_korea_time().isoformat(),
+                'price_source': 'mixed',
+                'history_close': history_close,
+                'realtime_price': realtime_price,
+                'dtype': str(df['close'].dtype) if 'close' in df.columns else None,
+                'last_prices': last_prices,
+            }
+            try:
+                log_rsi_debug(code, 'pre_calc', pre_payload)
+            except Exception:
+                pass
+
             # 가격 변화 계산
             delta = df['close'].diff(1)
             
@@ -973,6 +1051,29 @@ class RSIStrategy(threading.Thread):
 
             method = getattr(self, 'RSI_METHOD', 'cutler')
             method = method.lower() if isinstance(method, str) else 'cutler'
+
+            # Compute initial SMA seed for logging (if available)
+            avg_gain_init = None
+            avg_loss_init = None
+            try:
+                if len(gain) >= period:
+                    try:
+                        avg_gain_init = float(gain.rolling(window=period, min_periods=period).mean().iloc[period-1])
+                    except Exception:
+                        avg_gain_init = None
+                    try:
+                        avg_loss_init = float(loss.rolling(window=period, min_periods=period).mean().iloc[period-1])
+                    except Exception:
+                        avg_loss_init = None
+            except Exception:
+                avg_gain_init = None
+                avg_loss_init = None
+
+            try:
+                init_payload = {'ts': get_korea_time().isoformat(), 'period': period, 'method': method, 'avg_gain_init': avg_gain_init, 'avg_loss_init': avg_loss_init}
+                log_rsi_debug(code, 'init_seed', init_payload)
+            except Exception:
+                pass
 
             if method == 'cutler':
                 # Cutler 방식: 단순 이동평균(SMA)을 사용한 평균 상승/하락
@@ -1012,7 +1113,47 @@ class RSIStrategy(threading.Thread):
                 rsi.loc[gain_zero] = 0.0
 
             df['RSI({})'.format(self.RSI_PERIOD)] = rsi
-            
+            # --- Post-calc debug log: final averages, RS, RSI ---
+            try:
+                recent_rsi = []
+                try:
+                    recent_rsi = rsi.dropna().tail(5).astype(float).tolist()
+                except Exception:
+                    recent_rsi = []
+
+                avg_gain_curr = None
+                avg_loss_curr = None
+                rs_curr = None
+                try:
+                    if len(avg_gain) > 0:
+                        avg_gain_curr = float(avg_gain.iloc[-1]) if not pd.isna(avg_gain.iloc[-1]) else None
+                except Exception:
+                    avg_gain_curr = None
+                try:
+                    if len(avg_loss) > 0:
+                        avg_loss_curr = float(avg_loss.iloc[-1]) if not pd.isna(avg_loss.iloc[-1]) else None
+                except Exception:
+                    avg_loss_curr = None
+                try:
+                    if 'rs' in locals() and len(rs) > 0:
+                        rs_curr = float(rs.iloc[-1]) if not pd.isna(rs.iloc[-1]) else None
+                except Exception:
+                    rs_curr = None
+
+                post_payload = {
+                    'ts': get_korea_time().isoformat(),
+                    'period': period,
+                    'method': method,
+                    'avg_gain_curr': avg_gain_curr,
+                    'avg_loss_curr': avg_loss_curr,
+                    'RS': rs_curr,
+                    'RSI': float(rsi.iloc[-1]) if (len(rsi) > 0 and not pd.isna(rsi.iloc[-1])) else None,
+                    'recent_rsi': recent_rsi,
+                }
+                log_rsi_debug(code, 'post_calc', post_payload)
+            except Exception:
+                pass
+
             return df, close
             
         except (KeyError, IndexError, ZeroDivisionError) as e:
