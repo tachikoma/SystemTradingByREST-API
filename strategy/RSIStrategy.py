@@ -1057,6 +1057,14 @@ class RSIStrategy(threading.Thread):
 
             period = int(self.RSI_PERIOD)
 
+            # Allow overriding min_periods via environment variable for experimentation
+            try:
+                min_periods = int(os.getenv('RSI_MIN_PERIODS', str(period)))
+            except Exception:
+                min_periods = period
+            if min_periods < 1:
+                min_periods = 1
+
             method = getattr(self, 'RSI_METHOD', 'cutler')
             method = method.lower() if isinstance(method, str) else 'cutler'
 
@@ -1066,11 +1074,11 @@ class RSIStrategy(threading.Thread):
             try:
                 if len(gain) >= period:
                     try:
-                        avg_gain_init = float(gain.rolling(window=period, min_periods=period).mean().iloc[period-1])
+                        avg_gain_init = float(gain.rolling(window=period, min_periods=min_periods).mean().iloc[period-1])
                     except Exception:
                         avg_gain_init = None
                     try:
-                        avg_loss_init = float(loss.rolling(window=period, min_periods=period).mean().iloc[period-1])
+                        avg_loss_init = float(loss.rolling(window=period, min_periods=min_periods).mean().iloc[period-1])
                     except Exception:
                         avg_loss_init = None
             except Exception:
@@ -1078,15 +1086,15 @@ class RSIStrategy(threading.Thread):
                 avg_loss_init = None
 
             try:
-                init_payload = {'ts': get_korea_time().isoformat(), 'period': period, 'method': method, 'avg_gain_init': avg_gain_init, 'avg_loss_init': avg_loss_init, 'include_current_bar': (not use_closed)}
+                init_payload = {'ts': get_korea_time().isoformat(), 'period': period, 'method': method, 'min_periods': min_periods, 'avg_gain_init': avg_gain_init, 'avg_loss_init': avg_loss_init, 'include_current_bar': (not use_closed)}
                 log_rsi_debug(code, 'init_seed', init_payload)
             except Exception:
                 pass
 
             if method == 'cutler':
                 # Cutler 방식: 단순 이동평균(SMA)을 사용한 평균 상승/하락
-                avg_gain = gain.rolling(window=period, min_periods=period).mean()
-                avg_loss = loss.rolling(window=period, min_periods=period).mean()
+                avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
+                avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
 
                 # RS 및 RSI 계산 (division 에러 무시하여 NaN 유지)
                 with np.errstate(divide='ignore', invalid='ignore'):
@@ -1103,8 +1111,8 @@ class RSIStrategy(threading.Thread):
             else:
                 # Wilder's smoothing: ewm with alpha=1/period and adjust=False
                 # min_periods=period 으로 초기부적합값을 NaN으로 유지
-                avg_gain = gain.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
-                avg_loss = loss.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+                avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
+                avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
 
                 # RS 및 RSI 계산
                 rs = avg_gain / avg_loss
@@ -1152,6 +1160,7 @@ class RSIStrategy(threading.Thread):
                     'ts': get_korea_time().isoformat(),
                     'period': period,
                     'method': method,
+                    'min_periods': min_periods,
                     'avg_gain_curr': avg_gain_curr,
                     'avg_loss_curr': avg_loss_curr,
                     'RS': rs_curr,
