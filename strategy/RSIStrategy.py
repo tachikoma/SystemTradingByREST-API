@@ -990,6 +990,8 @@ class RSIStrategy(threading.Thread):
             # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가
             df = universe_item['price_df'].copy()
             today_date = get_korea_time().strftime('%Y%m%d')
+            # Toggle: use closed bar only (do not include realtime/current partial bar)
+            use_closed = str(os.getenv('RSI_USE_CLOSED_BAR', '0')).lower() in ('1', 'true', 'yes')
             today_price_data = {
                 'open': open_price,
                 'high': high,
@@ -997,7 +999,9 @@ class RSIStrategy(threading.Thread):
                 'close': close,
                 'volume': volume,
             }
-            df.loc[today_date] = pd.Series(today_price_data)
+            if not use_closed:
+                # include realtime as today's (partial) bar
+                df.loc[today_date] = pd.Series(today_price_data)
             
             # RSI(N) 계산 - 표준 RSI 공식 사용 (BacktestEngine과 동일)
             date_index = df.index.astype('str')
@@ -1009,8 +1013,11 @@ class RSIStrategy(threading.Thread):
                 last_prices = []
             history_close = None
             try:
-                if len(df) >= 2:
+                # if we're including realtime row, the previous close is at -2, otherwise at -1
+                if not use_closed and len(df) >= 2:
                     history_close = float(df['close'].iloc[-2])
+                elif use_closed and len(df) >= 1:
+                    history_close = float(df['close'].iloc[-1])
             except Exception:
                 history_close = None
 
@@ -1027,6 +1034,7 @@ class RSIStrategy(threading.Thread):
                 'realtime_price': realtime_price,
                 'dtype': str(df['close'].dtype) if 'close' in df.columns else None,
                 'last_prices': last_prices,
+                'include_current_bar': (not use_closed),
             }
             try:
                 log_rsi_debug(code, 'pre_calc', pre_payload)
@@ -1070,7 +1078,7 @@ class RSIStrategy(threading.Thread):
                 avg_loss_init = None
 
             try:
-                init_payload = {'ts': get_korea_time().isoformat(), 'period': period, 'method': method, 'avg_gain_init': avg_gain_init, 'avg_loss_init': avg_loss_init}
+                init_payload = {'ts': get_korea_time().isoformat(), 'period': period, 'method': method, 'avg_gain_init': avg_gain_init, 'avg_loss_init': avg_loss_init, 'include_current_bar': (not use_closed)}
                 log_rsi_debug(code, 'init_seed', init_payload)
             except Exception:
                 pass
@@ -1149,6 +1157,7 @@ class RSIStrategy(threading.Thread):
                     'RS': rs_curr,
                     'RSI': float(rsi.iloc[-1]) if (len(rsi) > 0 and not pd.isna(rsi.iloc[-1])) else None,
                     'recent_rsi': recent_rsi,
+                    'include_current_bar': (not use_closed),
                 }
                 log_rsi_debug(code, 'post_calc', post_payload)
             except Exception:
