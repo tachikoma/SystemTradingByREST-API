@@ -60,9 +60,9 @@ def log_rsi_debug(symbol, stage, payload):
         'payload': payload,
     }
     try:
-        logger.debug("RSI_DEBUG: %s", json.dumps(out, default=str, ensure_ascii=False))
+        logger.info("RSI_DEBUG: %s", json.dumps(out, default=str, ensure_ascii=False))
     except Exception:
-        logger.debug("RSI_DEBUG (fallback): %s %s", symbol, stage)
+        logger.info("RSI_DEBUG (fallback): %s %s", symbol, stage)
 
 class RSIStrategy(threading.Thread):
     # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
