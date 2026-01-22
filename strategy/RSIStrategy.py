@@ -577,8 +577,24 @@ class RSIStrategy(threading.Thread):
             
             # 케이스 1: 테이블이 없으면 API로 조회 후 생성
             if not table_exists:
-                price_df = self.kiwoom.get_price_data(code)
+                # allow configurable deep fetch for initial creation
+                try:
+                    max_loops = int(os.getenv('PRICE_FETCH_MAX_LOOPS', '4'))
+                except Exception:
+                    max_loops = 4
+
+                logger.info("Price table missing for %s: fetching with max_loops=%d", display, max_loops)
+                price_df = self.kiwoom.get_price_data(code, max_loops=max_loops)
                 time.sleep(0.3)  # API 호출 후 대기
+                if price_df is None or len(price_df) == 0:
+                    logger.warning("Price data fetch returned empty for %s", display)
+                else:
+                    # log fetched range
+                    try:
+                        logger.info("Fetched price rows for %s: count=%d, first=%s, last=%s", display, len(price_df), price_df.index[0], price_df.index[-1])
+                    except Exception:
+                        pass
+
                 insert_df_to_db(self.strategy_name, code, price_df)
                 self.universe[code]['price_df'] = price_df
                 logger.debug("Created price table for %s", display)
@@ -590,25 +606,102 @@ class RSIStrategy(threading.Thread):
                 cur = execute_sql(self.strategy_name, sql)
                 last_date = cur.fetchone()
                 now = get_korea_time().strftime("%Y%m%d")
-                
-                # 최근 저장 일자가 오늘이 아니면 업데이트
-                if last_date[0] != now:
-                    price_df = self.kiwoom.get_price_data(code)
+
+                # 최근 저장 일자가 오늘(또는 최신 거래일)이 아니면 업데이트
+                if not last_date or last_date[0] != now:
+                    try:
+                        # try a shallow fetch first, then deeper fetch if result seems stale
+                        shallow_loops = int(os.getenv('PRICE_FETCH_SHALLOW_LOOPS', '1'))
+                    except Exception:
+                        shallow_loops = 1
+
+                    logger.info("Updating price data for %s: last_date=%s, now=%s - shallow_loops=%d", display, last_date[0] if last_date else None, now, shallow_loops)
+                    price_df = self.kiwoom.get_price_data(code, max_loops=shallow_loops)
                     time.sleep(0.3)  # API 호출 후 대기
-                    insert_df_to_db(self.strategy_name, code, price_df)
-                    self.universe[code]['price_df'] = price_df
-                    logger.debug("Updated price data for %s", display)
+
+                    # if fetched data empty or newest date still older than expected, try deeper fetch
+                    need_deep = False
+                    if price_df is None or len(price_df) == 0:
+                        need_deep = True
+                    else:
+                        try:
+                            latest = price_df.index[-1]
+                            if latest < get_korea_time().strftime('%Y%m%d'):
+                                # latest less than today -> possibly missing recent rows
+                                need_deep = True
+                        except Exception:
+                            need_deep = True
+
+                    if need_deep:
+                        try:
+                            deep_loops = int(os.getenv('PRICE_FETCH_MAX_LOOPS', '4'))
+                        except Exception:
+                            deep_loops = 4
+                        logger.info("Shallow fetch insufficient for %s; retrying with deep_loops=%d", display, deep_loops)
+                        price_df = self.kiwoom.get_price_data(code, max_loops=deep_loops)
+                        time.sleep(0.3)
+
+                    if price_df is None:
+                        logger.warning("Price update failed for %s: no data returned", display)
+                    else:
+                        try:
+                            logger.info("Price update fetched for %s: rows=%d, first=%s, last=%s", display, len(price_df), price_df.index[0], price_df.index[-1])
+                        except Exception:
+                            pass
+
+                        insert_df_to_db(self.strategy_name, code, price_df)
+                        self.universe[code]['price_df'] = price_df
+                        logger.debug("Updated price data for %s", display)
                     continue
             
             # 케이스 3: DB에서 기존 데이터 로드 (API 호출 없음, 대기 불필요)
             sql = "select * from `{}`".format(code)
             cur = execute_sql(self.strategy_name, sql)
             cols = [column[0] for column in cur.description]
-            
+
             price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
             price_df = price_df.set_index('index')
+
+            # Detect missing recent trading date even when table exists
+            try:
+                from datetime import timedelta, date
+                from util.time_helper import MARKET_HOLIDAYS_2026
+                kst_now = get_korea_time()
+                today_dt = kst_now.date()
+                prev_dt = today_dt - timedelta(days=1)
+                attempts = 0
+                while (prev_dt.weekday() >= 5 or prev_dt in MARKET_HOLIDAYS_2026) and attempts < 10:
+                    prev_dt = prev_dt - timedelta(days=1)
+                    attempts += 1
+                prev_trading_str = prev_dt.strftime('%Y%m%d')
+            except Exception:
+                prev_trading_str = None
+
+            refreshed_from_db_check = False
+            try:
+                if prev_trading_str and prev_trading_str not in price_df.index:
+                    logger.warning("DB has table for %s but missing prev trading date %s; refreshing from API", display, prev_trading_str)
+                    try:
+                        max_loops = int(os.getenv('PRICE_FETCH_MAX_LOOPS', '4'))
+                    except Exception:
+                        max_loops = 4
+                    new_df = self.kiwoom.get_price_data(code, max_loops=max_loops)
+                    time.sleep(0.2)
+                    if new_df is not None and len(new_df) > 0:
+                        price_df = new_df
+                        try:
+                            insert_df_to_db(self.strategy_name, code, price_df)
+                        except Exception:
+                            pass
+                        refreshed_from_db_check = True
+                        logger.info("Refreshed DB price data for %s: rows=%d (replaced)", display, len(price_df))
+                    else:
+                        logger.warning("Attempted refresh for %s returned no data", display)
+            except Exception as e:
+                logger.warning("Error while checking DB freshness for %s: %s", display, e)
+
             self.universe[code]['price_df'] = price_df
-            logger.debug("Loaded price data from DB for %s", display)
+            logger.debug("Loaded price data from DB for %s (refreshed=%s)", display, refreshed_from_db_check)
 
     def run(self):
         """실질적 수행 역할을 하는 함수"""
@@ -989,6 +1082,45 @@ class RSIStrategy(threading.Thread):
             
             # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가
             df = universe_item['price_df'].copy()
+            # --- Missing recent data detection ---
+            try:
+                from datetime import timedelta, date
+                from util.time_helper import MARKET_HOLIDAYS_2026
+                # compute previous trading date (1 trading day before today)
+                kst_now = get_korea_time()
+                today_dt = kst_now.date()
+                prev_dt = today_dt - timedelta(days=1)
+                # step back until we find a trading day
+                attempts = 0
+                while (prev_dt.weekday() >= 5 or prev_dt in MARKET_HOLIDAYS_2026) and attempts < 10:
+                    prev_dt = prev_dt - timedelta(days=1)
+                    attempts += 1
+                prev_trading_str = prev_dt.strftime('%Y%m%d')
+            except Exception:
+                prev_trading_str = None
+
+            # If previous trading day is missing from DB, try to refresh price data
+            refreshed = False
+            try:
+                if prev_trading_str and prev_trading_str not in df.index:
+                    logger.warning("Price DB missing previous trading date %s for %s; attempting refresh", prev_trading_str, code)
+                    try:
+                        # Try reloading full price data from Kiwoom API (if allowed)
+                        new_df = self.kiwoom.get_price_data(code)
+                        if new_df is not None and len(new_df) > 0:
+                            df = new_df
+                            # Update in-memory cache so subsequent calls see refreshed data
+                            try:
+                                self.universe[code]['price_df'] = df
+                            except Exception:
+                                pass
+                            refreshed = True
+                            logger.info("Price DB refreshed from API for %s (rows=%d)", code, len(df))
+                    except Exception as e:
+                        logger.warning("Price refresh failed for %s: %s", code, e)
+            except Exception:
+                pass
+
             today_date = get_korea_time().strftime('%Y%m%d')
             # Toggle: use closed bar only (do not include realtime/current partial bar)
             use_closed = str(os.getenv('RSI_USE_CLOSED_BAR', '0')).lower() in ('1', 'true', 'yes')
@@ -1035,6 +1167,8 @@ class RSIStrategy(threading.Thread):
                 'dtype': str(df['close'].dtype) if 'close' in df.columns else None,
                 'last_prices': last_prices,
                 'include_current_bar': (not use_closed),
+                'missing_prev_trading_date': prev_trading_str if 'prev_trading_str' in locals() else None,
+                'refreshed_price_db': refreshed,
             }
             try:
                 log_rsi_debug(code, 'pre_calc', pre_payload)
