@@ -1064,16 +1064,29 @@ class RSIStrategy(threading.Thread):
                 min_periods = period
             if min_periods < 1:
                 min_periods = 1
-            # Ensure min_periods does not exceed window size (period)
-            if min_periods > period:
-                try:
-                    logger.warning("RSI_MIN_PERIODS (%d) > RSI_PERIOD (%d); capping to RSI_PERIOD", min_periods, period)
-                except Exception:
-                    pass
-                min_periods = period
 
             method = getattr(self, 'RSI_METHOD', 'cutler')
             method = method.lower() if isinstance(method, str) else 'cutler'
+
+            # Method-specific min_periods handling:
+            # - Cutler (rolling): pandas requires min_periods <= window (period)
+            # - Wilder (ewm): allow min_periods > period but cap to available data length
+            if method == 'cutler':
+                if min_periods > period:
+                    try:
+                        logger.warning("RSI_MIN_PERIODS (%d) > RSI_PERIOD (%d); capping to RSI_PERIOD for Cutler method", min_periods, period)
+                    except Exception:
+                        pass
+                    min_periods = period
+            else:
+                # Wilder: cap to available data length to avoid min_periods > len(df)
+                df_len = len(df) if df is not None else 0
+                if min_periods > df_len:
+                    try:
+                        logger.warning("RSI_MIN_PERIODS (%d) > available data (%d); capping to available data for Wilder", min_periods, df_len)
+                    except Exception:
+                        pass
+                    min_periods = max(1, df_len)
 
             # Compute initial SMA seed for logging (if available)
             avg_gain_init = None
