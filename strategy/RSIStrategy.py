@@ -18,6 +18,52 @@ import numpy as np
 import pandas as pd
 import json
 
+
+def _get_debug_config():
+    enabled = str(os.getenv('KIW_DEBUG_RSI', '0')).lower() in ('1', 'true', 'yes')
+    try:
+        sample = int(os.getenv('KIW_DEBUG_RSI_SAMPLE_RATE', '1'))
+        if sample < 1:
+            sample = 1
+    except Exception:
+        sample = 1
+    return enabled, sample
+
+
+def log_rsi_debug(symbol, stage, payload):
+    """Structured one-line JSON debug log for RSI internals.
+
+    Args:
+        symbol: 종목 코드
+        stage: 'pre_calc' | 'init_seed' | 'post_calc'
+        payload: dict of additional fields
+    """
+    enabled, sample = _get_debug_config()
+    if not enabled:
+        return
+
+    # sampling: deterministic by hashing symbol+stage+ts
+    if sample > 1:
+        try:
+            import hashlib
+            key = f"{symbol}-{stage}-{payload.get('ts','') or ''}"
+            h = int(hashlib.md5(key.encode()).hexdigest(), 16)
+            if h % sample != 0:
+                return
+        except Exception:
+            pass
+
+    out = {
+        'symbol': symbol,
+        'stage': stage,
+        'ts': payload.get('ts'),
+        'payload': payload,
+    }
+    try:
+        logger.debug("RSI_DEBUG: %s", json.dumps(out, default=str, ensure_ascii=False))
+    except Exception:
+        logger.debug("RSI_DEBUG (fallback): %s %s", symbol, stage)
+
 class RSIStrategy(threading.Thread):
     # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
     MAX_HOLDINGS = 10  # 최대 보유 종목 수
@@ -117,52 +163,6 @@ class RSIStrategy(threading.Thread):
         logger.info("RSI 계산 방식: %s", self.RSI_METHOD)
 
         self.init_strategy()
-
-
-def _get_debug_config():
-    enabled = str(os.getenv('KIW_DEBUG_RSI', '0')).lower() in ('1', 'true', 'yes')
-    try:
-        sample = int(os.getenv('KIW_DEBUG_RSI_SAMPLE_RATE', '1'))
-        if sample < 1:
-            sample = 1
-    except Exception:
-        sample = 1
-    return enabled, sample
-
-
-def log_rsi_debug(symbol, stage, payload):
-    """Structured one-line JSON debug log for RSI internals.
-
-    Args:
-        symbol: 종목 코드
-        stage: 'pre_calc' | 'init_seed' | 'post_calc'
-        payload: dict of additional fields
-    """
-    enabled, sample = _get_debug_config()
-    if not enabled:
-        return
-
-    # sampling: deterministic by hashing symbol+stage+ts
-    if sample > 1:
-        try:
-            import hashlib
-            key = f"{symbol}-{stage}-{payload.get('ts','') or ''}"
-            h = int(hashlib.md5(key.encode()).hexdigest(), 16)
-            if h % sample != 0:
-                return
-        except Exception:
-            pass
-
-    out = {
-        'symbol': symbol,
-        'stage': stage,
-        'ts': payload.get('ts'),
-        'payload': payload,
-    }
-    try:
-        logger.debug("RSI_DEBUG: %s", json.dumps(out, default=str, ensure_ascii=False))
-    except Exception:
-        logger.debug("RSI_DEBUG (fallback): %s %s", symbol, stage)
 
     def init_strategy(self):
         """전략 초기화 기능을 수행하는 함수"""
