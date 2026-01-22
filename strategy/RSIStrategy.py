@@ -1064,6 +1064,13 @@ class RSIStrategy(threading.Thread):
                 min_periods = period
             if min_periods < 1:
                 min_periods = 1
+            # Ensure min_periods does not exceed window size (period)
+            if min_periods > period:
+                try:
+                    logger.warning("RSI_MIN_PERIODS (%d) > RSI_PERIOD (%d); capping to RSI_PERIOD", min_periods, period)
+                except Exception:
+                    pass
+                min_periods = period
 
             method = getattr(self, 'RSI_METHOD', 'cutler')
             method = method.lower() if isinstance(method, str) else 'cutler'
