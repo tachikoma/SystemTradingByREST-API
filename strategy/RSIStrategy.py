@@ -436,7 +436,7 @@ class RSIStrategy(threading.Thread):
             except Exception as e:
                 error_msg = f"Universe 생성 실패: {e}"
                 logger.error(error_msg)
-                send_message(f"❌ Universe 생성 실패\n{e}")
+                send_message(f"❌ Universe 생성 실패\n{html.escape(str(e))}")
                 
                 # 기존 universe 테이블이 있으면 로드하여 계속 사용
                 if table_exists:
@@ -476,7 +476,7 @@ class RSIStrategy(threading.Thread):
                 else:
                     # 기존 universe도 없으면 치명적 오류
                     logger.critical("Universe 생성 실패이고 기존 universe도 없습니다.")
-                    send_message(f"🚨 치명적 오류: Universe 없음\n{e}")
+                    send_message(f"🚨 치명적 오류: Universe 없음\n{e}", parse_mode=None)
                     raise Exception(f"Universe 생성 실패이고 기존 데이터도 없습니다: {e}")
             
             temp_universe = {}
@@ -738,7 +738,7 @@ class RSIStrategy(threading.Thread):
                         except Exception as cache_error:
                             self.full_cache_in_progress = False
                             logger.error("❌ 장 종료 전체 종목 캐싱 실패: %s", cache_error)
-                            send_message(f"❌ 장 종료 전체 종목 캐싱 실패\n{cache_error}")
+                            send_message(f"❌ 장 종료 전체 종목 캐싱 실패\n{cache_error}", parse_mode=None)
                 
                 # Universe 재구성 체크 (매일 00:00 ~ 00:05 사이)
                 if now.hour == 0 and now.minute < 5 and not self.universe_updated_today:
@@ -757,7 +757,7 @@ class RSIStrategy(threading.Thread):
                             send_message(f"✅ Universe 재구성 완료\n종목 수: {len(self.universe)}")
                         except Exception as update_error:
                             logger.error("Universe 재구성 실패: %s", update_error)
-                            send_message(f"❌ Universe 재구성 실패\n{update_error}")
+                            send_message(f"❌ Universe 재구성 실패\n{update_error}", parse_mode=None)
                 
                 # 다음 날로 넘어가면 플래그 리셋
                 if now.hour == 1:
@@ -877,7 +877,7 @@ class RSIStrategy(threading.Thread):
                         logger.error("❌ 청산 주문 실패: %s(%s) - %s", code_name, code, error_msg)
                         name = self.resolve_stock_name(code)
                         display = f"{name}({code})" if name else code
-                        send_message(f"❌ 청산 주문 실패\n종목: {display}\n오류: {error_msg}")
+                        send_message(f"❌ 청산 주문 실패\n종목: {display}\n오류: {error_msg}", parse_mode=None)
                         # 실패해도 universe에 추가하여 다음에 다시 시도
                         self.universe[code] = holding_info[code]
                     
@@ -1448,7 +1448,7 @@ class RSIStrategy(threading.Thread):
                 name = self.resolve_stock_name(code)
                 display = f"{name}({code})" if name else code
                 error_msg = "❌ <b>매도 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
-                    display, quantity, ask, error_code, error_message)
+                    display, quantity, ask, error_code, html.escape(error_message))
                 logger.error("매도 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
                 send_message(error_msg)
             
@@ -1599,14 +1599,14 @@ class RSIStrategy(threading.Thread):
                 name = self.resolve_stock_name(code)
                 display = f"{name}({code})" if name else code
                 error_msg = "❌ <b>매수 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
-                    display, quantity, bid, error_code, error_message)
+                    display, quantity, bid, error_code, html.escape(error_message))
                 logger.error("매수 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
                 send_message(error_msg)
                 
                 # 모의투자 매매제한 종목(RC4007) 감지 및 블랙리스트 추가
                 if self.kiwoom.mock and 'RC4007' in error_message:
                     code_name = self.universe.get(code, {}).get('code_name', code)
-                    self.add_to_mock_blacklist(code, code_name, error_message)
+                    self.add_to_mock_blacklist(code, code_name, html.escape(error_message))
 
         # 매수신호가 없다면 종료
         else:

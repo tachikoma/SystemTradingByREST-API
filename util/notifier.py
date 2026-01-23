@@ -127,8 +127,23 @@ def send_telegram_message(message: str, bot_token: str = None, chat_id: str = No
         url = f'https://api.telegram.org/bot{bot_token}/sendMessage'
         
         # 메시지 포맷 처리
+        # - HTML 파싱을 사용하는 경우에는 메시지를 그대로 전달하여 HTML 태그(<b>, <i> 등)가 동작하도록 함
+        # - MarkdownV2를 사용하는 경우에는 텔레그램 규격에 맞춰 특수문자를 이스케이프함
+        # - parse_mode가 None 또는 알려지지 않은 값이면 원문을 그대로 보냄
+        def _escape_markdown_v2(text: str) -> str:
+            try:
+                import re
+                # 먼저 역슬래시 자체를 이스케이프
+                text = text.replace('\\', '\\\\')
+                # MarkdownV2에서 이스케이프해야 하는 문자들
+                return re.sub(r'([_\*\[\]()~`>#+\-=|{}\.!])', r'\\\1', text)
+            except Exception:
+                return text
+
         if parse_mode == 'HTML':
-            safe_message = html.escape(message)
+            safe_message = message
+        elif parse_mode and parse_mode.upper() == 'MARKDOWNV2':
+            safe_message = _escape_markdown_v2(message)
         else:
             # parse_mode이 None 또는 다른 값이면 원문을 그대로 보냄
             safe_message = message
@@ -174,7 +189,7 @@ def send_telegram_message(message: str, bot_token: str = None, chat_id: str = No
 
 
 # 하위 호환성을 위한 별칭 (기존 send_message 함수 대체)
-def send_message(message: str, token: str = None) -> bool:
+def send_message(message: str, parse_mode: str = 'HTML') -> bool:
     """메시지 전송 (텔레그램)
     
     Args:
@@ -184,7 +199,7 @@ def send_message(message: str, token: str = None) -> bool:
     Returns:
         bool: 전송 성공 여부
     """
-    return send_telegram_message(message)
+    return send_telegram_message(message, parse_mode=parse_mode)
 
 
 def send_telegram_traceback(trace_text: str, bot_token: str = None, chat_id: str = None, max_inline_length: int = 1500) -> bool:
@@ -294,3 +309,27 @@ def mask_sensitive_info(text: str) -> str:
         return masked
     except Exception:
         return text
+
+
+def format_message_for_telegram(message: str, parse_mode: str = 'HTML') -> dict:
+    """텔레그램에 보낼 메시지 텍스트를 포맷하여 반환합니다.
+
+    Returns a dict with keys 'text' and 'parse_mode' that can be inspected
+    without actually sending a network request. Useful for testing.
+    """
+    def _escape_markdown_v2(text: str) -> str:
+        try:
+            import re
+            text = text.replace('\\', '\\\\')
+            return re.sub(r'([_\*\[\]()~`>#+\-=|{}\.!])', r'\\\\\1', text)
+        except Exception:
+            return text
+
+    if parse_mode == 'HTML':
+        safe_message = message
+    elif parse_mode and str(parse_mode).upper() == 'MARKDOWNV2':
+        safe_message = _escape_markdown_v2(message)
+    else:
+        safe_message = message
+
+    return {'text': safe_message, 'parse_mode': parse_mode}
