@@ -137,6 +137,10 @@ chart*.py
 *.sh
 *temp*.py
 *.db
+*.bak
+
+outputs/
+
 
 # except manually
 .idea
