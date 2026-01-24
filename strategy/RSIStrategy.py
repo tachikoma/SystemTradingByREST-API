@@ -2,7 +2,6 @@ import time
 import os
 import datetime
 from zoneinfo import ZoneInfo
-from api.Kiwoom import Kiwoom
 from util.make_up_universe import *
 from util.db_helper import *
 from util.time_helper import *
@@ -218,7 +217,7 @@ class RSIStrategy(threading.Thread):
             os.makedirs(db_dir, exist_ok=True)
         except Exception:
             pass
-        cache_file = os.path.join(db_dir, 'all_stocks_kiwoom.xlsx')
+        cache_file = os.path.join(db_dir, 'all_stocks_kiwoom.parquet')
         now = get_korea_time()
 
         # 환경변수로 초기 전체 캐싱을 건너뛸 수 있음

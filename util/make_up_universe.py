@@ -1,5 +1,4 @@
 import requests
-from bs4 import BeautifulSoup
 import numpy as np
 import pandas as pd
 from datetime import datetime, time as datetime_time
@@ -57,7 +56,7 @@ def cache_daily_data(kiwoom_client):
         raise
 
 
-def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True, cache_file='all_stocks_kiwoom.xlsx'):
+def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True, cache_file='all_stocks_kiwoom.parquet'):
     """
     키움 API를 활용하여 전체 종목 리스트를 수집하는 함수
     (유니버스 생성용 기초 데이터)
@@ -66,7 +65,7 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
         kiwoom_client: Kiwoom API 클라이언트 인스턴스
         use_cache: 캐시 읽기 여부 (기본값: True)
         save_cache: 캐시 저장 여부 (기본값: True)
-        cache_file: 캐시 파일 경로 (기본값: 'all_stocks_kiwoom.xlsx')
+        cache_file: 캐시 파일 경로 (기본값: 'all_stocks_kiwoom.parquet')
     
     Returns:
         DataFrame: 전체 종목 정보가 담긴 데이터프레임
@@ -88,9 +87,9 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
         if days_old < 30:
             logger.info(f"캐시 파일 사용: {Path(cache_path).resolve()} ({days_old}일 전 데이터, 30일 이내)")
             try:
-                return pd.read_excel(cache_path, index_col=0)
+                return pd.read_parquet(cache_path)
             except Exception as e:
-                logger.warning(f"캐시 파일 읽기 실패: {e}. API로 새로 조회합니다.")
+                logger.warning(f"캐시 Parquet 읽기 실패: {e}. API로 새로 조회합니다.")
         else:
             logger.warning(f"캐시 파일이 너무 오래됨: {days_old}일 전. API로 새로 조회합니다.")
     
@@ -177,10 +176,11 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     # 캐시 저장
     if save_cache:
         try:
-            df.to_excel(cache_path)
+            # Prefer Parquet for compactness and speed
+            df.to_parquet(cache_path, index=True)
             logger.info(f"캐시 파일 저장: {Path(cache_path).resolve()}")
         except Exception as e:
-            logger.warning(f"캐시 파일 저장 실패: {e}")
+            logger.error(f"캐시 Parquet 저장 실패: {e}")
     
     return df
 
@@ -210,7 +210,7 @@ def is_market_hours():
     return market_open <= current_time <= market_close
 
 
-def execute_crawler(output_file='all_stocks_naver.xlsx'):
+def execute_crawler(output_file='all_stocks_naver.parquet'):
     # KOSPI, KOSDAQ 종목을 하나로 합치는데 사용할 변수
     df_total = []
 
@@ -218,6 +218,8 @@ def execute_crawler(output_file='all_stocks_naver.xlsx'):
     for code in CODES:
 
         # 전체 페이지 개수를 가져오기 위한 코드 (마켓별로 `code` 사용)
+        # lazy import BeautifulSoup to avoid requiring bs4 unless crawling
+        from bs4 import BeautifulSoup
         res = requests.get(BASE_URL + str(code))
         page_soup = BeautifulSoup(res.text, 'lxml')
 
@@ -271,13 +273,16 @@ def execute_crawler(output_file='all_stocks_naver.xlsx'):
     # 합친 데이터프레임의 index 번호를 새로 매김
     df_total.reset_index(inplace=True, drop=True)
 
-    # 전체 크롤링 결과를 엑셀 출력
-    out_path = out_file if os.path.isabs(output_file) else os.path.join(DB_DIR, output_file)
-    df_total.to_excel(out_path)
+    # 전체 크롤링 결과를 Parquet로 저장
+    out_path = output_file if os.path.isabs(output_file) else os.path.join(DB_DIR, output_file)
     try:
-        logger.info(f"크롤링 결과 저장: {Path(out_path).resolve()}")
-    except Exception:
-        pass
+        df_total.to_parquet(out_path, index=True)
+        try:
+            logger.info(f"크롤링 결과 저장: {Path(out_path).resolve()}")
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"크롤링 결과 Parquet 저장 실패: {e}")
 
     # 크롤링 결과를 반환
     return df_total
@@ -294,6 +299,8 @@ def crawler(code, page, fields):
             'fieldIds': fields,
             'returnUrl': BASE_URL + str(code) + "&page=" + str(page)}
 
+    # lazy import BeautifulSoup only when crawler runs
+    from bs4 import BeautifulSoup
     # 네이버로 요청을 전달(post방식)
     res = requests.post('https://finance.naver.com/sise/field_submit.nhn', data=data)
 
@@ -375,7 +382,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                     logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
                     return _filter_and_create_universe(cached_df)
             # 아래 네이버 크롤링 로직으로 계속 진행
-    excel_file = 'all_stocks_naver.xlsx'
+    excel_file = 'all_stocks_naver.parquet'
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
     excel_path = excel_file if os.path.isabs(excel_file) else os.path.join(DB_DIR, excel_file)
     
@@ -390,9 +397,14 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
             logger.info(f"오늘 생성된 {excel_path} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
             print(f"오늘 생성된 {excel_path} 파일을 사용합니다.")
             try:
-                df = pd.read_excel(excel_path, index_col=0)
+                df = pd.read_parquet(excel_path)
+                # 읽어온 Parquet에 필수 컬럼이 없는 경우 NaN 컬럼으로 보완
+                required_cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '종목코드', '시장구분']
+                for rc in required_cols:
+                    if rc not in df.columns:
+                        df[rc] = np.nan
             except Exception as e:
-                logger.error(f"파일 읽기 실패: {e}. 크롤링을 시도합니다.")
+                logger.error(f"Parquet 파일 읽기 실패: {e}. 크롤링을 시도합니다.")
                 file_is_today = False  # 파일 읽기 실패하면 크롤링 시도
     
     # 크롤링 스킵: 평일 08:00-09:00에는 네이버 크롤링 데이터가 신뢰 불가
@@ -438,15 +450,19 @@ def _try_load_cache():
         DataFrame or None: 캐시 데이터 또는 None (실패 시)
     """
     cache_files = [
-        'all_stocks_kiwoom.xlsx',  # 키움 API 전체 종목 (우선)
-        'all_stocks_naver.xlsx'     # 네이버 크롤링 전체 종목
+        'all_stocks_kiwoom.parquet',  # 키움 API 전체 종목 (우선)
+        'all_stocks_naver.parquet'     # 네이버 크롤링 전체 종목
     ]
 
     for cache_file in cache_files:
         cache_path = cache_file if os.path.isabs(cache_file) else os.path.join(DB_DIR, cache_file)
         if os.path.exists(cache_path):
             try:
-                df = pd.read_excel(cache_path, index_col=0)
+                try:
+                    df = pd.read_parquet(cache_path)
+                except Exception as e:
+                    logger.warning(f"Parquet 읽기 실패: {e}")
+                    raise
                 # 파일 수정시간 조회는 실패할 수 있으므로 개별로 처리
                 try:
                     file_mod_time = datetime.fromtimestamp(
@@ -456,8 +472,13 @@ def _try_load_cache():
                     logger.info(f"캐시 파일 발견: {cache_file} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
                 except Exception:
                     logger.info(f"캐시 파일 읽음: {cache_file} (수정시간 없음)")
-                logger.info(f"⚠️  캐시 파일 사용: {cache_file}")
-                return df
+                    logger.info(f"⚠️  캐시 파일 사용: {cache_file}")
+                    # 보장: 필터링에서 기대하는 컬럼들이 없으면 NaN 컬럼을 추가하여 KeyError 방지
+                    required_cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '종목코드', '시장구분']
+                    for rc in required_cols:
+                        if rc not in df.columns:
+                            df[rc] = np.nan
+                    return df
             except Exception as e:
                 logger.warning(f"{cache_path} 읽기 실패: {e}")
                 continue
@@ -538,8 +559,8 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
 
     # 2. 변동성 지표 계산
     # - 등락률 절대값: 당일 변동성
-    # - 외국인비율: 유동성 대리변수
     df['변동성_지표'] = abs(df['등락률'])
+    # - 외국인비율: 유동성 대리변수 (사용 비율이 높을수록 안정적) <- 현재는 사용하지 않음
     
     # 3. 거래 활발도 계산 (거래대금 대비 시가총액 비율)
     df['거래회전율'] = df['거래대금'] / df['시가총액'] * 100
@@ -559,7 +580,7 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
     # 안전한 DataFrame 조작을 위해 복사본 사용
     df = df.copy()
 
-    # 캐시에서 읽을 때 엑셀을 index_col=0으로 읽는 케이스를 지원
+    # 캐시에서 읽을 때 Parquet를 index_col=0으로 읽는 케이스를 지원
     # index에 종목코드가 들어있다면 이를 명시적 컬럼으로 복원
     if '종목코드' not in df.columns:
         df = df.reset_index()
@@ -578,7 +599,7 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
         logger.error(error_msg)
         raise Exception(error_msg)
 
-    # 유니버스 생성 결과를 엑셀 출력
+    # 유니버스 생성 결과를 Parquet 출력
     # 우선 df는 필터링 및 정렬을 마친 상위 100개(또는 지정된 수) 후보입니다.
     # 추가 조치: 현재 보유/주문 종목(kiwoom_client)을 병합하여 보유종목이 누락되지 않도록 함
     try:
@@ -688,14 +709,17 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
         logger.warning(f"보유/주문 병합 중 경고 발생: {e}")
 
     try:
-        out_universe = os.path.join(DB_DIR, 'universe.xlsx')
-        df.to_excel(out_universe)
+        out_universe = os.path.join(DB_DIR, 'universe.parquet')
         try:
-            logger.info(f"Universe 저장: {Path(out_universe).resolve()}")
-        except Exception:
-            logger.info(f"Universe 저장: {out_universe}")
+            df.to_parquet(out_universe, index=True)
+            try:
+                logger.info(f"Universe 저장: {Path(out_universe).resolve()}")
+            except Exception:
+                logger.info(f"Universe 저장: {out_universe}")
+        except Exception as e:
+            logger.error(f"Universe Parquet 저장 실패: {e}")
     except Exception as e:
-        logger.warning(f"universe.xlsx 저장 실패: {e}")
+        logger.warning(f"universe 저장 실패: {e}")
 
     universe_list = df['종목명'].tolist() if '종목명' in df.columns else df.iloc[:, 0].astype(str).tolist()
     logger.info(f"Universe 생성 완료: {len(universe_list)}개 종목 (병합 후)")
@@ -703,6 +727,24 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
 
 
 if __name__ == "__main__":
+    import sys
+    import os
+
+    # 권장 실행 방식 안내: 패키지 모드로 실행하는 것이 import 경로 문제를 방지합니다.
+    if not (__package__):
+        sys.stderr.write(
+            "권장: 패키지 모드로 실행하세요 — `python -m util.make_up_universe`\n"
+            "직접 실행 중입니다. 일부 상대/절대 import가 실패할 수 있습니다.\n"
+        )
+        # 자동 재실행 시도 (옵션: --no-reexec 또는 환경변수 SKIP_REEXEC로 건너뜀)
+        if "--no-reexec" not in sys.argv and not os.getenv("SKIP_REEXEC"):
+            sys.stderr.write("모듈 모드로 재실행합니다...\n")
+            args = [sys.executable, "-m", "util.make_up_universe"] + sys.argv[1:]
+            os.execv(sys.executable, args)
+        else:
+            sys.stderr.write("재실행 건너뜀 (--no-reexec 또는 SKIP_REEXEC 감지). 계속 진행합니다.\n")
+
+    # 실제 동작 시작
     print('Start!')
     universe = get_universe()
     print(universe)

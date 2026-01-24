@@ -200,7 +200,7 @@ export KIW_LOG_DIR=./logs
   - ka10099: 전체 종목 리스트 (코스피 + 코스닥)
   - ka10001: 종목별 상세 정보 (거래량, 거래대금, 등락률, 시가총액 등)
   - 함수: `fetch_all_stocks_from_kiwoom()` - 전체 종목 수집 (4,234개)
-  - 캐싱: `all_stocks_kiwoom.xlsx` (당일 재사용)
+   - 캐싱: `all_stocks_kiwoom.parquet` (당일 재사용)
   - Rate limit 대응: 0.1초 간격, 전체 수집 시간 약 7분
 - **스마트 전략**:
   - Universe 재구성: 30일마다 (종목 리스트 변경)
@@ -208,9 +208,9 @@ export KIW_LOG_DIR=./logs
   - 장 중 크롤링 실패 시: 캐시 파일 사용
 - **네이버 크롤링** (fallback): API 실패 시 자동 전환
 - **파일 구조**:
-  - `all_stocks_kiwoom.xlsx`: 전체 종목 (키움 API, ~4,234개)
-  - `all_stocks_naver.xlsx`: 전체 종목 (네이버, ~4,233개)
-  - `universe.xlsx`: 필터링된 투자 종목 (100개)
+   - `all_stocks_kiwoom.parquet`: 전체 종목 (키움 API, ~4,234개)
+   - `all_stocks_naver.parquet`: 전체 종목 (네이버, ~4,233개)
+   - `universe.parquet`: 필터링된 투자 종목 (100개)
 
 ## 백테스트 분석 도구
 전략 최적화용 스크립트들 (`backtest/`):

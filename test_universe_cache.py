@@ -145,7 +145,7 @@ def test_with_mock():
         logger.info(f"샘플 데이터:\n{df.head(3)}")
         
         # 파일 생성 확인
-        cache_file = 'all_stocks_kiwoom.xlsx'
+        cache_file = 'all_stocks_kiwoom.parquet'
         if os.path.exists(cache_file):
             logger.info(f"✅ 캐시 파일 생성 확인: {cache_file}")
         else:
@@ -161,8 +161,8 @@ def test_with_mock():
         logger.info(f"✅ 성공: {len(universe_list)}개 종목 선정")
         logger.info(f"선정 종목: {universe_list[:5]}...")
         
-        # universe.xlsx 파일 확인
-        universe_file = 'universe.xlsx'
+        # universe.parquet 파일 확인
+        universe_file = 'universe.parquet'
         if os.path.exists(universe_file):
             logger.info(f"✅ Universe 파일 생성 확인: {universe_file}")
         else:
@@ -258,7 +258,7 @@ def test_with_real_api(quick_mode=False):
         try:
             df = cache_daily_data(kiwoom)
             logger.info(f"✅ 성공: {len(df)}개 종목 캐싱 완료")
-            logger.info(f"파일: all_stocks_kiwoom.xlsx")
+            logger.info(f"파일: all_stocks_kiwoom.parquet")
             logger.info(f"샘플 데이터:\n{df.head()}")
         except Exception as e:
             logger.error(f"❌ 실패: {e}", exc_info=True)

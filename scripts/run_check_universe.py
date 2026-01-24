@@ -24,8 +24,8 @@ class MockKiwoom:
 
 
 def main():
-    print('Loading cached all_stocks_kiwoom.xlsx...')
-    df = pd.read_excel('all_stocks_kiwoom.xlsx')
+    print('Loading cached all_stocks_kiwoom.parquet...')
+    df = pd.read_parquet('all_stocks_kiwoom.parquet')
     print('rows:', len(df))
     code_list_records = df.to_dict(orient='records')
     mk = MockKiwoom(code_list_records)

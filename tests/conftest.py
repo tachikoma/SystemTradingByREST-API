@@ -60,7 +60,7 @@ def kiwoom_client():
 # 각 테스트 함수 실행 전후에 master_list.db를 제거하여 테스트 간 상태 오염을 방지합니다.
 @pytest.fixture(autouse=True)
 def clean_master_list_db():
-    files_to_remove = ['master_list.db', 'all_stocks_kiwoom.xlsx', 'all_stocks_naver.xlsx', 'universe.xlsx']
+    files_to_remove = ['master_list.db', 'all_stocks_kiwoom.parquet', 'all_stocks_naver.parquet', 'universe.parquet']
     try:
         for f in files_to_remove:
             if os.path.exists(f):

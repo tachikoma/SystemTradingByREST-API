@@ -26,7 +26,7 @@ def test_naver_crawling():
     print("-" * 60)
     
     try:
-        df = execute_crawler("NaverFinance.xlsx")
+        df = execute_crawler("NaverFinance.parquet")
         
         print("\n크롤링 완료!")
         print("=" * 60)
@@ -69,7 +69,7 @@ def test_naver_crawling():
             print("✅ 네이버는 장 마감 후에도 당일 확정 데이터를 제공합니다.")
             print("✅ Universe 재구성 시 장시간 체크 없이 크롤링 가능합니다.")
         
-        print("\n파일 저장 위치: NaverFinance.xlsx")
+        print("\n파일 저장 위치: NaverFinance.parquet")
         print("=" * 60)
         
         return True

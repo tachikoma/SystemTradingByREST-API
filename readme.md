@@ -9,7 +9,7 @@
 - **API 추상화 (`api/Kiwoom.py`):** 키움 REST API와 WebSocket을 사용하여 통신합니다. `requests` 라이브러리를 사용하여 HTTP 요청을 보내고, `websockets` 라이브러리를 사용하여 실시간 시세를 수신합니다.
 - **종목 선정 (`util/make_up_universe.py`):** 키움 API(장 종료 후) 또는 네이버 금융(장 중) 크롤링으로 KOSPI/KOSDAQ 전체 종목 정보를 수집하여 거래량, 시가총액, 변동성 등의 지표를 기반으로 상위 100개 종목을 선정합니다. 매일 장 종료 후 자동으로 데이터를 캐싱하여 다음날 빠르게 시작할 수 있습니다.
  - **데이터베이스 (`util/db_helper.py`):** SQLite를 사용하여 종목 유니버스 및 과거 시세 데이터를 캐시하여 빠른 시작과 API 요청 제한을 회피합니다.
-   - 기본 저장 위치: 애플리케이션은 캐시/엑셀 파일(`all_stocks_kiwoom.xlsx`, `all_stocks_naver.xlsx`, `universe.xlsx` 등)을 `DB_DIR` 환경변수로 지정한 디렉토리에 저장합니다. 기본값은 `./data`입니다.
+  - 기본 저장 위치: 애플리케이션은 캐시/파일(`all_stocks_kiwoom.parquet`, `all_stocks_naver.parquet`, `universe.parquet` 등)을 `DB_DIR` 환경변수로 지정한 디렉토리에 저장합니다. 기본값은 `./data`입니다.
    - 로컬 개발: `docker-compose.yml`의 `systemtrading` 서비스는 호스트의 `./data`를 `/app/data`로 바인드하도록 구성되어 있어 로컬에서 파일을 바로 확인할 수 있습니다.
    - 프로덕션: `systemtrading-prod`는 Docker named volume(`db_data`)으로 `/app/data`를 마운트하도록 권장합니다(성능 및 관리 측면에서 유리).
 

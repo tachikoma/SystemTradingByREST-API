@@ -123,8 +123,8 @@ class TestFetchAllStocksFromKiwoom:
     """fetch_all_stocks_from_kiwoom 함수 테스트"""
     
     @patch('util.make_up_universe.time.sleep')  # Rate limit 대기 제거
-    @patch('util.make_up_universe.pd.DataFrame.to_excel')
-    def test_fetch_all_stocks_basic(self, mock_to_excel, mock_sleep, mock_kiwoom_client):
+    @patch('util.make_up_universe.pd.DataFrame.to_parquet')
+    def test_fetch_all_stocks_basic(self, mock_to_parquet, mock_sleep, mock_kiwoom_client):
         """기본 생성 테스트"""
         df = fetch_all_stocks_from_kiwoom(mock_kiwoom_client, use_cache=False)
         
@@ -134,8 +134,8 @@ class TestFetchAllStocksFromKiwoom:
         assert '종목명' in df.columns
         assert '시장구분' in df.columns
         
-        # 캠시 저장 확인
-        mock_to_excel.assert_called_once()
+        # 캐시 저장 확인
+        mock_to_parquet.assert_called_once()
     
     @patch('util.make_up_universe.time.sleep')
     def test_fetch_all_stocks_market_separation(self, mock_sleep, mock_kiwoom_client):
@@ -183,18 +183,18 @@ class TestTryLoadCache:
     """_try_load_cache 함수 테스트"""
     
     @patch('util.make_up_universe.os.path.exists')
-    @patch('util.make_up_universe.pd.read_excel')
-    def test_load_kiwoom_cache_first(self, mock_read_excel, mock_exists, sample_all_stocks_df):
+    @patch('util.make_up_universe.pd.read_parquet')
+    def test_load_kiwoom_cache_first(self, mock_read_parquet, mock_exists, sample_all_stocks_df):
         """키움 캐시 우선 로드 테스트"""
         mock_exists.return_value = True
-        mock_read_excel.return_value = sample_all_stocks_df
+        mock_read_parquet.return_value = sample_all_stocks_df
         
         result = _try_load_cache()
         
         assert result is not None
         assert len(result) == 3
-        # 첫 번째 파일(all_stocks_kiwoom.xlsx)을 시도했는지 확인
-        mock_read_excel.assert_called()
+        # 첫 번째 파일(all_stocks_kiwoom.parquet)을 시도했는지 확인
+        mock_read_parquet.assert_called()
     
     @patch('util.make_up_universe.os.path.exists')
     def test_load_no_cache(self, mock_exists):

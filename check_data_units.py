@@ -2,8 +2,8 @@
 """네이버 크롤링과 키움 API 데이터 단위 비교"""
 import pandas as pd
 
-print("=== 네이버 크롤링 데이터 (NaverFinance.xlsx) ===")
-naver_df = pd.read_excel('NaverFinance.xlsx')
+print("=== 네이버 크롤링 데이터 (NaverFinance.parquet) ===")
+naver_df = pd.read_parquet('NaverFinance.parquet')
 print(f"컬럼: {list(naver_df.columns)}")
 print("\n삼성전자 데이터:")
 samsung_naver = naver_df[naver_df['종목명'] == '삼성전자'].iloc[0] if '삼성전자' in naver_df['종목명'].values else None
@@ -20,8 +20,8 @@ print("\n상위 3개 종목:")
 print(naver_df[['종목명', '시가총액']].head(3))
 
 print("\n" + "="*60)
-print("=== 키움 API 데이터 (all_stocks_kiwoom.xlsx) ===")
-kiwoom_df = pd.read_excel('all_stocks_kiwoom.xlsx')
+print("=== 키움 API 데이터 (all_stocks_kiwoom.parquet) ===")
+kiwoom_df = pd.read_parquet('all_stocks_kiwoom.parquet')
 print(f"컬럼: {list(kiwoom_df.columns)}")
 print("\n삼성전자 데이터:")
 samsung_kiwoom = kiwoom_df[kiwoom_df['종목명'] == '삼성전자'].iloc[0] if '삼성전자' in kiwoom_df['종목명'].values else None

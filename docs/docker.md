@@ -48,7 +48,7 @@ docker compose -f docker-compose.yml up --build -d systemtrading-prod
 - 모니터링: 프로덕션에선 로그를 중앙화(ELK/Fluentd)하고 Secrets는 Vault/K8s Secret으로 관리하세요.
 
 **DB_DIR / 데이터 위치**
-- 기본: 애플리케이션은 캐시와 엑셀/유니버스 파일을 `DB_DIR` 환경변수(기본 `./data`)에 저장합니다.
+- 기본: 애플리케이션은 캐시와 DB 파일을 `DB_DIR` 환경변수(기본 `./data`)에 저장합니다.
 - 개발용(로컬): `docker-compose.yml`의 `systemtrading` 서비스는 호스트의 `./data`를 `/app/data`로 바인드하여 컨테이너가 생성한 파일이 호스트에 남도록 구성되어 있습니다.
 - 프로덕션: `systemtrading-prod`는 named volume(`db_data`)을 사용하도록 권장합니다. 예:
 
