@@ -382,22 +382,22 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                     logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
                     return _filter_and_create_universe(cached_df)
             # 아래 네이버 크롤링 로직으로 계속 진행
-    excel_file = 'all_stocks_naver.parquet'
+    all_stock_cache_file = 'all_stocks_naver.parquet'
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
-    excel_path = excel_file if os.path.isabs(excel_file) else os.path.join(DB_DIR, excel_file)
+    all_stock_cache_path = all_stock_cache_file if os.path.isabs(all_stock_cache_file) else os.path.join(DB_DIR, all_stock_cache_file)
     
     # 오늘 날짜 파일이 있는지 확인
     file_is_today = False
-    if os.path.exists(excel_path):
-        file_mod_time = datetime.fromtimestamp(os.path.getmtime(excel_path), tz=ZoneInfo("Asia/Seoul"))
+    if os.path.exists(all_stock_cache_path):
+        file_mod_time = datetime.fromtimestamp(os.path.getmtime(all_stock_cache_path), tz=ZoneInfo("Asia/Seoul"))
         file_date_str = file_mod_time.strftime("%Y%m%d")
         file_is_today = (file_date_str == today_str)
         
         if file_is_today:
-            logger.info(f"오늘 생성된 {excel_path} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
-            print(f"오늘 생성된 {excel_path} 파일을 사용합니다.")
+            logger.info(f"오늘 생성된 {all_stock_cache_path} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
+            print(f"오늘 생성된 {all_stock_cache_path} 파일을 사용합니다.")
             try:
-                df = pd.read_parquet(excel_path)
+                df = pd.read_parquet(all_stock_cache_path)
                 # 읽어온 Parquet에 필수 컬럼이 없는 경우 NaN 컬럼으로 보완
                 required_cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '종목코드', '시장구분']
                 for rc in required_cols:
@@ -423,11 +423,11 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
 
     # 오늘 파일이 없거나 읽기 실패 시 크롤링 시도
     if not file_is_today:
-        logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(excel_path)}, 오늘 파일: {file_is_today}, path={Path(excel_path).resolve()})")
+        logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(all_stock_cache_path)}, 오늘 파일: {file_is_today}, path={Path(all_stock_cache_path).resolve()})")
         print(f"크롤링을 실행합니다...")
         
         try:
-            df = execute_crawler(excel_file)
+            df = execute_crawler(all_stock_cache_file)
         except Exception as e:
             # 캐시 파일 사용 (네이버 + 키움 API 캐시 모두 시도)
             logger.warning(f"크롤링 실패: {e}. 캐시 파일을 확인합니다...")
@@ -546,13 +546,12 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
     # 우선주 필터링: 종목명에 단순히 '우'가 포함된다고 제거하면
     # '우진', '우리금융지주' 등 일반 종목이 잘못 제외될 수 있음.
     # 보통주는 종목코드가 '0'으로 끝나는 경우가 대부분이므로
-    # 종목코드가 있으면 코드 끝자리가 '0'인 종목만 남기고, 없으면 기존 이름 기반 필터 유지
+    # 종목코드가 있으면 코드 끝자리가 '0'인 종목만 남기고, 없으면 그대로 유지
     try:
         if '종목코드' in df.columns:
             df = df[df['종목코드'].astype(str).str.endswith('0')]
         else:
-            # 보수적 폴백: 기존 '우' 문자열 검사 사용
-            df = df[~df.종목명.str.contains("우", na=False)]
+            pass  # 종목코드가 없으면 그대로 유지
     except Exception:
         # 필터 적용 중 예외가 발생하면 원래 데이터프레임을 유지
         logger.warning("우선주 필터 적용 중 오류 발생: 종목코드 기반 필터링을 건너뜁니다.")
