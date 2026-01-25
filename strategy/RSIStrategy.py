@@ -9,6 +9,7 @@ from util.notifier import *
 import math
 import traceback
 import threading
+import gc
 from util.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -709,6 +710,9 @@ class RSIStrategy(threading.Thread):
                 # 현재 한국 시간 확인
                 now = get_korea_time()
                 logger.info("Korea time: %s", now)
+
+                # 메모리 정리: 큰 반복/캐시 작업 직후 호출 (순환참조 회수 목적)
+                gc.collect()
                 
                 # 전체 종목 데이터 캐싱 (15:40 ~ 17:00 사이, 30일 주기, 66분(모의투자)/10분(실전투자) 소요)
                 if not is_market_closed_day() and now.hour == 15 and 40 <= now.minute < 17 and not self.full_cache_done_today:                
