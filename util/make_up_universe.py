@@ -4,6 +4,7 @@ import pandas as pd
 from datetime import datetime, time as datetime_time
 from zoneinfo import ZoneInfo
 import os
+import gc
 from util.time_helper import check_transaction_closed
 from util.logging_config import get_logger
 from pathlib import Path
@@ -370,7 +371,13 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
         try:
             df = fetch_all_stocks_from_kiwoom(kiwoom_client)
             logger.info(f"✅ 키움 API로 {len(df)}개 종목 정보 획득 및 캐싱 완료")
-            return _filter_and_create_universe(df)
+            universe = _filter_and_create_universe(df)
+            try:
+                del df
+                gc.collect()
+            except Exception:
+                pass
+            return universe
         except Exception as e:
             logger.error(f"키움 API 유니버스 생성 실패: {e}")
             if use_kiwoom_api:  # 강제 모드였다면 fallback
@@ -380,7 +387,13 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                 cached_df = _try_load_cache()
                 if cached_df is not None:
                     logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
-                    return _filter_and_create_universe(cached_df)
+                    universe = _filter_and_create_universe(cached_df)
+                    try:
+                        del cached_df
+                        gc.collect()
+                    except Exception:
+                        pass
+                    return universe
             # 아래 네이버 크롤링 로직으로 계속 진행
     all_stock_cache_file = 'all_stocks_naver.parquet'
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
@@ -439,7 +452,13 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                 logger.error(f"크롤링 실패이고 사용 가능한 캐시도 없습니다.")
                 raise Exception(f"크롤링 실패이고 사용 가능한 캐시도 없습니다: {e}")
 
-    return _filter_and_create_universe(df)
+    universe = _filter_and_create_universe(df)
+    try:
+        del df
+        gc.collect()
+    except Exception:
+        pass
+    return universe
 
 
 def _try_load_cache():
@@ -719,6 +738,21 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
             logger.error(f"Universe Parquet 저장 실패: {e}")
     except Exception as e:
         logger.warning(f"universe 저장 실패: {e}")
+
+    # 임시로 생성된 대용량 컬럼들을 삭제하여 메모리 사용을 줄입니다.
+    try:
+        tmp_cols = ['변동성_지표', '거래회전율', '변동성_순위', '거래회전율_순위', '종합_순위', '_vol_numeric']
+        for c in tmp_cols:
+            if c in df.columns:
+                try:
+                    df.drop(columns=[c], inplace=True)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # (주의) 원본 DataFrame 레퍼런스 제거는 호출자에서 처리합니다.
+    # 내부에서는 임시 컬럼만 제거하여 피크 메모리를 낮춥니다.
 
     universe_list = df['종목명'].tolist() if '종목명' in df.columns else df.iloc[:, 0].astype(str).tolist()
     logger.info(f"Universe 생성 완료: {len(universe_list)}개 종목 (병합 후)")
