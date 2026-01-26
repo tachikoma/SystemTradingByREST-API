@@ -213,7 +213,7 @@ class RSIStrategy(threading.Thread):
         from zoneinfo import ZoneInfo
         
         # DB_DIR 적용: .env의 DB_DIR을 우선 사용
-        db_dir = os.getenv('DB_DIR', '/app/data')
+        db_dir = os.getenv('DB_DIR', './data')
         try:
             os.makedirs(db_dir, exist_ok=True)
         except Exception:
@@ -237,7 +237,7 @@ class RSIStrategy(threading.Thread):
             file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
             days_old = (now.date() - file_mod_time.date()).days
             
-            logger.info(f"캐시 파일 발견: {days_old}일 전 데이터")
+            logger.info(f"캐시 파일 발견: {cache_file}, {days_old}일 전 데이터")
             
             # 30일 이내 캐시는 사용 가능
             if days_old < self.UNIVERSE_UPDATE_DAYS:
@@ -247,7 +247,7 @@ class RSIStrategy(threading.Thread):
             else:
                 logger.warning(f"⚠️ 캐시 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
         else:
-            logger.warning("⚠️ 캐시 파일 없음")
+            logger.warning(f"⚠️ 캐시 파일: {cache_file} 없음")
         
         # 캐시가 없거나 오래된 경우 → 즉시 전체 캐싱
         logger.info("💾 프로그램 시작: 전체 종목 캐싱 시작...")
@@ -409,6 +409,65 @@ class RSIStrategy(threading.Thread):
         
         except Exception as e:
             logger.error("블랙리스트 추가 실패: %s", e)
+
+    def _compact_price_info(self, price_df):
+        """가격 DataFrame -> compact dict 변환
+
+        반환값: dict with keys `last_20_closes` (np.float32 array),
+        `ma_latest` (dict of ma20/ma60/ma200 as float32), `last_date` (index last)
+        """
+        try:
+            if price_df is None or len(price_df) == 0:
+                return {
+                    'last_20_closes': np.array([], dtype='float32'),
+                    'ma_latest': {'ma20': np.float32(np.nan), 'ma60': np.float32(np.nan), 'ma200': np.float32(np.nan)},
+                    'last_date': None,
+                }
+
+            # Close 컬럼은 반드시 'close'로 고정
+            if 'close' not in price_df.columns:
+                logger.warning("price_df에 'close' 컬럼이 없습니다. compact 생성을 건너뜁니다.")
+                return {
+                    'last_20_closes': np.array([], dtype='float32'),
+                    'ma_latest': {'ma20': np.float32(np.nan), 'ma60': np.float32(np.nan), 'ma200': np.float32(np.nan)},
+                    'last_date': None,
+                }
+
+            closes = price_df['close'].astype('float32').dropna()
+            last_20 = closes.values[-20:].astype('float32') if len(closes) > 0 else np.array([], dtype='float32')
+
+            def _safe_ma(series, window):
+                try:
+                    if len(series) == 0:
+                        return np.float32(np.nan)
+                    return np.float32(series.rolling(window).mean().iloc[-1])
+                except Exception:
+                    tail = series.values[-window:]
+                    if len(tail) == 0:
+                        return np.float32(np.nan)
+                    return np.float32(np.mean(tail.astype('float32')))
+
+            ma20 = _safe_ma(closes, self.MA_SHORT)
+            ma60 = _safe_ma(closes, self.MA_LONG)
+            ma200 = _safe_ma(closes, self.MA_TREND)
+
+            try:
+                last_date = price_df.index[-1]
+            except Exception:
+                last_date = None
+
+            return {
+                'last_20_closes': last_20,
+                'ma_latest': {'ma20': ma20, 'ma60': ma60, 'ma200': ma200},
+                'last_date': last_date,
+            }
+        except Exception as e:
+            logger.warning('Compact price info 생성 실패: %s', e)
+            return {
+                'last_20_closes': np.array([], dtype='float32'),
+                'ma_latest': {'ma20': np.float32(np.nan), 'ma60': np.float32(np.nan), 'ma200': np.float32(np.nan)},
+                'last_date': None,
+            }
 
     @notify_on_exception(fallback_return=None)
     def check_and_get_universe(self, force_update=False):
@@ -597,8 +656,13 @@ class RSIStrategy(threading.Thread):
                         pass
 
                 insert_df_to_db(self.strategy_name, code, price_df)
-                self.universe[code]['price_df'] = price_df
-                logger.debug("Created price table for %s", display)
+                compact = self._compact_price_info(price_df)
+                # 메모리 최적화: compact 구조로 저장
+                self.universe[code].update(compact)
+                # 필요한 경우 전체 DataFrame도 유지 (환경변수로 제어)
+                if str(os.getenv('KEEP_FULL_PRICE_DF', '0')).lower() in ('1', 'true', 'yes'):
+                    self.universe[code]['price_df'] = price_df
+                logger.debug("Created price table for %s (compact stored)", display)
                 continue
             
             # 케이스 2: 장 종료 후 데이터 업데이트 필요한지 확인
@@ -649,8 +713,11 @@ class RSIStrategy(threading.Thread):
                             pass
 
                         insert_df_to_db(self.strategy_name, code, price_df)
-                        self.universe[code]['price_df'] = price_df
-                        logger.debug("Updated price data for %s", display)
+                        compact = self._compact_price_info(price_df)
+                        self.universe[code].update(compact)
+                        if str(os.getenv('KEEP_FULL_PRICE_DF', '0')).lower() in ('1', 'true', 'yes'):
+                            self.universe[code]['price_df'] = price_df
+                        logger.debug("Updated price data for %s (compact stored)", display)
                     continue
             
             # 케이스 3: DB에서 기존 데이터 로드 (API 호출 없음, 대기 불필요)
@@ -700,8 +767,11 @@ class RSIStrategy(threading.Thread):
             except Exception as e:
                 logger.warning("Error while checking DB freshness for %s: %s", display, e)
 
-            self.universe[code]['price_df'] = price_df
-            logger.debug("Loaded price data from DB for %s (refreshed=%s)", display, refreshed_from_db_check)
+            compact = self._compact_price_info(price_df)
+            self.universe[code].update(compact)
+            if str(os.getenv('KEEP_FULL_PRICE_DF', '0')).lower() in ('1', 'true', 'yes'):
+                self.universe[code]['price_df'] = price_df
+            logger.debug("Loaded price data from DB for %s (refreshed=%s, compact stored)", display, refreshed_from_db_check)
 
     def run(self):
         """실질적 수행 역할을 하는 함수"""
@@ -1066,286 +1136,169 @@ class RSIStrategy(threading.Thread):
             tuple: (DataFrame with RSI, 현재가) 또는 (None, None) if error
         """
         universe_item = self.universe.get(code)
-        if not universe_item or 'price_df' not in universe_item:
-            logger.warning("Universe item or price_df not found for code: %s", code)
+        if not universe_item:
+            logger.warning("Universe item not found for code: %s", code)
             return None, None
-        
+
         # 실시간 체결 정보 확인
         if code not in self.kiwoom.universe_realtime_transaction_info.keys():
             logger.info("실시간 체결정보가 아직 없습니다: %s", code)
             return None, None
-        
+
         try:
-            # 실시간 체결 정보 가져오기
             realtime_info = self.kiwoom.universe_realtime_transaction_info[code]
-            open_price = realtime_info['시가']
-            high = realtime_info['고가']
-            low = realtime_info['저가']
-            close = realtime_info['현재가']
-            volume = realtime_info['누적거래량']
-            
-            # 오늘 가격 데이터를 과거 가격 데이터(DataFrame)의 행으로 추가
-            df = universe_item['price_df'].copy()
-            # --- Missing recent data detection ---
-            try:
-                from datetime import timedelta, date
-                from util.time_helper import MARKET_HOLIDAYS_2026
-                # compute previous trading date (1 trading day before today)
-                kst_now = get_korea_time()
-                today_dt = kst_now.date()
-                prev_dt = today_dt - timedelta(days=1)
-                # step back until we find a trading day
-                attempts = 0
-                while (prev_dt.weekday() >= 5 or prev_dt in MARKET_HOLIDAYS_2026) and attempts < 10:
-                    prev_dt = prev_dt - timedelta(days=1)
-                    attempts += 1
-                prev_trading_str = prev_dt.strftime('%Y%m%d')
-            except Exception:
-                prev_trading_str = None
+            close = realtime_info.get('현재가')
 
-            # If previous trading day is missing from DB, try to refresh price data
-            refreshed = False
-            try:
-                if prev_trading_str and prev_trading_str not in df.index:
-                    logger.warning("Price DB missing previous trading date %s for %s; attempting refresh", prev_trading_str, code)
-                    try:
-                        # Try reloading full price data via centralized fetcher (if allowed)
-                        try:
-                            max_loops = int(os.getenv('PRICE_FETCH_MAX_LOOPS', '1'))
-                        except Exception:
-                            max_loops = 1
-                        from util.price_fetcher import fetch_price_data
-                        new_df = fetch_price_data(self.kiwoom, code, mode='deep', max_loops=max_loops)
-                        if new_df is not None and len(new_df) > 0:
-                            df = new_df
-                            # Update in-memory cache so subsequent calls see refreshed data
-                            try:
-                                self.universe[code]['price_df'] = df
-                            except Exception:
-                                pass
-                            # Persist refreshed data to strategy DB to avoid repeated API refreshes
-                            try:
-                                insert_df_to_db(self.strategy_name, code, df)
-                            except Exception as db_e:
-                                logger.warning("Failed to insert refreshed price data to DB for %s: %s", code, db_e)
+            # 우선 compact 데이터 사용
+            if 'last_20_closes' in universe_item:
+                stored = universe_item.get('last_20_closes', np.array([], dtype='float32'))
+                # make numpy array
+                try:
+                    stored = np.asarray(stored, dtype='float32')
+                except Exception:
+                    stored = np.array([], dtype='float32')
 
-                            refreshed = True
-                            logger.info("Price DB refreshed from API for %s (rows=%d)", code, len(df))
-                    except Exception as e:
-                        logger.warning("Price refresh failed for %s: %s", code, e)
-            except Exception:
-                pass
+                use_closed = str(os.getenv('RSI_USE_CLOSED_BAR', '0')).lower() in ('1', 'true', 'yes')
 
-            today_date = get_korea_time().strftime('%Y%m%d')
-            # Toggle: use closed bar only (do not include realtime/current partial bar)
-            use_closed = str(os.getenv('RSI_USE_CLOSED_BAR', '0')).lower() in ('1', 'true', 'yes')
-            today_price_data = {
-                'open': open_price,
-                'high': high,
-                'low': low,
-                'close': close,
-                'volume': volume,
-            }
-            if not use_closed:
-                # include realtime as today's (partial) bar
-                df.loc[today_date] = pd.Series(today_price_data)
-            
-            # RSI(N) 계산 - 표준 RSI 공식 사용 (BacktestEngine과 동일)
-            date_index = df.index.astype('str')
+                if not use_closed and close is not None:
+                    closes = np.concatenate([stored, np.array([np.float32(close)], dtype='float32')])
+                else:
+                    closes = stored.copy()
 
-            # --- Pre-calc debug log: input series and recent prices ---
-            try:
-                last_prices = df['close'].astype(float).tail(20).tolist()
-            except Exception:
-                last_prices = []
-            history_close = None
-            try:
-                # if we're including realtime row, the previous close is at -2, otherwise at -1
-                if not use_closed and len(df) >= 2:
-                    history_close = float(df['close'].iloc[-2])
-                elif use_closed and len(df) >= 1:
-                    history_close = float(df['close'].iloc[-1])
-            except Exception:
-                history_close = None
+                # Need at least 3 points to compute 2-days-ago and RSI reliably
+                if len(closes) < 3:
+                    logger.warning("충분한 가격 히스토리 없음 (compact) for %s: len=%d", code, len(closes))
+                    return None, None
 
-            realtime_price = None
-            try:
-                realtime_price = float(close) if close is not None else None
-            except Exception:
-                realtime_price = None
+                s = pd.Series(closes.astype('float64'))
 
-            pre_payload = {
-                'ts': get_korea_time().isoformat(),
-                'price_source': 'mixed',
-                'history_close': history_close,
-                'realtime_price': realtime_price,
-                'dtype': str(df['close'].dtype) if 'close' in df.columns else None,
-                'last_prices': last_prices,
-                'include_current_bar': (not use_closed),
-                'missing_prev_trading_date': prev_trading_str if 'prev_trading_str' in locals() else None,
-                'refreshed_price_db': refreshed,
-            }
-            try:
-                log_rsi_debug(code, 'pre_calc', pre_payload)
-            except Exception:
-                pass
+                # compute RSI on series
+                delta = s.diff(1)
+                gain = delta.where(delta > 0, 0.0)
+                loss = (-delta).where(delta < 0, 0.0)
+                if len(gain) > 0:
+                    gain.iloc[0] = np.nan
+                    loss.iloc[0] = np.nan
 
-            # 가격 변화 계산
-            delta = df['close'].diff(1)
-            
-            # 상승분 (gain)과 하락분 (loss) 분리
-            # pandas Series.where를 사용하여 delta[0]=NaN이 보존되도록 함
-            gain = delta.where(delta > 0, 0.0)
-            loss = (-delta).where(delta < 0, 0.0)
-            # 첫 인덱스의 delta는 비교상 NaN이 되므로 ewm의 min_periods 기준을
-            # 기대 동작(초기화 시점이 period 위치가 되도록)으로 맞추기 위해
-            # 첫 원소는 명시적으로 NaN으로 설정
-            if len(gain) > 0:
-                gain.iloc[0] = np.nan
-                loss.iloc[0] = np.nan
-
-            period = int(self.RSI_PERIOD)
-
-            # Allow overriding min_periods via environment variable for experimentation
-            try:
-                min_periods = int(os.getenv('RSI_MIN_PERIODS', str(period)))
-            except Exception:
-                min_periods = period
-            if min_periods < 1:
-                min_periods = 1
-
-            method = getattr(self, 'RSI_METHOD', 'cutler')
-            method = method.lower() if isinstance(method, str) else 'cutler'
-
-            # Method-specific min_periods handling:
-            # - Cutler (rolling): pandas requires min_periods <= window (period)
-            # - Wilder (ewm): allow min_periods > period but cap to available data length
-            if method == 'cutler':
-                if min_periods > period:
-                    try:
-                        logger.warning("RSI_MIN_PERIODS (%d) > RSI_PERIOD (%d); capping to RSI_PERIOD for Cutler method", min_periods, period)
-                    except Exception:
-                        pass
+                period = int(self.RSI_PERIOD)
+                try:
+                    min_periods = int(os.getenv('RSI_MIN_PERIODS', str(period)))
+                except Exception:
                     min_periods = period
-            else:
-                # Wilder: cap to available data length to avoid min_periods > len(df)
-                df_len = len(df) if df is not None else 0
-                if min_periods > df_len:
-                    try:
-                        logger.warning("RSI_MIN_PERIODS (%d) > available data (%d); capping to available data for Wilder", min_periods, df_len)
-                    except Exception:
-                        pass
-                    min_periods = max(1, df_len)
+                if min_periods < 1:
+                    min_periods = 1
 
-            # Compute initial SMA seed for logging (if available)
-            avg_gain_init = None
-            avg_loss_init = None
-            try:
-                if len(gain) >= period:
-                    try:
-                        avg_gain_init = float(gain.rolling(window=period, min_periods=min_periods).mean().iloc[period-1])
-                    except Exception:
-                        avg_gain_init = None
-                    try:
-                        avg_loss_init = float(loss.rolling(window=period, min_periods=min_periods).mean().iloc[period-1])
-                    except Exception:
-                        avg_loss_init = None
-            except Exception:
-                avg_gain_init = None
-                avg_loss_init = None
+                method = getattr(self, 'RSI_METHOD', 'cutler')
+                method = method.lower() if isinstance(method, str) else 'cutler'
 
-            try:
-                init_payload = {'ts': get_korea_time().isoformat(), 'period': period, 'method': method, 'min_periods': min_periods, 'avg_gain_init': avg_gain_init, 'avg_loss_init': avg_loss_init, 'include_current_bar': (not use_closed)}
-                log_rsi_debug(code, 'init_seed', init_payload)
-            except Exception:
-                pass
-
-            if method == 'cutler':
-                # Cutler 방식: 단순 이동평균(SMA)을 사용한 평균 상승/하락
-                avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
-                avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
-
-                # RS 및 RSI 계산 (division 에러 무시하여 NaN 유지)
-                with np.errstate(divide='ignore', invalid='ignore'):
+                if method == 'cutler':
+                    if min_periods > period:
+                        min_periods = period
+                    avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
+                    avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        rs = avg_gain / avg_loss
+                        rsi = 100.0 - (100.0 / (1.0 + rs))
+                    rsi = rsi.astype(float)
+                    rsi.loc[avg_loss == 0.0] = 100.0
+                    both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
+                    rsi.loc[both_zero_mask] = 50.0
+                else:
+                    df_len = len(s)
+                    if min_periods > df_len:
+                        min_periods = max(1, df_len)
+                    avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
+                    avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
                     rs = avg_gain / avg_loss
                     rsi = 100.0 - (100.0 / (1.0 + rs))
+                    both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
+                    loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
+                    gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
+                    rsi = rsi.astype(float)
+                    rsi.loc[both_zero] = 50.0
+                    rsi.loc[loss_zero] = 100.0
+                    rsi.loc[gain_zero] = 0.0
 
-                # 핵심: 분모가 0이면(오직 상승만 있을 때) RSI=100으로 처리
-                # 상승/하락 모두 0이면 50으로 처리
-                rsi = rsi.astype(float)
-                rsi.loc[avg_loss == 0.0] = 100.0
-                both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
-                rsi.loc[both_zero_mask] = 50.0
+                df = pd.DataFrame({'close': s.values})
+                df[f'RSI({self.RSI_PERIOD})'] = rsi.values
 
-            else:
-                # Wilder's smoothing: ewm with alpha=1/period and adjust=False
-                # min_periods=period 으로 초기부적합값을 NaN으로 유지
-                avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
-                avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
+                return df, float(close)
 
-                # RS 및 RSI 계산
-                rs = avg_gain / avg_loss
-                rsi = 100.0 - (100.0 / (1.0 + rs))
-
-                # 특수 케이스 처리: 부동소수점 안전하게
-                both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
-                loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
-                gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
-
-                rsi = rsi.astype(float)
-                rsi.loc[both_zero] = 50.0
-                rsi.loc[loss_zero] = 100.0
-                rsi.loc[gain_zero] = 0.0
-
-            df['RSI({})'.format(self.RSI_PERIOD)] = rsi
-            # --- Post-calc debug log: final averages, RS, RSI ---
-            try:
-                recent_rsi = []
+            # fallback: legacy behavior when full price_df exists
+            if 'price_df' in universe_item:
+                price_df = universe_item.get('price_df')
+                # reuse original behavior by temporarily setting and calling existing logic
+                # (simpler to reconstruct minimal DataFrame)
+                # Use previous implementation: create df and include realtime bar if needed
+                # For brevity, build df from price_df and proceed as before
+                df = price_df.copy()
+                from datetime import timedelta
                 try:
-                    recent_rsi = rsi.dropna().tail(5).astype(float).tolist()
+                    today_date = get_korea_time().strftime('%Y%m%d')
+                    use_closed = str(os.getenv('RSI_USE_CLOSED_BAR', '0')).lower() in ('1', 'true', 'yes')
+                    if not use_closed:
+                        realtime_price_data = {
+                            'open': realtime_info.get('시가'),
+                            'high': realtime_info.get('고가'),
+                            'low': realtime_info.get('저가'),
+                            'close': realtime_info.get('현재가'),
+                            'volume': realtime_info.get('누적거래량'),
+                        }
+                        df.loc[today_date] = pd.Series(realtime_price_data)
                 except Exception:
-                    recent_rsi = []
+                    pass
 
-                avg_gain_curr = None
-                avg_loss_curr = None
-                rs_curr = None
+                # reuse original RSI computation on df
+                s = df['close'].astype('float64')
+                delta = s.diff(1)
+                gain = delta.where(delta > 0, 0.0)
+                loss = (-delta).where(delta < 0, 0.0)
+                if len(gain) > 0:
+                    gain.iloc[0] = np.nan
+                    loss.iloc[0] = np.nan
+                period = int(self.RSI_PERIOD)
                 try:
-                    if len(avg_gain) > 0:
-                        avg_gain_curr = float(avg_gain.iloc[-1]) if not pd.isna(avg_gain.iloc[-1]) else None
+                    min_periods = int(os.getenv('RSI_MIN_PERIODS', str(period)))
                 except Exception:
-                    avg_gain_curr = None
-                try:
-                    if len(avg_loss) > 0:
-                        avg_loss_curr = float(avg_loss.iloc[-1]) if not pd.isna(avg_loss.iloc[-1]) else None
-                except Exception:
-                    avg_loss_curr = None
-                try:
-                    if 'rs' in locals() and len(rs) > 0:
-                        rs_curr = float(rs.iloc[-1]) if not pd.isna(rs.iloc[-1]) else None
-                except Exception:
-                    rs_curr = None
+                    min_periods = period
+                if min_periods < 1:
+                    min_periods = 1
+                method = getattr(self, 'RSI_METHOD', 'cutler')
+                method = method.lower() if isinstance(method, str) else 'cutler'
+                if method == 'cutler':
+                    if min_periods > period:
+                        min_periods = period
+                    avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
+                    avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        rs = avg_gain / avg_loss
+                        rsi = 100.0 - (100.0 / (1.0 + rs))
+                    rsi = rsi.astype(float)
+                    rsi.loc[avg_loss == 0.0] = 100.0
+                    both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
+                    rsi.loc[both_zero_mask] = 50.0
+                else:
+                    df_len = len(s)
+                    if min_periods > df_len:
+                        min_periods = max(1, df_len)
+                    avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
+                    avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
+                    rs = avg_gain / avg_loss
+                    rsi = 100.0 - (100.0 / (1.0 + rs))
+                    both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
+                    loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
+                    gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
+                    rsi = rsi.astype(float)
+                    rsi.loc[both_zero] = 50.0
+                    rsi.loc[loss_zero] = 100.0
+                    rsi.loc[gain_zero] = 0.0
 
-                post_payload = {
-                    'ts': get_korea_time().isoformat(),
-                    'period': period,
-                    'method': method,
-                    'min_periods': min_periods,
-                    'avg_gain_curr': avg_gain_curr,
-                    'avg_loss_curr': avg_loss_curr,
-                    'RS': rs_curr,
-                    'RSI': float(rsi.iloc[-1]) if (len(rsi) > 0 and not pd.isna(rsi.iloc[-1])) else None,
-                    'recent_rsi': recent_rsi,
-                    'include_current_bar': (not use_closed),
-                }
-                log_rsi_debug(code, 'post_calc', post_payload)
-            except Exception:
-                pass
+                df[f'RSI({self.RSI_PERIOD})'] = rsi
+                return df, float(close)
 
-            return df, close
-            
-        except (KeyError, IndexError, ZeroDivisionError) as e:
-            logger.error("RSI 계산 중 오류 발생 (%s): %s", code, e)
+            logger.warning("No price data available for RSI calculation: %s", code)
             return None, None
+
         except Exception as e:
             logger.error("RSI 계산 중 예상치 못한 오류 (%s): %s", code, e)
             return None, None
@@ -1481,15 +1434,36 @@ class RSIStrategy(threading.Thread):
                 logger.warning("데이터가 부족합니다 (%s): len=%d", code, len(df))
                 return False
             
-            # 종가(close)를 기준으로 이동 평균 구하기
-            df['ma20'] = df['close'].rolling(window=self.MA_SHORT, min_periods=1).mean()
-            df['ma60'] = df['close'].rolling(window=self.MA_LONG, min_periods=1).mean()
-            df['ma200'] = df['close'].rolling(window=self.MA_TREND, min_periods=1).mean()
-            
-            rsi = df[-1:][f'RSI({self.RSI_PERIOD})'].values[0]
-            ma20 = df[-1:]['ma20'].values[0]
-            ma60 = df[-1:]['ma60'].values[0]
-            ma200 = df[-1:]['ma200'].values[0]
+            # 이동평균은 compact ma_latest 우선 사용, 없으면 rolling으로 계산
+            uni_item = self.universe.get(code, {})
+            ma_latest = uni_item.get('ma_latest', {})
+            ma20 = ma_latest.get('ma20')
+            ma60 = ma_latest.get('ma60')
+            ma200 = ma_latest.get('ma200')
+
+            if ma20 is None or ma60 is None or ma200 is None:
+                df['ma20'] = df['close'].rolling(window=self.MA_SHORT, min_periods=1).mean()
+                df['ma60'] = df['close'].rolling(window=self.MA_LONG, min_periods=1).mean()
+                df['ma200'] = df['close'].rolling(window=self.MA_TREND, min_periods=1).mean()
+                ma20 = df['ma20'].iloc[-1]
+                ma60 = df['ma60'].iloc[-1]
+                ma200 = df['ma200'].iloc[-1]
+            else:
+                # ensure numeric type
+                try:
+                    ma20 = float(ma20)
+                except Exception:
+                    ma20 = float('nan')
+                try:
+                    ma60 = float(ma60)
+                except Exception:
+                    ma60 = float('nan')
+                try:
+                    ma200 = float(ma200)
+                except Exception:
+                    ma200 = float('nan')
+
+            rsi = df.iloc[-1:][f'RSI({self.RSI_PERIOD})'].values[0]
 
             # display name for logging
             name = self.resolve_stock_name(code)
@@ -1503,21 +1477,11 @@ class RSIStrategy(threading.Thread):
                 logger.warning("계산된 값이 유효하지 않습니다 (%s): rsi=%s, ma20=%s, ma60=%s, ma200=%s", display, rsi, ma20, ma60, ma200)
                 return False
             
-            # 2 거래일 전 날짜(index)를 구함
-            today_str = get_korea_time().strftime('%Y%m%d')
-            if today_str not in df.index:
-                logger.warning("오늘 날짜가 DataFrame에 없습니다 (%s): %s", display, today_str)
+            # compact 구조를 사용하므로 위치 기반으로 2거래일 전 종가를 취득
+            if len(df) < 3:
+                logger.warning("2 거래일 전 데이터 접근 불가 (%s): len=%d", display, len(df))
                 return False
-            
-            idx = df.index.get_loc(today_str) - 2
-            
-            # 인덱스가 유효한지 체크
-            if idx < 0 or idx >= len(df):
-                logger.warning("2 거래일 전 데이터 접근 불가 (%s): idx=%d, len=%d", display, idx, len(df))
-                return False
-            
-            # 위 index로부터 2 거래일 전 종가를 얻어옴
-            close_2days_ago = df.iloc[idx]['close']
+            close_2days_ago = df['close'].iloc[-3]
             
             # 2 거래일 전 종가와 현재가를 비교함
             if close_2days_ago == 0:
