@@ -267,20 +267,20 @@ class Kiwoom:
             # 성공: stk_cd 키가 있으면 데이터 변환하여 반환
             if res_data and isinstance(res_data, dict) and "stk_cd" in res_data:
                 # API 응답 형식을 표준 형식으로 변환
-                # 어제 로그 기준: 'stk_cd', 'stk_nm', 'cur_prc', 'trde_qty', 'flu_rt', 'for_exh_rt', 'cap' 등
+                # 어제 로그 기준: 'stk_cd', 'stk_nm', 'cur_prc', 'trde_qty', 'flu_rt', 'for_exh_rt', 'mac' 등
                 try:
                     # 거래대금 계산: 거래량 * 현재가 / 1,000,000 (백만원 단위)
                     trde_qty = abs(float(res_data.get('trde_qty', 0)))
                     cur_prc = abs(float(res_data.get('cur_prc', '0').replace('+', '').replace('-', '')))
                     trde_amt = str(int((trde_qty * cur_prc) / 1_000_000))  # 백만원 단위
                     
-                    # 시가총액은 'cap' 키 사용 (API는 억원 단위로 반환)
-                    mrkt_cap = res_data.get('cap', '0')
+                    # 시가총액은 'mac' 키 사용 (API는 억원 단위로 반환)
+                    mrkt_cap = res_data.get('mac', '0')
                     
-                    # 상장주식수는 'dstr_stk' 또는 계산 (시가총액 / 현재가)
-                    dstr_stk = res_data.get('dstr_stk', '')
-                    if dstr_stk and dstr_stk.strip():
-                        list_cnt = dstr_stk
+                    # 상장주식수는 'flo_stk' 또는 계산 (시가총액 / 현재가)
+                    flo_stk = res_data.get('flo_stk', '')
+                    if flo_stk and flo_stk.strip():
+                        list_cnt = int(flo_stk) * 1000  # 천주 단위이므로 1,000 곱함
                     else:
                         # 계산: 시가총액(억원) * 100,000,000 / 현재가
                         if cur_prc > 0:
