@@ -1,7 +1,7 @@
 from util.make_up_universe import execute_crawler as mu_execute_crawler, crawler as mu_crawler
 
 
-def execute_crawler(output_file='all_stocks_naver.parquet'):
+def execute_crawler(output_file='all_stocks_fdr.parquet'):
     """Wrapper delegating to `util.make_up_universe.execute_crawler`.
 
     Keeps the historical default filename but centralizes implementation.

@@ -1,5 +1,5 @@
 """
-네이버 금융 크롤링 테스트 스크립트
+종목 정보 FDR+pykrx 테스트 스크립트
 장 시간 외에도 정확한 데이터를 가져올 수 있는지 테스트
 """
 import sys
@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 def test_naver_crawling():
     print("=" * 60)
-    print("네이버 금융 크롤링 테스트")
+    print("종목 정보 FDR+pykrx 테스트")
     print("=" * 60)
     
     # 현재 시간 정보
@@ -21,14 +21,14 @@ def test_naver_crawling():
     print(f"요일: {['월', '화', '수', '목', '금', '토', '일'][now.weekday()]}")
     print(f"장시간 여부: {'예' if is_market_hours() else '아니오'}")
     
-    # 크롤링 시작
-    print("\n크롤링 시작...")
+    # FDR+pykrx 시작
+    print("\nFDR+pykrx 시작...")
     print("-" * 60)
     
     try:
-        df = execute_crawler("NaverFinance.parquet")
+        df = execute_crawler("FDR_pykrx.parquet")
         
-        print("\n크롤링 완료!")
+        print("\nFDR+pykrx 완료!")
         print("=" * 60)
         print(f"전체 종목 수: {len(df)}")
         print(f"컬럼: {list(df.columns)}")
@@ -66,16 +66,16 @@ def test_naver_crawling():
         else:
             print("✅ 장시간 외입니다.")
             print("✅ 데이터가 정상적으로 수집되었습니다!")
-            print("✅ 네이버는 장 마감 후에도 당일 확정 데이터를 제공합니다.")
-            print("✅ Universe 재구성 시 장시간 체크 없이 크롤링 가능합니다.")
+            print("✅ FDR+pykrx는 장 마감 후에도 당일 확정 데이터를 제공합니다.")
+            print("✅ Universe 재구성 시 장시간 체크 없이 FDR+pykrx 가능합니다.")
         
-        print("\n파일 저장 위치: NaverFinance.parquet")
+        print("\n파일 저장 위치: FDR_pykrx.parquet")
         print("=" * 60)
         
         return True
         
     except Exception as e:
-        print(f"\n❌ 크롤링 실패: {e}")
+        print(f"\n❌ FDR+pykrx 실패: {e}")
         import traceback
         traceback.print_exc()
         return False

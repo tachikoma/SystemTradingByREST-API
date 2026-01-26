@@ -1,4 +1,3 @@
-import requests
 import numpy as np
 import pandas as pd
 from datetime import datetime, time as datetime_time
@@ -186,12 +185,222 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     return df
 
 
+def get_stock_data_fdr_pykrx(output_file='all_stocks_pykrx.parquet'):
+    """
+    pykrx 전용으로 전 종목(ALL) 가격/종목명/시장구분/외국인비율을 수집하고
+    KOSPI/KOSDAQ만 필터하여 Parquet로 저장합니다.
+    """
+    try:
+        from pykrx import stock as krx_stock
+    except Exception as e:
+        # pykrx may depend on setuptools/pkg_resources; give actionable guidance
+        msg = str(e)
+        if isinstance(e, ModuleNotFoundError) and 'pkg_resources' in msg:
+            raise ImportError(
+                "pykrx requires setuptools (pkg_resources).\n"
+                "Install with: python3 -m pip install --user setuptools pykrx"
+            ) from e
+        raise ImportError("pykrx is required: python3 -m pip install pykrx") from e
+
+    today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+    logger.info(f"1. {today} 기준 전 종목 시세 수집 중 (ALL)...")
+
+    # 1) 시세 가져오기 (pykrx API 변동/휴장일에 대비한 예외 처리)
+    try:
+        df_price = krx_stock.get_market_ohlcv_by_ticker(today, market="ALL")
+    except Exception as e:
+        logger.warning(f"get_market_ohlcv_by_ticker 실패: {e}; 대체 호출 시도(get_market_ohlcv_by_date 또는 범위 지정).")
+        try:
+            # 일부 pykrx 버전 또는 환경에서는 날짜 범위 호출이 필요할 수 있음
+            # 함수 시그니처 차이 때문에 위치 인수로 ticker/market을 전달하여 재시도
+            try:
+                df_price = krx_stock.get_market_ohlcv_by_date(today, today, "ALL")
+            except TypeError:
+                # 어떤 버전은 ticker 키워드를 요구할 수 있으므로 이름 없이 두 번째 위치 인수로 재시도
+                df_price = krx_stock.get_market_ohlcv_by_date(today, today)
+        except Exception as e2:
+            logger.error(f"대체 시세 호출도 실패: {e2}")
+            raise
+
+    # DataFrame 구조가 다양할 수 있으므로 안전하게 리셋 및 컬럼명 정리
+    try:
+        df_price = df_price.reset_index()
+    except Exception:
+        # 이미 리셋된 경우 그대로 사용
+        pass
+
+    # 컬럼명 통일: '티커' -> '종목코드', '종가' -> '현재가'
+    rename_map = {}
+    if '티커' in df_price.columns:
+        rename_map['티커'] = '종목코드'
+    if '종가' in df_price.columns:
+        rename_map['종가'] = '현재가'
+    if rename_map:
+        df_price = df_price.rename(columns=rename_map)
+
+    # 인덱스에 티커가 들어있는 경우 대비: reset_index 후 첫 컬럼을 종목코드로 사용
+    if '종목코드' not in df_price.columns:
+        try:
+            df_price = df_price.reset_index()
+        except Exception:
+            pass
+        # 첫 컬럼명이 이미 가격 컬럼들과 겹치지 않으면 이를 종목코드로 간주
+        first_col = df_price.columns[0]
+        if first_col not in ['현재가', '거래량', '거래대금', '등락률'] and '종목코드' not in df_price.columns:
+            df_price = df_price.rename(columns={first_col: '종목코드'})
+
+    price_cols = ['종목코드', '현재가', '거래량', '거래대금', '등락률']
+    df_price = df_price[[c for c in price_cols if c in df_price.columns]]
+
+    # 일부 환경에서는 ALL 호출이 비어있을 수 있으므로, 시장별로 분리 호출하여 병합 시도
+    if df_price is None or (hasattr(df_price, 'empty') and df_price.empty):
+        logger.warning("df_price가 비어있음 — KOSPI/KOSDAQ 개별 호출로 재시도합니다.")
+        parts = []
+        for mkt in ("KOSPI", "KOSDAQ"):
+            try:
+                part = krx_stock.get_market_ohlcv_by_ticker(today, market=mkt)
+                try:
+                    part = part.reset_index()
+                except Exception:
+                    pass
+                if '티커' in part.columns:
+                    part = part.rename(columns={'티커': '종목코드', '종가': '현재가'})
+                # ensure first-col -> 종목코드 if needed
+                if '종목코드' not in part.columns:
+                    first_col = part.columns[0]
+                    if first_col not in ['현재가', '거래량', '거래대금', '등락률']:
+                        part = part.rename(columns={first_col: '종목코드'})
+                parts.append(part[[c for c in price_cols if c in part.columns]])
+            except Exception as e:
+                logger.warning(f"{mkt} 개별 시세 호출 실패: {e}")
+
+        if parts:
+            try:
+                df_price = pd.concat(parts, axis=0, ignore_index=True)
+            except Exception as e:
+                logger.error(f"시장별 concat 실패: {e}")
+
+
+    # 2) 시장구분 매핑
+    logger.info("2. 종목명 및 시장구분 매핑 중...")
+    kospi_tickers = set(krx_stock.get_market_ticker_list(today, market="KOSPI"))
+    kosdaq_tickers = set(krx_stock.get_market_ticker_list(today, market="KOSDAQ"))
+
+    def identify_market(tkr):
+        if tkr in kospi_tickers:
+            return '코스피'
+        if tkr in kosdaq_tickers:
+            return '코스닥'
+        return 'ETF/ETN'
+
+    df_price['시장구분'] = df_price['종목코드'].apply(identify_market)
+
+    # 3) 외국인 지분율
+    logger.info("3. 외국인 지분율 수집 중...")
+    try:
+        df_for = krx_stock.get_exhaustion_rates_of_foreign_investment_by_ticker(today, "ALL").reset_index()
+        if '지분율' in df_for.columns:
+            df_for = df_for[['티커', '지분율']].rename(columns={'티커': '종목코드', '지분율': '외국인비율'})
+        else:
+            df_for = df_for.iloc[:, :2]
+            df_for.columns = ['종목코드', '외국인비율']
+    except Exception as e:
+        logger.warning(f"외국인 지분율 수집 실패: {e}")
+        df_for = pd.DataFrame(columns=['종목코드', '외국인비율'])
+
+    # 4) 종목명 및 시가총액
+    logger.info("4. 종목명 및 시가총액 수집 중...")
+    try:
+        df_cap = krx_stock.get_market_cap_by_ticker(today, market="ALL").reset_index()
+        if '티커' in df_cap.columns:
+            df_cap = df_cap.rename(columns={'티커': '종목코드'})
+        if '종목명' not in df_cap.columns:
+            for cand in ['종목명', 'Name']:
+                if cand in df_cap.columns:
+                    df_cap = df_cap.rename(columns={cand: '종목명'})
+                    break
+    except Exception as e:
+        logger.warning(f"시가총액/종목명 수집 실패: {e}")
+        df_cap = pd.DataFrame(columns=['종목코드', '종목명'])
+
+    # df_cap이 비어있으면 마켓별로 재시도
+    if df_cap is None or (hasattr(df_cap, 'empty') and df_cap.empty):
+        logger.warning("df_cap이 비어있음 — KOSPI/KOSDAQ 개별 호출로 재시도합니다.")
+        cap_parts = []
+        for mkt in ("KOSPI", "KOSDAQ"):
+            try:
+                try:
+                    cap_part = krx_stock.get_market_cap_by_ticker(today, mkt).reset_index()
+                except TypeError:
+                    # 일부 버전 시그니처 차이 대비: positional arg
+                    cap_part = krx_stock.get_market_cap_by_ticker(today, mkt).reset_index()
+                if '티커' in cap_part.columns:
+                    cap_part = cap_part.rename(columns={'티커': '종목코드'})
+                for cand in ['종목명', 'Name']:
+                    if cand in cap_part.columns:
+                        cap_part = cap_part.rename(columns={cand: '종목명'})
+                        break
+                cap_parts.append(cap_part[['종목코드', '종목명', '시가총액'] if '시가총액' in cap_part.columns else ['종목코드', '종목명']])
+            except Exception as e:
+                logger.warning(f"{mkt} 시가총액 호출 실패: {e}")
+        if cap_parts:
+            try:
+                df_cap = pd.concat(cap_parts, axis=0, ignore_index=True)
+            except Exception as e:
+                logger.error(f"df_cap concat 실패: {e}")
+
+    # 5) 병합
+    logger.info("5. 데이터 최종 병합 및 타입 최적화...")
+    df_final = pd.merge(df_cap, df_price, on='종목코드', how='inner')
+    df_final = pd.merge(df_final, df_for, on='종목코드', how='left')
+
+    df_final['외국인비율'] = pd.to_numeric(df_final.get('외국인비율'), errors='coerce').fillna(0.0).astype('float32')
+
+    # 시가총액 억원 단위 정규화
+    if '시가총액' in df_final.columns:
+        mc_raw = pd.to_numeric(df_final.get('시가총액'), errors='coerce').fillna(0)
+        median_mc = mc_raw.abs().median() if not mc_raw.empty else 0
+        if median_mc > 100_000_000:
+            logger.info(f"시가총액 단위 감지: median={median_mc:.0f} -> 원 단위로 판단, 억원으로 변환합니다.")
+            df_final['시가총액'] = (mc_raw / 100_000_000).round().astype('int64')
+        else:
+            logger.info(f"시가총액 단위 감지: median={median_mc:.0f} -> 이미 억원 단위로 가정합니다.")
+            df_final['시가총액'] = mc_raw.round().astype('int64')
+
+    # KOSPI/KOSDAQ만 유지
+    if '시장구분' in df_final.columns:
+        before = len(df_final)
+        df_final = df_final[df_final['시장구분'].isin(['코스피', '코스닥'])].reset_index(drop=True)
+        logger.info(f"시장 필터(KOSPI/KOSDAQ) 적용: {before} -> {len(df_final)}")
+
+    # 타입 최적화
+    if '현재가' in df_final.columns:
+        df_final['현재가'] = pd.to_numeric(df_final['현재가'], errors='coerce').fillna(0).astype('int32')
+    if '등락률' in df_final.columns:
+        df_final['등락률'] = pd.to_numeric(df_final['등락률'], errors='coerce').fillna(0).astype('float32')
+
+    try:
+        del df_price, df_for, df_cap
+    except Exception:
+        pass
+    gc.collect()
+
+    out_path = output_file if os.path.isabs(output_file) else os.path.join(DB_DIR, output_file)
+    try:
+        df_final.to_parquet(out_path, engine='fastparquet', compression='snappy')
+    except Exception:
+        df_final.to_parquet(out_path)
+
+    logger.info(f"최종 수집 완료: {len(df_final)}개 종목 (KONEX 제외)")
+    return df_final
+
+
 def is_market_hours():
     """
-    장시간인지 확인하는 함수 (크롤링 가능 시간 체크용)
+    장시간인지 확인하는 함수 (종목 정보 가져오기 가능 시간 체크용)
     평일 09:00 ~ 15:30 사이를 장시간으로 판단 (휴장일 제외)
     
-    주의: 15:30까지 포함하는 이유는 동시호가 시간대에도 크롤링 가능하기 때문
+    주의: 15:30까지 포함하는 이유는 동시호가 시간대에도 종목 정보 가져오기 가능하기 때문
           실제 매매는 15:20까지만 가능 (check_transaction_open 참고)
     """
     from util.time_helper import is_market_closed_day
@@ -211,140 +420,23 @@ def is_market_hours():
     return market_open <= current_time <= market_close
 
 
-def execute_crawler(output_file='all_stocks_naver.parquet'):
-    # KOSPI, KOSDAQ 종목을 하나로 합치는데 사용할 변수
-    df_total = []
-
-    # CODES에 담긴 KOSPI, KOSDAQ 종목 모두를 크롤링하기 위해 for문을 사용
-    for code in CODES:
-
-        # 전체 페이지 개수를 가져오기 위한 코드 (마켓별로 `code` 사용)
-        # lazy import BeautifulSoup to avoid requiring bs4 unless crawling
-        from bs4 import BeautifulSoup
-        res = requests.get(BASE_URL + str(code))
-        page_soup = BeautifulSoup(res.text, 'lxml')
-
-        # '맨뒤'에 해당하는 태그를 기준으로 전체 페이지 개수 추출하기
-        total_page_elem = page_soup.select_one('td.pgRR > a')
-        if total_page_elem is None:
-            logger.warning(f"전체 페이지 정보를 찾을 수 없어 market={code}을(를) 1페이지만 처리합니다.")
-            total_page_num = 1
-        else:
-            try:
-                total_page_num = int(total_page_elem.get('href').split('=')[-1])
-            except Exception as e:
-                logger.warning(f"전체 페이지 수 파싱 실패 (href={total_page_elem.get('href')}): {e}. 1로 처리합니다.")
-                total_page_num = 1
-
-        # 조회할 수 있는 항목정보들 추출
-        ipt_html = page_soup.select_one('div.subcnt_sise_item_top')
-
-        # 페이지에서 조회할 항목정보들 추출 (로컬 변수로 관리)
-        if ipt_html is None:
-            logger.warning(f"항목 정보(div.subcnt_sise_item_top)를 찾을 수 없습니다. 기본 필드로 폴백합니다. (market={code})")
-            fields = DEFAULT_FIELD_IDS
-        else:
-            fields = [item.get('value') for item in ipt_html.select('input')]
-
-        # page마다 존재하는 모든 종목들의 항목정보를 크롤링해서 result에 저장
-        result = []
-        for page in range(1, total_page_num + 1):
-            try:
-                page_df = crawler(code, str(page), fields)
-                if page_df is not None and not page_df.empty:
-                    result.append(page_df)
-            except Exception as e:
-                logger.warning(f"페이지 크롤링 실패 (market={code}, page={page}): {e}")
-
-        # 전체 페이지를 저장한 result를 하나의 데이터프레임으로 만듬
-        if result:
-            df = pd.concat(result, axis=0, ignore_index=True)
-        else:
-            df = pd.DataFrame()
-        
-        # 시장구분 컬럼 추가 (0=코스피, 1=코스닥)
-        df['시장구분'] = '코스피' if code == 0 else '코스닥'
-
-        # 변수 df는 KOSPI, KOSDAQ별로 크롤링한 종목 정보이고 이를 하나로 합치기 위해 df_total에 추가
-        df_total.append(df)
-
-    # df_total를 하나의 데이터프레임으로 만듬
-    df_total = pd.concat(df_total)
-
-    # 합친 데이터프레임의 index 번호를 새로 매김
-    df_total.reset_index(inplace=True, drop=True)
-
-    # 전체 크롤링 결과를 Parquet로 저장
+def execute_crawler(output_file='all_stocks_pykrx.parquet'):
+    # 기존 네이버 크롤러를 FDR+pykrx 통합 로직으로 대체합니다.
+    # output_file 경로를 DB_DIR 기준으로 해석하고 get_stock_data_fdr_pykrx를 호출합니다.
     out_path = output_file if os.path.isabs(output_file) else os.path.join(DB_DIR, output_file)
-    try:
-        df_total.to_parquet(out_path, index=True)
-        try:
-            logger.info(f"크롤링 결과 저장: {Path(out_path).resolve()}")
-        except Exception:
-            pass
-    except Exception as e:
-        logger.error(f"크롤링 결과 Parquet 저장 실패: {e}")
+    # get_stock_data_fdr_pykrx는 내부에서 parquet로도 저장합니다. 호출 후 반환된 df를 리턴합니다.
+    df = get_stock_data_fdr_pykrx(output_file=os.path.basename(out_path))
 
-    # 크롤링 결과를 반환
-    return df_total
-
-
-def crawler(code, page, fields):
-    """Parse a single page using explicit `fields` (stateless).
-
-    `fields` is now required to make the function pure and deterministic.
-    """
-
-    # Naver finance에 전달할 값들 세팅(요청을 보낼 때는 menu, fieldIds, returnUrl을 지정해서 보내야 함)
-    data = {'menu': 'market_sum',
-            'fieldIds': fields,
-            'returnUrl': BASE_URL + str(code) + "&page=" + str(page)}
-
-    # lazy import BeautifulSoup only when crawler runs
-    from bs4 import BeautifulSoup
-    # 네이버로 요청을 전달(post방식)
-    res = requests.post('https://finance.naver.com/sise/field_submit.nhn', data=data)
-
-    page_soup = BeautifulSoup(res.text, 'lxml')
-
-    # 크롤링할 table의 html 가져오는 코드(크롤링 대상 요소의 클래스는 브라우저에서 확인)
-    table_html = page_soup.select_one('div.box_type_l')
-
-    # column명을 가공
-    header_data = [item.get_text().strip() for item in table_html.select('thead th')][1:-1]
-
-    # 종목코드 추출 (a.title 태그의 href에서 추출)
-    code_data = []
-    for item in table_html.select('a.tltle'):
-        href = item.get('href', '')
-        if 'code=' in href:
-            code = href.split('code=')[1].split('&')[0]
-            code_data.append(code)
+    # pykrx가 빈 결과를 반환하는 경우 캐시로 안전하게 폴백합니다.
+    if df is None or (hasattr(df, 'empty') and df.empty):
+        logger.warning("get_stock_data_fdr_pykrx가 빈 결과를 반환했습니다. 캐시 파일로 폴백을 시도합니다.")
+        cached = _try_load_cache()
+        if cached is not None and not (hasattr(cached, 'empty') and cached.empty):
+            logger.info(f"캐시 폴백 성공: {len(cached)}개 종목 반환")
+            return cached
         else:
-            code_data.append('')
+            raise Exception("FDR+pykrx가 빈 결과를 반환했고 사용 가능한 캐시도 없습니다.")
 
-    # 종목명 + 수치 추출 (a.title = 종목명, td.number = 기타 수치)
-    inner_data = [item.get_text().strip() for item in table_html.find_all(lambda x:
-                                                                          (x.name == 'a' and
-                                                                           'tltle' in x.get('class', [])) or
-                                                                          (x.name == 'td' and
-                                                                           'number' in x.get('class', []))
-                                                                          )]
-
-    # page마다 있는 종목의 순번 가져오기
-    no_data = [item.get_text().strip() for item in table_html.select('td.no')]
-    number_data = np.array(inner_data)
-
-    # 가로 x 세로 크기에 맞게 행렬화
-    number_data.resize(len(no_data), len(header_data))
-
-    # 한 페이지에서 얻은 정보를 모아 DataFrame로 만들어 반환
-    df = pd.DataFrame(data=number_data, columns=header_data)
-    
-    # 종목코드 컬럼 추가
-    if len(code_data) == len(df):
-        df.insert(0, '종목코드', code_data)
-    
     return df
 
 
@@ -361,7 +453,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
     
     동작 방식 (스마트 전략):
     1. 장 종료 후 (15:30 이후) → 키움 API로 당일 데이터 수집하여 캐싱
-    2. 장 중 → 네이버 크롤링 시도 (빠름) → 실패 시 캐시 사용
+    2. 장 중 → FDR+pykrx 시도 (빠름) → 실패 시 캐시 사용
     3. 수동으로 use_kiwoom_api=True 지정 시 → 항상 API 사용
     """
     # 장 종료 후면 키움 API로 당일 데이터 갱신 (kiwoom_client가 있는 경우)
@@ -381,7 +473,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
         except Exception as e:
             logger.error(f"키움 API 유니버스 생성 실패: {e}")
             if use_kiwoom_api:  # 강제 모드였다면 fallback
-                logger.info("네이버 크롤링으로 fallback합니다...")
+                logger.info("FDR+pykrx로 fallback합니다...")
             else:  # 장 종료 후 자동 모드였다면 캐시 우선 시도
                 logger.info("캐시 파일 확인합니다...")
                 cached_df = _try_load_cache()
@@ -394,8 +486,8 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                     except Exception:
                         pass
                     return universe
-            # 아래 네이버 크롤링 로직으로 계속 진행
-    all_stock_cache_file = 'all_stocks_naver.parquet'
+            # 아래 FDR+pykrx 로직으로 계속 진행
+    all_stock_cache_file = 'all_stocks_pykrx.parquet'
     today_str = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
     all_stock_cache_path = all_stock_cache_file if os.path.isabs(all_stock_cache_file) else os.path.join(DB_DIR, all_stock_cache_file)
     
@@ -405,10 +497,8 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
         file_mod_time = datetime.fromtimestamp(os.path.getmtime(all_stock_cache_path), tz=ZoneInfo("Asia/Seoul"))
         file_date_str = file_mod_time.strftime("%Y%m%d")
         file_is_today = (file_date_str == today_str)
-        
         if file_is_today:
             logger.info(f"오늘 생성된 {all_stock_cache_path} 파일을 사용합니다. (생성 시간: {file_mod_time.strftime('%H:%M:%S')})")
-            print(f"오늘 생성된 {all_stock_cache_path} 파일을 사용합니다.")
             try:
                 df = pd.read_parquet(all_stock_cache_path)
                 # 읽어온 Parquet에 필수 컬럼이 없는 경우 NaN 컬럼으로 보완
@@ -417,40 +507,39 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                     if rc not in df.columns:
                         df[rc] = np.nan
             except Exception as e:
-                logger.error(f"Parquet 파일 읽기 실패: {e}. 크롤링을 시도합니다.")
-                file_is_today = False  # 파일 읽기 실패하면 크롤링 시도
+                logger.error(f"Parquet 파일 읽기 실패: {e}. FDR+pykrx를 시도합니다.")
+                file_is_today = False  # 파일 읽기 실패하면 FDR+pykrx 시도
     
-    # 크롤링 스킵: 평일 08:00-09:00에는 네이버 크롤링 데이터가 신뢰 불가
+    # FDR+pykrx 스킵: 평일 08:00-09:00에는 FDR+pykrx 데이터가 신뢰 불가
     from util.time_helper import is_market_closed_day
     now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
     if not use_kiwoom_api and (not is_market_closed_day()):
         if datetime_time(8, 0) <= now_kst.time() < datetime_time(9, 0):
-            logger.info("평일 08:00-09:00: 네이버 크롤링을 스킵합니다. 캐시 사용을 시도합니다.")
+            logger.info("평일 08:00-09:00: FDR+pykrx를 스킵합니다. 캐시 사용을 시도합니다.")
             cached_df = _try_load_cache()
             if cached_df is not None:
-                logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목 (크롤링 스킵)")
+                logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목 (FDR+pykrx 스킵)")
                 df = cached_df
                 file_is_today = True
             else:
-                raise Exception("평일 08:00-09:00 이므로 크롤링을 스킵합니다. 사용 가능한 캐시가 없습니다.")
+                raise Exception("평일 08:00-09:00 이므로 FDR+pykrx를 스킵합니다. 사용 가능한 캐시가 없습니다.")
 
-    # 오늘 파일이 없거나 읽기 실패 시 크롤링 시도
+    # 오늘 파일이 없거나 읽기 실패 시 FDR+pykrx 시도
     if not file_is_today:
-        logger.info(f"크롤링을 실행합니다. (파일 존재: {os.path.exists(all_stock_cache_path)}, 오늘 파일: {file_is_today}, path={Path(all_stock_cache_path).resolve()})")
-        print(f"크롤링을 실행합니다...")
+        logger.info(f"FDR+pykrx를 실행합니다. (파일 존재: {os.path.exists(all_stock_cache_path)}, 오늘 파일: {file_is_today}, path={Path(all_stock_cache_path).resolve()})")
         
         try:
             df = execute_crawler(all_stock_cache_file)
         except Exception as e:
-            # 캐시 파일 사용 (네이버 + 키움 API 캐시 모두 시도)
-            logger.warning(f"크롤링 실패: {e}. 캐시 파일을 확인합니다...")
+            # 캐시 파일 사용 (FDR + 키움 API 캐시 모두 시도)
+            logger.warning(f"FDR+pykrx 실패: {e}. 캐시 파일을 확인합니다...")
             cached_df = _try_load_cache()
             if cached_df is not None:
                 logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
                 df = cached_df
             else:
-                logger.error(f"크롤링 실패이고 사용 가능한 캐시도 없습니다.")
-                raise Exception(f"크롤링 실패이고 사용 가능한 캐시도 없습니다: {e}")
+                logger.error(f"FDR+pykrx 실패이고 사용 가능한 캐시도 없습니다.")
+                raise Exception(f"FDR+pykrx 실패이고 사용 가능한 캐시도 없습니다: {e}")
 
     universe = _filter_and_create_universe(df)
     try:
@@ -463,14 +552,14 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
 
 def _try_load_cache():
     """
-    캐시 파일을 로드하는 내부 함수 (우선순위: 키움 API 캐시 → 네이버 크롤링 캐시)
+    캐시 파일을 로드하는 내부 함수 (우선순위: 키움 API 캐시 → FDR+pykrx 캐시)
     
     Returns:
         DataFrame or None: 캐시 데이터 또는 None (실패 시)
     """
     cache_files = [
         'all_stocks_kiwoom.parquet',  # 키움 API 전체 종목 (우선)
-        'all_stocks_naver.parquet'     # 네이버 크롤링 전체 종목
+        'all_stocks_pykrx.parquet'     # pykrx 전체 종목
     ]
 
     for cache_file in cache_files:
@@ -508,7 +597,7 @@ def _try_load_cache():
 def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
     """
     DataFrame을 받아서 필터링하고 유니버스를 생성하는 내부 함수
-    네이버 크롤링과 키움 API 모두에서 공통으로 사용
+    FDR+pykrx과 키움 API 모두에서 공통으로 사용
     """
     # 데이터 정제
     mapping = {',': '', 'N/A': '0', '%': ''}
@@ -541,7 +630,7 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
     # 1. 기본 필터링: 유동성 + 적절한 시가총액 범위
     # 거래대금/시가총액 단위: 백만원
     
-    # 크롤링 시 저장된 시장구분 정보 활용 (종목코드 기반 추측보다 정확)
+    # 시장구분 정보 활용
     kosdaq_mask = df['시장구분'] == '코스닥'
     
     # 시장별 차등 시가총액 필터 (코스피: 500억, 코스닥: 200억)
@@ -778,7 +867,7 @@ if __name__ == "__main__":
             sys.stderr.write("재실행 건너뜀 (--no-reexec 또는 SKIP_REEXEC 감지). 계속 진행합니다.\n")
 
     # 실제 동작 시작
-    print('Start!')
+    logger.info('Start!')
     universe = get_universe()
     print(universe)
     print('End')
