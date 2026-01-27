@@ -27,6 +27,48 @@ MOCK_TRADE_BLACKLIST_CODES = [
 
 logger = get_logger(__name__)
 
+
+def universe_cache_exists(db_dir=None, max_age_days=None, strategy_name=None):
+    """
+    all_stocks_kiwoom.parquet 캐시 또는 전략 DB의 `universe` 테이블 존재/신선도 확인.
+
+    Returns: (exists_bool, days_old_or_None, modified_datetime_or_None)
+    - parquet 파일이 있으면 수정시간으로 days_old 계산.
+    - parquet가 없고 strategy_name이 주어지면 DB의 `universe` 테이블 존재 여부를 확인.
+    - max_age_days가 주어지면 exists_bool은 days_old < max_age_days 조건을 사용해 판단.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from util.time_helper import get_korea_time
+    from util.db_helper import check_table_exist
+
+    db_dir = db_dir or DB_DIR
+    cache_file = os.path.join(db_dir, 'all_stocks_kiwoom.parquet')
+
+    if os.path.exists(cache_file):
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
+            try:
+                days_old = (get_korea_time().date() - mtime.date()).days
+            except Exception:
+                days_old = None
+            if max_age_days is None:
+                return True, days_old, mtime
+            return (days_old is not None and days_old < int(max_age_days)), days_old, mtime
+        except Exception:
+            return True, None, None
+
+    # parquet 파일이 없으면 DB 테이블 존재 여부로 판단 (전략 DB가 주어진 경우)
+    if strategy_name:
+        try:
+            table_exists = check_table_exist(strategy_name, 'universe')
+            if table_exists:
+                return True, None, None
+        except Exception:
+            pass
+
+    return False, None, None
+
 # 기본 필드 아이디(네이버 필드 id 목록이 변경되었을 때의 폴백)
 # 실제 네이버 필드 id는 사이트 변경에 따라 달라질 수 있으므로 최소한의 주요 항목을 포함
 DEFAULT_FIELD_IDS = ['open', 'high', 'low', 'market_sum', 'trd_amt', 'cur_prc']

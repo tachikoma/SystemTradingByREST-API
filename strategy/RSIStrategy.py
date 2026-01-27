@@ -79,10 +79,12 @@ class RSIStrategy(threading.Thread):
     # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (Wilder/EWMA)
     RSI_METHOD = 'cutler'
     
-    def __init__(self, kiwoom):
+    def __init__(self, kiwoom, universe_cache_mode='on_demand'):
         threading.Thread.__init__(self)
         self.strategy_name = "RSIStrategy"
         self.kiwoom = kiwoom
+        # universe cache mode: 'startup' | 'eod' | 'on_demand'
+        self.universe_cache_mode = universe_cache_mode
 
         # Kiwoom API 호출 허용 플래그 (환경변수로 제어 가능)
         # ALLOW_KIWOOM_CALLS=1 또는 true/yes 로 설정하면 외부 API 호출을 허용합니다.
@@ -122,6 +124,19 @@ class RSIStrategy(threading.Thread):
         self.last_full_cache_time = None
         self.full_cache_in_progress = False
         self.full_cache_done_today = False
+        # 가격 데이터 준비 상태 추적
+        self.price_data_ready = False
+        self.last_price_data_date = None
+        self._price_data_retry_count = 0
+        try:
+            self.PRICE_DATA_MAX_RETRIES = int(os.getenv('PRICE_DATA_MAX_RETRIES', '3'))
+        except Exception:
+            self.PRICE_DATA_MAX_RETRIES = 3
+        # 날짜 롤오버 추적
+        try:
+            self._last_rollover_date = get_korea_time().date()
+        except Exception:
+            self._last_rollover_date = None
         
         # 모의투자 매매제한 종목 블랙리스트 (모의투자에서만 사용)
         self.mock_trade_blacklist = set()
@@ -167,14 +182,25 @@ class RSIStrategy(threading.Thread):
     def init_strategy(self):
         """전략 초기화 기능을 수행하는 함수"""
         try:
-            # 전체 캐시 상태 체크 및 필요 시 즉시 캐싱
-            self.check_and_cache_if_needed()
+            # Universe 캐시 모드 처리
+            # - 'startup': 시작 시 전체 캐시 및 유니버스 생성
+            # - 'eod' 또는 'on_demand': 시작 시 전체 캐시/유니버스 생성하지 않음
+            if self.universe_cache_mode == 'startup':
+                self.check_and_cache_if_needed()
             
-            # 유니버스 조회, 없으면 생성
-            self.check_and_get_universe(True)
+            self.check_and_get_universe(force_update=False if self.universe_cache_mode != 'startup' else True)
 
-            # 가격 정보를 조회, 필요하면 생성
-            self.check_and_get_price_data()
+            # 가격 정보를 조회: 프로그램 시작 시 하루 1회 보장
+            success = self.check_and_get_price_data()
+            if success:
+                self.price_data_ready = True
+                try:
+                    self.last_price_data_date = get_korea_time().strftime('%Y%m%d')
+                except Exception:
+                    self.last_price_data_date = None
+            else:
+                self.price_data_ready = False
+                self._price_data_retry_count = 0
             time.sleep(0.3)  # API 호출 간격 확보
 
             # Kiwoom > 주문정보 확인
@@ -207,7 +233,7 @@ class RSIStrategy(threading.Thread):
 
     @notify_on_exception(fallback_return=None)
     def check_and_cache_if_needed(self):
-        """프로그램 시작 시 캐시 상태 체크 및 필요 시 전체 캐싱"""
+        """캐시 상태 체크 및 필요 시 전체 캐싱"""
         import os
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -225,9 +251,9 @@ class RSIStrategy(threading.Thread):
         # 예: DISABLE_INITIAL_CACHE=1 또는 DISABLE_INITIAL_CACHE=true
         disable_initial = os.getenv('DISABLE_INITIAL_CACHE', '0')
         if str(disable_initial).lower() in ('1', 'true', 'yes'):
-            logger.warning("초기 전체 종목 캐싱이 환경변수로 비활성화되었습니다 (DISABLE_INITIAL_CACHE=%s)", disable_initial)
+            logger.warning("전체 종목 캐싱이 환경변수로 비활성화되었습니다 (DISABLE_INITIAL_CACHE=%s)", disable_initial)
             try:
-                send_message("⚠️ 초기 전체 종목 캐싱 비활성화: DISABLE_INITIAL_CACHE set")
+                send_message("⚠️ 전체 종목 캐싱 비활성화: DISABLE_INITIAL_CACHE set")
             except Exception:
                 pass
             return
@@ -250,19 +276,19 @@ class RSIStrategy(threading.Thread):
             logger.warning(f"⚠️ 캐시 파일: {cache_file} 없음")
         
         # 캐시가 없거나 오래된 경우 → 즉시 전체 캐싱
-        logger.info("💾 프로그램 시작: 전체 종목 캐싱 시작...")
-        send_message(f"💾 프로그램 시작: 전체 종목 캐싱 시작\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
+        logger.info("💾 전체 종목 캐싱 시작...")
+        send_message(f"💾 전체 종목 캐싱 시작\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
         
         try:
             from util.make_up_universe import cache_daily_data
             cache_daily_data(self.kiwoom)
             
             self.last_full_cache_time = now
-            logger.info("✅ 시작 전체 종목 캐싱 완료")
-            send_message("✅ 시작 전체 종목 캐싱 완료")
+            logger.info("✅ 전체 종목 캐싱 완료")
+            send_message("✅ 전체 종목 캐싱 완료")
         except Exception as cache_error:
-            logger.error("❌ 시작 전체 종목 캐싱 실패: %s", cache_error)
-            send_message(f"❌ 시작 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
+            logger.error("❌ 전체 종목 캐싱 실패: %s", cache_error)
+            send_message(f"❌ 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
     
     @notify_on_exception(fallback_return=None)
     def load_mock_blacklist(self):
@@ -625,7 +651,11 @@ class RSIStrategy(threading.Thread):
 
     @notify_on_exception(fallback_return=None)
     def check_and_get_price_data(self):
-        """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수"""
+        """일봉 데이터가 존재하는지 확인하고 없다면 생성하는 함수
+
+        Returns:
+            bool: True if operation completed (no unhandled errors), False on failure
+        """
         for idx, code in enumerate(self.universe.keys()):
             name = self.resolve_stock_name(code)
             display = f"{name}({code})" if name else code
@@ -773,6 +803,13 @@ class RSIStrategy(threading.Thread):
                 self.universe[code]['price_df'] = price_df
             logger.debug("Loaded price data from DB for %s (refreshed=%s, compact stored)", display, refreshed_from_db_check)
 
+        # loop 끝: 다음은 성공 플래그 설정
+        try:
+            self.last_price_data_date = get_korea_time().strftime('%Y%m%d')
+        except Exception:
+            pass
+        return True
+
     def run(self):
         """실질적 수행 역할을 하는 함수"""
         while self.is_init_success:
@@ -781,11 +818,40 @@ class RSIStrategy(threading.Thread):
                 now = get_korea_time()
                 logger.info("Korea time: %s", now)
 
+                # 날짜 롤오버 감지: 날짜가 바뀌면 하루치 가격 데이터 갱신을 시도
+                try:
+                    current_date = now.date()
+                    if getattr(self, '_last_rollover_date', None) is None:
+                        self._last_rollover_date = current_date
+                    if current_date != self._last_rollover_date:
+                        self._last_rollover_date = current_date
+                        logger.info("날짜 변경 감지: 일일 가격 데이터 갱신 시도")
+                        ok = self.check_and_get_price_data()
+                        if ok:
+                            self.price_data_ready = True
+                            try:
+                                self.last_price_data_date = get_korea_time().strftime('%Y%m%d')
+                            except Exception:
+                                self.last_price_data_date = None
+                            self._price_data_retry_count = 0
+                            logger.info("일일 가격 데이터 갱신 성공")
+                        else:
+                            self.price_data_ready = False
+                            self._price_data_retry_count = 0
+                            logger.warning("일일 가격 데이터 갱신 실패: 장 시작 전 재시도 예정")
+                            try:
+                                send_message("⚠️ 일일 가격 데이터 갱신 실패: 장 시작 전 재시도 예정")
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
                 # 메모리 정리: 큰 반복/캐시 작업 직후 호출 (순환참조 회수 목적)
                 gc.collect()
                 
-                # 전체 종목 데이터 캐싱 (15:40 ~ 17:00 사이, 30일 주기, 66분(모의투자)/10분(실전투자) 소요)
-                if not is_market_closed_day() and now.hour == 15 and 40 <= now.minute < 17 and not self.full_cache_done_today:                
+                # 전체 종목 데이터 캐싱 (15:40 ~ 17:00 사이, 30일 주기)
+                # EOD 자동 캐시는 모드가 'eod'인 경우에만 수행
+                if self.universe_cache_mode == 'eod' and not is_market_closed_day() and now.hour == 15 and 40 <= now.minute < 17 and not self.full_cache_done_today:                
                     days_since_cache = self.UNIVERSE_UPDATE_DAYS + 1 # 최초 실행 시 무조건 캐싱
                     if self.last_full_cache_time:
                         days_since_cache = (now.date() - self.last_full_cache_time.date()).days
@@ -839,14 +905,27 @@ class RSIStrategy(threading.Thread):
                 
                 # (0)장중인지 확인
                 if not check_transaction_open():
+                    # 장 시작 전: 날짜 롤오버 시 가격 데이터 갱신이 실패했다면 재시도
+                    if not self.price_data_ready and self._price_data_retry_count < self.PRICE_DATA_MAX_RETRIES:
+                        logger.info("가격 데이터 미준비: 장 시작 전 재시도 %d/%d", self._price_data_retry_count + 1, self.PRICE_DATA_MAX_RETRIES)
+                        try:
+                            ok = self.check_and_get_price_data()
+                            self._price_data_retry_count += 1
+                            if ok:
+                                self.price_data_ready = True
+                                try:
+                                    self.last_price_data_date = get_korea_time().strftime('%Y%m%d')
+                                except Exception:
+                                    self.last_price_data_date = None
+                                logger.info("가격 데이터 재시도 성공")
+                            else:
+                                logger.warning("가격 데이터 재시도 실패 (%d/%d)", self._price_data_retry_count, self.PRICE_DATA_MAX_RETRIES)
+                        except Exception as e:
+                            logger.error("가격 데이터 재시도 중 예외: %s", e)
+
                     logger.info("장시간이 아니므로 5분간 대기합니다.")
                     time.sleep(5 * 60)
                     continue
-                # 보유/주문 종목이 유니버스에 없더라도 모니터링하도록 보장
-                try:
-                    self.ensure_holdings_in_universe()
-                except Exception as e:
-                    logger.error("ensure_holdings_in_universe 호출 중 오류: %s", e)
 
                 # 주기적 동기화 체크 (웹소켓 실시간 데이터 보완용)
                 current_time = time.time()
@@ -867,6 +946,12 @@ class RSIStrategy(threading.Thread):
                         logger.info("=== 주기적 동기화 완료 ===")
                     except Exception as sync_error:
                         logger.error("주기적 동기화 실패: %s", sync_error)
+
+                # 보유/주문 종목이 유니버스에 없더라도 모니터링하도록 보장
+                try:
+                    self.ensure_holdings_in_universe()
+                except Exception as e:
+                    logger.error("ensure_holdings_in_universe 호출 중 오류: %s", e)
 
                 for idx, code in enumerate(self.universe.keys()):
                     logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
