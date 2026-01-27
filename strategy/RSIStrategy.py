@@ -673,8 +673,8 @@ class RSIStrategy(threading.Thread):
                     max_loops = 1
 
                 from util.price_fetcher import fetch_price_data
-                logger.info("Price table missing for %s: fetching with max_loops=%d", display, max_loops)
-                price_df = fetch_price_data(self.kiwoom, code, mode='deep', max_loops=max_loops)
+                logger.info("Price table missing for %s: fetching shallow (1 page)", display)
+                price_df = fetch_price_data(self.kiwoom, code)
                 time.sleep(0.3)  # API 호출 후 대기
                 if price_df is None or len(price_df) == 0:
                     logger.warning("Price data fetch returned empty for %s", display)
@@ -707,32 +707,8 @@ class RSIStrategy(threading.Thread):
                     # 얕은(빠른) 조회는 항상 1페이지만 요청합니다 (최신 데이터 확보 목적)
                     from util.price_fetcher import fetch_price_data
                     logger.info("Updating price data for %s: last_date=%s, now=%s - shallow fetch=1", display, last_date[0] if last_date else None, now)
-                    price_df = fetch_price_data(self.kiwoom, code, mode='auto', max_loops=None)
+                    price_df = fetch_price_data(self.kiwoom, code)
                     time.sleep(0.3)  # API 호출 후 대기
-
-                    # if fetched data empty or newest date still older than expected, try deeper fetch
-                    need_deep = False
-                    if price_df is None or len(price_df) == 0:
-                        need_deep = True
-                    else:
-                        try:
-                            latest = price_df.index[-1]
-                            if latest < get_korea_time().strftime('%Y%m%d'):
-                                # latest less than today -> possibly missing recent rows
-                                need_deep = True
-                        except Exception:
-                            need_deep = True
-
-                    if need_deep:
-                        # 얕은 조회(1페이지)로 최신이 확보되지 않으면, 환경변수 PRICE_FETCH_MAX_LOOPS를
-                        # 사용해 심층(retry) 조회를 시도합니다. 기본값은 1이며 필요 시 환경변수로 늘리세요.
-                        try:
-                            deep_loops = int(os.getenv('PRICE_FETCH_MAX_LOOPS', '1'))
-                        except Exception:
-                            deep_loops = 1
-                        logger.info("Shallow fetch insufficient for %s; retrying with deep_loops=%d", display, deep_loops)
-                        price_df = fetch_price_data(self.kiwoom, code, mode='deep', max_loops=deep_loops)
-                        time.sleep(0.3)
 
                     if price_df is None:
                         logger.warning("Price update failed for %s: no data returned", display)
@@ -777,12 +753,8 @@ class RSIStrategy(threading.Thread):
             try:
                 if prev_trading_str and prev_trading_str not in price_df.index:
                     logger.warning("DB has table for %s but missing prev trading date %s; refreshing from API", display, prev_trading_str)
-                    try:
-                        max_loops = int(os.getenv('PRICE_FETCH_MAX_LOOPS', '1'))
-                    except Exception:
-                        max_loops = 1
                     from util.price_fetcher import fetch_price_data
-                    new_df = fetch_price_data(self.kiwoom, code, mode='deep', max_loops=max_loops)
+                    new_df = fetch_price_data(self.kiwoom, code)
                     time.sleep(0.2)
                     if new_df is not None and len(new_df) > 0:
                         price_df = new_df
@@ -1235,15 +1207,15 @@ class RSIStrategy(threading.Thread):
                                 needs_api_refresh = True
 
                         if needs_api_refresh:
-                            # 깊은 조회로 DB 보강
-                            from util.price_fetcher import fetch_price_data
-                            price_df = fetch_price_data(self.kiwoom, code, mode='deep')
-                            time.sleep(0.3)
-                            if price_df is not None and len(price_df) > 0:
-                                insert_df_to_db(self.strategy_name, code, price_df)
-                            else:
-                                # 못가져오면 기존 DB를 얕게 읽음
-                                price_df = None
+                                # API로 DB 보강 (얕은 조회)
+                                from util.price_fetcher import fetch_price_data
+                                price_df = fetch_price_data(self.kiwoom, code)
+                                time.sleep(0.3)
+                                if price_df is not None and len(price_df) > 0:
+                                    insert_df_to_db(self.strategy_name, code, price_df)
+                                else:
+                                    # 못가져오면 기존 DB를 얕게 읽음
+                                    price_df = None
 
                         if not needs_api_refresh:
                             # DB에서 전체 price_df를 항상 불러옵니다. 
@@ -1258,7 +1230,7 @@ class RSIStrategy(threading.Thread):
                     else:
                         # API로 가격 데이터 조회 후 DB에 저장
                         from util.price_fetcher import fetch_price_data
-                        price_df = fetch_price_data(self.kiwoom, code, mode='deep')
+                        price_df = fetch_price_data(self.kiwoom, code)
                         time.sleep(0.3)
                         insert_df_to_db(self.strategy_name, code, price_df)
 
