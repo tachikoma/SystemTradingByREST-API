@@ -1031,6 +1031,75 @@ class RSIStrategy(threading.Thread):
             # balance와 order에 있는 코드를 합쳐서 확인
             codes_to_ensure = set(list(self.kiwoom.balance.keys()) + list(self.kiwoom.order.keys()))
             added = []
+
+            # --- 실시간 등록 갯수 제한 처리 (루프 밖에서 일괄 처리) ---
+            try:
+                existing_universe = set(self.universe.keys())
+                desired_set = existing_universe.union(codes_to_ensure)
+                if len(desired_set) > self.REALTIME_MAX_CODES:
+                    removable = [c for c in existing_universe if c not in codes_to_ensure]
+                    excess = len(desired_set) - self.REALTIME_MAX_CODES
+
+                    if removable:
+                        # 1) price_df 또는 realtime에서 가능한 한 거래량을 수집 (비용 없음)
+                        volumes_map = {}
+                        missing = []
+                        for c in removable:
+                            uni = self.universe.get(c, {})
+                            df_tmp = uni.get('price_df')
+                            v = 0
+                            if df_tmp is not None and len(df_tmp) > 0:
+                                try:
+                                    v = int(df_tmp.iloc[-1]['volume'])
+                                except Exception:
+                                    try:
+                                        v = int(float(df_tmp.iloc[-1]['volume']))
+                                    except Exception:
+                                        v = 0
+                            else:
+                                try:
+                                    rt = self.kiwoom.universe_realtime_transaction_info.get(c)
+                                    if isinstance(rt, dict) and '누적거래량' in rt:
+                                        v = int(rt.get('누적거래량') or 0)
+                                except Exception:
+                                    v = 0
+
+                            volumes_map[c] = v
+                            if v == 0:
+                                missing.append(c)
+
+                        # 2) 필요한 만큼만 API 호출로 보충 (부하 최소화)
+                        need = excess - sum(1 for c in removable if volumes_map.get(c, 0) > 0)
+                        if need > 0 and hasattr(self.kiwoom, 'get_stock_info'):
+                            for c in missing[:need]:
+                                try:
+                                    info = self.kiwoom.get_stock_info(c)
+                                    if info and info.get('trde_qty') is not None:
+                                        try:
+                                            volumes_map[c] = int(str(info.get('trde_qty')).replace(',', ''))
+                                        except Exception:
+                                            try:
+                                                volumes_map[c] = int(float(str(info.get('trde_qty')).replace(',', '')))
+                                            except Exception:
+                                                volumes_map[c] = 0
+                                except Exception:
+                                    volumes_map[c] = 0
+
+                        # 3) 거래량 기준으로 정렬 후 excess 만큼 제거
+                        removable_sorted = sorted(removable, key=lambda x: volumes_map.get(x, 0))
+                        to_remove = removable_sorted[:excess]
+                        for r in to_remove:
+                            try:
+                                del self.universe[r]
+                            except Exception:
+                                pass
+                        logger.info("실시간 등록 제한으로 제거된 기존 universe 종목: %s", to_remove)
+                    else:
+                        logger.warning("실시간 등록 제한 충돌: 제거할 기존 universe 후보 없음")
+            except Exception as e:
+                logger.error("실시간 등록 제한 일괄 처리 실패: %s", e)
+
+            # 이제 codes_to_ensure 루프 시작
             for code in codes_to_ensure:
                 if not code:
                     continue
@@ -1043,54 +1112,64 @@ class RSIStrategy(threading.Thread):
                     continue
 
                 try:
-                    # --- 실시간 등록 갯수 제한 처리 ---
-                    # 현재 universe와 보유/주문 코드를 합친 목표 집합 계산
-                    existing_universe = set(self.universe.keys())
-                    desired_set = existing_universe.union(codes_to_ensure)
-                    if len(desired_set) > self.REALTIME_MAX_CODES:
-                        # 제거 가능한 후보: 보유/주문이 아닌 기존 universe 종목
-                        removable = [c for c in existing_universe if c not in codes_to_ensure]
-
-                        excess = len(desired_set) - self.REALTIME_MAX_CODES
-                        if len(removable) >= excess:
-                            # 제거 우선순위: 거래량(마지막 행의 'volume') 적은 순으로 제거
-                            def last_volume(code_key):
-                                try:
-                                    df_tmp = self.universe.get(code_key, {}).get('price_df')
-                                    if df_tmp is None or len(df_tmp) == 0:
-                                        return 0
-                                    # 컬럼 이름 다양성 대비
-                                    for col in ['volume', '누적거래량']:
-                                        if col in df_tmp.columns:
-                                            return int(df_tmp.iloc[-1][col])
-                                    return 0
-                                except Exception:
-                                    return 0
-
-                            removable_sorted = sorted(removable, key=lambda x: last_volume(x))
-                            to_remove = removable_sorted[:excess]
-                            for r in to_remove:
-                                try:
-                                    del self.universe[r]
-                                except Exception:
-                                    pass
-                            logger.info("실시간 등록 제한으로 제거된 기존 universe 종목: %s", to_remove)
-                        else:
-                            # removable이 부족하면 모두 제거하고, 남는 슬롯만큼만 신규 추가 허용
-                            for r in removable:
-                                try:
-                                    del self.universe[r]
-                                except Exception:
-                                    pass
-                            logger.warning("충분한 제거 후보 없음: %d개 제거, 그러나 여전히 슬롯 부족 가능", len(removable))
 
                     # --- DB 또는 API에서 가격 데이터 로드 ---
+                    # 동작 플래그: 전체 DataFrame 유지 여부
+                    keep_full = str(os.getenv('KEEP_FULL_PRICE_DF', '0')).lower() in ('1', 'true', 'yes')
+
                     if check_table_exist(self.strategy_name, code):
-                        sql = "select * from `{}`".format(code)
-                        cur = execute_sql(self.strategy_name, sql)
-                        cols = [column[0] for column in cur.description]
-                        price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
-                        price_df = price_df.set_index('index')
+                        # DB에 있는 최근일자를 확인하여 최신성이 없으면 API로 보강
+                        try:
+                            # 최근 저장 일자 확인
+                            cur = execute_sql(self.strategy_name, f"select max(`index`) from `{code}`")
+                            last_date_row = cur.fetchone()
+                            last_date = last_date_row[0] if last_date_row else None
+                        except Exception:
+                            last_date = None
+
+                        # 계산: 이전 거래일(영업일)을 구함
+                        try:
+                            from datetime import timedelta
+                            from util.time_helper import MARKET_HOLIDAYS_2026
+                            kst_now = get_korea_time()
+                            today_dt = kst_now.date()
+                            prev_dt = today_dt - timedelta(days=1)
+                            attempts = 0
+                            while (prev_dt.weekday() >= 5 or prev_dt in MARKET_HOLIDAYS_2026) and attempts < 10:
+                                prev_dt = prev_dt - timedelta(days=1)
+                                attempts += 1
+                            prev_trading_str = prev_dt.strftime('%Y%m%d')
+                        except Exception:
+                            prev_trading_str = None
+
+                        needs_api_refresh = False
+                        if prev_trading_str is None:
+                            needs_api_refresh = False
+                        else:
+                            if last_date is None or last_date != prev_trading_str:
+                                needs_api_refresh = True
+
+                        if needs_api_refresh:
+                            # 깊은 조회로 DB 보강
+                            from util.price_fetcher import fetch_price_data
+                            price_df = fetch_price_data(self.kiwoom, code, mode='deep')
+                            time.sleep(0.3)
+                            if price_df is not None and len(price_df) > 0:
+                                insert_df_to_db(self.strategy_name, code, price_df)
+                            else:
+                                # 못가져오면 기존 DB를 얕게 읽음
+                                price_df = None
+
+                        if not needs_api_refresh:
+                            # DB에서 전체 price_df를 항상 불러옵니다. 
+                            try:
+                                sql = "select * from `{}`".format(code)
+                                cur = execute_sql(self.strategy_name, sql)
+                                cols = [column[0] for column in cur.description]
+                                price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
+                                price_df = price_df.set_index('index')
+                            except Exception:
+                                price_df = None
                     else:
                         # API로 가격 데이터 조회 후 DB에 저장
                         from util.price_fetcher import fetch_price_data
@@ -1100,17 +1179,33 @@ class RSIStrategy(threading.Thread):
 
                     # 종목명 획득 시도
                     try:
-                        code_name = self.kiwoom.get_master_code_name(code)
+                        code_name = self.resolve_stock_name(code)
                     except Exception:
                         code_name = self.kiwoom.balance.get(code, {}).get('종목명', 'N/A')
 
                     # 임시로 universe에 추가 (다만 MAX 제한 이후엔 추가 실패 가능)
                     if len(self.universe.keys()) < self.REALTIME_MAX_CODES:
-                        self.universe[code] = {
-                            'code_name': code_name,
-                            'price_df': price_df
-                        }
-                        added.append(code)
+                        # keep_full 플래그에 따라 전체 price_df를 보관하거나 compact 정보만 저장
+                        try:
+                            if price_df is None:
+                                # DB/API에서 데이터를 얻지 못한 경우라도 compact 생성 함수는 안전하게 처리
+                                compact = self._compact_price_info(price_df)
+                                self.universe[code] = {'code_name': code_name}
+                                self.universe[code].update(compact)
+                            else:
+                                if keep_full:
+                                    self.universe[code] = {
+                                        'code_name': code_name,
+                                        'price_df': price_df
+                                    }
+                                else:
+                                    compact = self._compact_price_info(price_df)
+                                    self.universe[code] = {'code_name': code_name}
+                                    self.universe[code].update(compact)
+
+                            added.append(code)
+                        except Exception as e:
+                            logger.error("임시 universe 추가 중 오류 %s(%s): %s", code_name, code, e)
                     else:
                         logger.warning("실시간 등록 최대치(%d) 초과로 보유/주문 종목 추가 건너뜀: %s(%s)", self.REALTIME_MAX_CODES, code_name, code)
                 except Exception as e:
