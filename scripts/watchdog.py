@@ -23,6 +23,7 @@ import sys
 import time
 from pathlib import Path
 import logging
+import atexit
 
 try:
     # prefer package notifier if running inside project
@@ -161,6 +162,23 @@ def parse_args():
 def main():
     args = parse_args()
     project_root = Path(__file__).resolve().parents[1]
+    # PID file management
+    run_dir = project_root / 'run'
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pidfile = run_dir / 'watchdog.pid'
+    try:
+        pidfile.write_text(str(os.getpid()))
+    except Exception:
+        logger.exception('Failed to write PID file %s', pidfile)
+
+    def _remove_pidfile():
+        try:
+            if pidfile.exists():
+                pidfile.unlink()
+        except Exception:
+            logger.exception('Failed to remove PID file %s', pidfile)
+
+    atexit.register(_remove_pidfile)
     wd = Watchdog(project_root=project_root, restart=args.restart, restart_delay=args.restart_delay, max_restarts=args.max_restarts, notify=args.notify, name=args.name)
     wd.run()
 
