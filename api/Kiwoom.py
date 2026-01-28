@@ -12,7 +12,6 @@ import asyncio
 import websockets
 import threading
 from util.logging_config import get_logger
-import logging
 from util.notifier import notify_on_exception
 
 # Kiwoom API 응답에서 사용되는 요청 한도 초과 메시지 키워드
@@ -957,63 +956,80 @@ class Kiwoom:
     @notify_on_exception(fallback_return=None)
     async def _websocket_main_loop(self):
         """WebSocket 연결의 메인 루프입니다: 연결/재연결 및 메시지 처리 로직을 담당합니다."""
-        while not self._websocket_stop_event.is_set():
-            try:
-                async with websockets.connect(self.socket_url) as websocket:
-                    self.websocket = websocket
-                    self.is_websocket_connected = True
-                    logger.info("WebSocket connected.")
-                    # Ensure token is valid before attempting LOGIN
-                    try:
-                        await self._ensure_valid_token_async()
-                    except Exception as e:
-                        logger.warning(f"Token refresh before websocket login failed: {e}")
-                    # 다른 경로에서 `_send_websocket_message`를 호출하며 경쟁 상태가 발생하지 않도록
-                    # 메인 루프의 연결 경로에서 직접 LOGIN을 전송합니다.
-                    try:
-                        if self._login_send_lock is not None:
-                            async with self._login_send_lock:
+        try:
+            while not self._websocket_stop_event.is_set():
+                try:
+                    async with websockets.connect(self.socket_url) as websocket:
+                        self.websocket = websocket
+                        self.is_websocket_connected = True
+                        logger.info("WebSocket connected.")
+                        # Ensure token is valid before attempting LOGIN
+                        try:
+                            await self._ensure_valid_token_async()
+                        except Exception as e:
+                            logger.warning(f"Token refresh before websocket login failed: {e}")
+                        # 다른 경로에서 `_send_websocket_message`를 호출하며 경쟁 상태가 발생하지 않도록
+                        # 메인 루프의 연결 경로에서 직접 LOGIN을 전송합니다.
+                        try:
+                            if self._login_send_lock is not None:
+                                async with self._login_send_lock:
+                                    if not self._websocket_login_sent:
+                                        await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                        self._websocket_login_sent = True
+                                            # LOGIN 응답이 `_handle_websocket_message`에서 도착하면 logged_in이 설정됩니다
+                                        self._websocket_logged_in = False
+                            else:
+                                # fallback: send without lock
                                 if not self._websocket_login_sent:
                                     await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
                                     self._websocket_login_sent = True
-                                            # LOGIN 응답이 `_handle_websocket_message`에서 도착하면 logged_in이 설정됩니다
                                     self._websocket_logged_in = False
-                        else:
-                            # fallback: send without lock
-                            if not self._websocket_login_sent:
-                                await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
-                                self._websocket_login_sent = True
+                        except Exception as e:
+                            logger.exception(f"Failed to send LOGIN directly: {e}")
+
+                        # 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다
+                        await self._reregister_real_data()
+
+                        while self.is_websocket_connected and not self._websocket_stop_event.is_set():
+                            try:
+                                message = await self.websocket.recv()
+                                await self._handle_websocket_message(message)
+                            except websockets.ConnectionClosed:
+                                logger.info("WebSocket connection closed.")
+                                self.is_websocket_connected = False
+                                # Reset login state on disconnect
                                 self._websocket_logged_in = False
-                    except Exception as e:
-                        logger.exception(f"Failed to send LOGIN directly: {e}")
-                    
-                    # 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다
-                    await self._reregister_real_data()
-                    
-                    while self.is_websocket_connected and not self._websocket_stop_event.is_set():
-                        try:
-                            message = await self.websocket.recv()
-                            await self._handle_websocket_message(message)
-                        except websockets.ConnectionClosed:
-                            logger.info("WebSocket connection closed.")
-                            self.is_websocket_connected = False
-                            # Reset login state on disconnect
-                            self._websocket_logged_in = False
-                            self._websocket_login_sent = False
-                            break
-                # 연결이 끊어지면 재연결 대기 후 재시도
-                if not self._websocket_stop_event.is_set():
-                    logger.info("Attempting to reconnect WebSocket in 2 seconds...")
-                    await asyncio.sleep(2)
-            except Exception as e:
-                logger.exception(f"WebSocket connection error: {e}")
+                                self._websocket_login_sent = False
+                                break
+                    # 연결이 끊어지면 재연결 대기 후 재시도
+                    if not self._websocket_stop_event.is_set():
+                        logger.info("Attempting to reconnect WebSocket in 2 seconds...")
+                        await asyncio.sleep(2)
+                except Exception as e:
+                    # 일반적인 예외 처리: 로그 후 재시도
+                    logger.exception(f"WebSocket connection error: {e}")
+                    self.is_websocket_connected = False
+                    self._websocket_logged_in = False
+                    self._websocket_login_sent = False
+                    if not self._websocket_stop_event.is_set():
+                        logger.info("Retrying WebSocket connection in 2 seconds...")
+                        await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            # Task cancellation is used during shutdown; perform graceful cleanup and re-raise
+            logger.info("WebSocket main loop cancelled: performing graceful shutdown.")
+            try:
+                if getattr(self, 'websocket', None):
+                    try:
+                        await self.websocket.close()
+                    except Exception as _e:
+                        logger.debug("Error closing websocket during cancellation: %s", _e)
+            finally:
                 self.is_websocket_connected = False
                 self._websocket_logged_in = False
                 self._websocket_login_sent = False
-                if not self._websocket_stop_event.is_set():
-                    logger.info("Retrying WebSocket connection in 2 seconds...")
-                    await asyncio.sleep(2)
-        logger.info("WebSocket loop stopped.")
+            raise
+        finally:
+            logger.info("WebSocket loop stopped.")
 
     @notify_on_exception(fallback_return=None)
     async def _reregister_real_data(self):

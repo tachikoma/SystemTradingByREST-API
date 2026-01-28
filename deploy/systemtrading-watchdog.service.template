@@ -1,0 +1,21 @@
+[Unit]
+Description=SystemTrading Watchdog Service (template)
+After=network.target
+
+[Service]
+Type=simple
+# Replace /path/to/project with absolute path to repository root
+WorkingDirectory=/path/to/project
+# Use virtualenv python if you have one, otherwise env python3
+ExecStart=/usr/bin/env python3 /path/to/project/scripts/watchdog.py --restart-delay 5 --name SystemTrading
+Restart=no
+# If you want systemd to restart the watchdog itself, set Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+# Usage:
+# 1. Copy this file to /etc/systemd/system/systemtrading-watchdog.service and edit paths
+# 2. Reload systemd: sudo systemctl daemon-reload
+# 3. Enable: sudo systemctl enable systemtrading-watchdog
+# 4. Start: sudo systemctl start systemtrading-watchdog

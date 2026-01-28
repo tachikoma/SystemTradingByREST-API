@@ -9,15 +9,10 @@ from util.price_fetcher import fetch_price_data
 price_df = fetch_price_data(kiwoom, code)
 """
 
-import os
-import time
 import logging
 from typing import Optional
 
-import pandas as pd
-
 from util.db_helper import insert_df_to_db
-from util.time_helper import get_korea_time
 
 logger = logging.getLogger(__name__)
 

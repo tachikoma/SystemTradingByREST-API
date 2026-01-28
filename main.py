@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import threading
 import argparse
 from pathlib import Path
 from dotenv import load_dotenv
@@ -72,6 +71,32 @@ if __name__ == '__main__':
     rsi_strategy = RSIStrategy(kiwoom)
     rsi_strategy.start()
 
+    # 종료 시 수행할 정리 작업들을 등록합니다 (텔레그램 알림 포함)
+    from util import shutdown
+
+    # Kiwoom 클라이언트 정리: 안전한 웹소켓 셧다운 호출
+    # (disconnect()는 내부적으로 재연결 루프를 멈추지 못할 수 있으므로 stop_websocket을 사용)
+    shutdown.register_cleanup(lambda: kiwoom.stop_websocket())
+    # 추가로 필요하면 disconnect도 호출
+    shutdown.register_cleanup(lambda: kiwoom.disconnect())
+
+    # 전략 스레드 정리: 플래그를 내려 스레드 루프가 종료되도록 한 뒤 조인
+    def _stop_strategy():
+        try:
+            # use the strategy's stop() to wake interruptible waits
+            try:
+                rsi_strategy.stop()
+            except Exception:
+                rsi_strategy.is_init_success = False
+            rsi_strategy.join(timeout=10)
+        except Exception:
+            pass
+
+    shutdown.register_cleanup(_stop_strategy)
+
+    # 시그널 핸들러 및 예외 훅 설정 (SIGINT, SIGTERM, uncaught exceptions)
+    shutdown.setup_signal_handlers()
+
     print("RSIStrategy started. Press Ctrl+C to stop.")
 
     try:
@@ -79,12 +104,14 @@ if __name__ == '__main__':
             # 시그널 처리를 위해 메인 스레드를 계속 실행 상태로 유지합니다
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Stopping strategy...")
-        # 전략 스레드에 정지 신호를 보내거나 필요 시 정리 작업을 수행합니다
-        # 현재는 웹소켓을 끊고 종료합니다.
-        kiwoom.disconnect()
-        print("Kiwoom disconnected.")
-        # 전략 스레드가 종료될 때까지 대기합니다
-        rsi_strategy.join()
-        print("Strategy thread stopped.")
+        print("Stopping strategy (KeyboardInterrupt)...")
+        try:
+            # trigger_shutdown will run registered cleanup funcs and send telegram
+            shutdown.trigger_shutdown("KeyboardInterrupt")
+        except Exception:
+            try:
+                kiwoom.stop_websocket()
+                kiwoom.disconnect()
+            except Exception:
+                pass
         sys.exit(0)

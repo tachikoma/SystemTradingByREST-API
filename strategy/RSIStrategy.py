@@ -177,6 +177,9 @@ class RSIStrategy(threading.Thread):
 
         logger.info("RSI 계산 방식: %s", self.RSI_METHOD)
 
+        # 스레드 중지/웨이크용 이벤트
+        self._stop_event = threading.Event()
+
         self.init_strategy()
 
     def init_strategy(self):
@@ -201,15 +204,15 @@ class RSIStrategy(threading.Thread):
             else:
                 self.price_data_ready = False
                 self._price_data_retry_count = 0
-            time.sleep(0.3)  # API 호출 간격 확보
+            self._stop_event.wait(0.3)  # API 호출 간격 확보 (interruptible)
 
             # Kiwoom > 주문정보 확인
             self.kiwoom.get_order()
-            time.sleep(0.3)  # API 호출 간격 확보
+            self._stop_event.wait(0.3)  # API 호출 간격 확보 (interruptible)
 
             # Kiwoom > 잔고 확인
             self.kiwoom.get_balance()
-            time.sleep(0.3)  # API 호출 간격 확보
+            self._stop_event.wait(0.3)  # API 호출 간격 확보 (interruptible)
 
             # Kiwoom > 예수금 확인
             self.deposit = self.kiwoom.get_deposit()
@@ -675,7 +678,7 @@ class RSIStrategy(threading.Thread):
                 from util.price_fetcher import fetch_price_data
                 logger.info("Price table missing for %s: fetching shallow (1 page)", display)
                 price_df = fetch_price_data(self.kiwoom, code)
-                time.sleep(0.3)  # API 호출 후 대기
+                self._stop_event.wait(0.3)  # API 호출 후 대기 (interruptible)
                 if price_df is None or len(price_df) == 0:
                     logger.warning("Price data fetch returned empty for %s", display)
                 else:
@@ -708,7 +711,7 @@ class RSIStrategy(threading.Thread):
                     from util.price_fetcher import fetch_price_data
                     logger.info("Updating price data for %s: last_date=%s, now=%s - shallow fetch=1", display, last_date[0] if last_date else None, now)
                     price_df = fetch_price_data(self.kiwoom, code)
-                    time.sleep(0.3)  # API 호출 후 대기
+                    self._stop_event.wait(0.3)  # API 호출 후 대기 (interruptible)
 
                     if price_df is None:
                         logger.warning("Price update failed for %s: no data returned", display)
@@ -755,7 +758,7 @@ class RSIStrategy(threading.Thread):
                     logger.warning("DB has table for %s but missing prev trading date %s; refreshing from API", display, prev_trading_str)
                     from util.price_fetcher import fetch_price_data
                     new_df = fetch_price_data(self.kiwoom, code)
-                    time.sleep(0.2)
+                    self._stop_event.wait(0.2)
                     if new_df is not None and len(new_df) > 0:
                         price_df = new_df
                         try:
@@ -896,7 +899,7 @@ class RSIStrategy(threading.Thread):
                             logger.error("가격 데이터 재시도 중 예외: %s", e)
 
                     logger.info("장시간이 아니므로 5분간 대기합니다.")
-                    time.sleep(5 * 60)
+                    self._stop_event.wait(5 * 60)
                     continue
 
                 # 주기적 동기화 체크 (웹소켓 실시간 데이터 보완용)
@@ -905,12 +908,12 @@ class RSIStrategy(threading.Thread):
                     logger.info("=== 주기적 동기화 시작 ===")
                     try:
                         # API 호출 사이에 대기시간을 두어 rate limit 방지
-                        time.sleep(0.4)
+                        self._stop_event.wait(0.4)
                         self.kiwoom.get_order()
-                        time.sleep(0.4)  # API 호출 간격 확보
+                        self._stop_event.wait(0.4)  # API 호출 간격 확보 (interruptible)
                         
                         self.kiwoom.get_balance()
-                        time.sleep(0.4)  # API 호출 간격 확보
+                        self._stop_event.wait(0.4)  # API 호출 간격 확보 (interruptible)
                         
                         self.update_deposit()
                         
@@ -927,7 +930,7 @@ class RSIStrategy(threading.Thread):
 
                 for idx, code in enumerate(self.universe.keys()):
                     logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
-                    time.sleep(0.3)  # 종목별 처리 간격
+                    self._stop_event.wait(0.3)  # 종목별 처리 간격 (interruptible)
 
                     # (1)접수한 주문이 있는지 확인
                     if code in self.kiwoom.order.keys():
@@ -962,6 +965,17 @@ class RSIStrategy(threading.Thread):
                         send_message("⚠️ 전략 실행 중 오류 (트레이스백 전송 실패, 상세 로그는 서버에서 확인하세요.)")
                     except Exception:
                         pass
+
+    def stop(self):
+        """외부에서 호출하여 스레드의 루프를 중지시키고 잠자고 있는 wait를 해제합니다."""
+        try:
+            self.is_init_success = False
+        except Exception:
+            pass
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
 
     @notify_on_exception(fallback_return=None)
     def update_universe_with_holdings(self):
@@ -1011,7 +1025,7 @@ class RSIStrategy(threading.Thread):
                         # 실패해도 universe에 추가하여 다음에 다시 시도
                         self.universe[code] = holding_info[code]
                     
-                    time.sleep(0.2)  # API 호출 간격
+                    self._stop_event.wait(0.2)  # API 호출 간격 (interruptible)
                     
                 except Exception as e:
                     logger.exception("청산 주문 중 오류 %s(%s): %s", code_name, code, e)
@@ -1210,7 +1224,7 @@ class RSIStrategy(threading.Thread):
                                 # API로 DB 보강 (얕은 조회)
                                 from util.price_fetcher import fetch_price_data
                                 price_df = fetch_price_data(self.kiwoom, code)
-                                time.sleep(0.3)
+                                self._stop_event.wait(0.3)
                                 if price_df is not None and len(price_df) > 0:
                                     insert_df_to_db(self.strategy_name, code, price_df)
                                 else:
@@ -1231,7 +1245,7 @@ class RSIStrategy(threading.Thread):
                         # API로 가격 데이터 조회 후 DB에 저장
                         from util.price_fetcher import fetch_price_data
                         price_df = fetch_price_data(self.kiwoom, code)
-                        time.sleep(0.3)
+                        self._stop_event.wait(0.3)
                         insert_df_to_db(self.strategy_name, code, price_df)
 
                     # 종목명 획득 시도

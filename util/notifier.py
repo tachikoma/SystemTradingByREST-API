@@ -1,7 +1,6 @@
 import requests
 import os
 import tempfile
-import html
 import functools
 import time
 import traceback
@@ -48,7 +47,10 @@ def notify_on_exception(fallback_return=None, rethrow=False, throttle_seconds: i
             async def async_wrapper(*args, **kwargs):
                 try:
                     return await func(*args, **kwargs)
-                except Exception:
+                except Exception as exc:
+                    # CancelledError is a normal cancellation signal in asyncio - don't notify
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
                     tb = traceback.format_exc()
                     key = f"{func.__module__}.{func.__name__}"
                     await _handle_exception_async(key, tb)
@@ -61,7 +63,10 @@ def notify_on_exception(fallback_return=None, rethrow=False, throttle_seconds: i
             def wrapper(*args, **kwargs):
                 try:
                     return func(*args, **kwargs)
-                except Exception:
+                except Exception as exc:
+                    # Respect asyncio cancellation as normal control flow
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
                     tb = traceback.format_exc()
                     key = f"{func.__module__}.{func.__name__}"
                     # run async handler synchronously (fire-and-forget)
