@@ -10,6 +10,15 @@ else
 fi
 export PYTHONPATH="$PROJECT_ROOT"
 
+# Load .env if present and export variables so Python watcher can see them
+if [ -f "$PROJECT_ROOT/.env" ]; then
+	# export all variables defined in .env
+	set -a
+	# shellcheck disable=SC1090
+	. "$PROJECT_ROOT/.env"
+	set +a
+fi
+
 # Ensure logs directory exists to avoid "Directory nonexistent" errors
 mkdir -p "$PROJECT_ROOT/logs"
 
