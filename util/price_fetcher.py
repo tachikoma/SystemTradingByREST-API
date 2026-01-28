@@ -1,8 +1,8 @@
 """
 가격 데이터 페칭 헬퍼
 - Kiwoom 클라이언트의 `get_price_data` 호출을 중앙에서 관리합니다.
-- 얕은 조회(shallow), 심층 조회(deep), 자동(auto) 모드를 제공하며
-  재시도 로직, 로깅, DB 저장 옵션을 지원합니다.
+- 얕은 조회만을 제공하며
+  DB 저장 옵션을 지원합니다.
 
 사용법 예시:
 from util.price_fetcher import fetch_price_data
