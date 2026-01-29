@@ -603,7 +603,8 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
         (~df.종목명.str.contains("리츠", na=False)) &    # 리츠 제외
         (~df.종목명.str.contains("캐피탈", na=False)) &    # 캐피탈 제외 (모의투자 제한 많음)
         (~df.종목명.str.contains("CD금리", na=False)) &    # CD금리 제외
-        (~df.종목명.str.contains("KOFR금리", na=False))    # KOFR금리 제외
+        (~df.종목명.str.contains("KOFR금리", na=False)) &    # KOFR금리 제외
+        (~df.종목명.str.contains("머니마켓", na=False))    # 머니마켓 제외
     ]
 
     # 우선주 필터링: 종목명에 단순히 '우'가 포함된다고 제거하면
