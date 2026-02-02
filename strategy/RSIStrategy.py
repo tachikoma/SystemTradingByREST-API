@@ -14,6 +14,8 @@ from util.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+import html
+
 import numpy as np
 import pandas as pd
 import json
