@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
 from util.logging_config import get_logger
+import os
 
 logger = get_logger(__name__)
 
@@ -68,8 +69,106 @@ class BacktestEngine:
         self.rsi_min_periods = rsi_min_periods if rsi_min_periods is not None else rsi_period
         
         # 거래 비용 비율 (RSIStrategy와 동일)
-        self.buy_fee_rate = 1 + commission_rate
-        self.sell_fee_rate = 1 + commission_rate + tax_rate
+        # Allow environment overrides for key parameters so .env can control backtest behavior
+        try:
+            v = os.getenv('RSI_SELL_THRESHOLD')
+            if v is not None:
+                self.rsi_sell_threshold = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('PROFIT_TARGET_PERCENT')
+            if v is not None:
+                self.profit_target_percent = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('RSI_BUY_THRESHOLD')
+            if v is not None:
+                self.rsi_buy_threshold = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('CASH_RESERVE_RATIO')
+            if v is not None:
+                tmp = float(v)
+                if tmp > 1:
+                    tmp = tmp / 100.0
+                self.cash_reserve_ratio = tmp
+        except Exception:
+            pass
+        try:
+            v = os.getenv('RSI_METHOD')
+            if v is not None:
+                vv = str(v).strip().lower()
+                if vv in ('cutler', 'wilder'):
+                    self.rsi_method = vv
+        except Exception:
+            pass
+
+        # Commission / tax environment overrides
+        # Prefer TRADING_FEE_PERCENT_{MOCK,REAL} and TRADING_TAX_PERCENT_{MOCK,REAL}
+        # Values in .env are expressed in percent (e.g., 0.35 meaning 0.35%), so divide by 100.
+        try:
+            mode = os.getenv('KIWOOM_MODE', os.getenv('KIW_MODE', 'mock')).strip().lower()
+        except Exception:
+            mode = 'mock'
+
+        def _parse_trading_percent(val):
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                # treat as percent value in config (0.35 => 0.35%)
+                return f / 100.0
+            except Exception:
+                return None
+
+        fee_val = None
+        tax_val = None
+        if mode == 'real':
+            fee_val = os.getenv('TRADING_FEE_PERCENT_REAL')
+            tax_val = os.getenv('TRADING_TAX_PERCENT_REAL')
+        else:
+            fee_val = os.getenv('TRADING_FEE_PERCENT_MOCK')
+            tax_val = os.getenv('TRADING_TAX_PERCENT_MOCK')
+
+        parsed_fee = _parse_trading_percent(fee_val)
+        parsed_tax = _parse_trading_percent(tax_val)
+
+        # fallback: allow COMMISSION_RATE / TAX_RATE env in either decimal or percent form
+        def _parse_rate_env(name):
+            val = os.getenv(name)
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                # if value looks like percent (>=0.01), assume percent; otherwise assume decimal
+                if f > 1:
+                    return f / 100.0
+                if f > 0.01:
+                    return f / 100.0
+                return f
+            except Exception:
+                return None
+
+        if parsed_fee is not None:
+            self.commission_rate = parsed_fee
+        else:
+            parsed = _parse_rate_env('COMMISSION_RATE')
+            if parsed is not None:
+                self.commission_rate = parsed
+
+        if parsed_tax is not None:
+            self.tax_rate = parsed_tax
+        else:
+            parsed = _parse_rate_env('TAX_RATE')
+            if parsed is not None:
+                self.tax_rate = parsed
+
+        # compute fee multipliers
+        self.buy_fee_rate = 1 + self.commission_rate
+        self.sell_fee_rate = 1 + self.commission_rate + self.tax_rate
         
         # 손절 설정
         self.enable_stop_loss = enable_stop_loss
