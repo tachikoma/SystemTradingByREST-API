@@ -107,35 +107,35 @@ def print_results(results: dict):
     Args:
         results: 백테스트 결과 딕셔너리
     """
-    print("\n" + "="*60)
-    print("백테스트 결과")
-    print("="*60)
-    print(f"초기 자본금:        {results['initial_capital']:>15,.0f} 원")
-    print(f"최종 자산:          {results['final_value']:>15,.0f} 원")
-    print(f"총 수익:            {results['final_value'] - results['initial_capital']:>15,.0f} 원")
-    print(f"총 수익률:          {results['total_return']:>15.2f} %")
-    print(f"연환산 수익률:      {results['annual_return']:>15.2f} %")
-    print(f"샤프 비율:          {results['sharpe_ratio']:>15.2f}")
-    print(f"MDD:                {results['mdd']:>15.2f} %")
-    print("-"*60)
-    print(f"총 거래 횟수:       {results['total_trades']:>15} 회")
-    print(f"매수:               {results['buy_trades']:>15} 회")
-    print(f"매도:               {results['sell_trades']:>15} 회")
-    print(f"승률:               {results['win_rate']:>15.2f} %")
-    print(f"평균 수익률:        {results['avg_profit_rate']:>15.2f} %")
-    print(f"총 실현 손익:       {results['total_profit']:>15,.0f} 원")
+    logger.info("\n" + "="*60)
+    logger.info("백테스트 결과")
+    logger.info("="*60)
+    logger.info(f"초기 자본금:        {results['initial_capital']:>15,.0f} 원")
+    logger.info(f"최종 자산:          {results['final_value']:>15,.0f} 원")
+    logger.info(f"총 수익:            {results['final_value'] - results['initial_capital']:>15,.0f} 원")
+    logger.info(f"총 수익률:          {results['total_return']:>15.2f} %")
+    logger.info(f"연환산 수익률:      {results['annual_return']:>15.2f} %")
+    logger.info(f"샤프 비율:          {results['sharpe_ratio']:>15.2f}")
+    logger.info(f"MDD:                {results['mdd']:>15.2f} %")
+    logger.info("-"*60)
+    logger.info(f"총 거래 횟수:       {results['total_trades']:>15} 회")
+    logger.info(f"매수:               {results['buy_trades']:>15} 회")
+    logger.info(f"매도:               {results['sell_trades']:>15} 회")
+    logger.info(f"승률:               {results['win_rate']:>15.2f} %")
+    logger.info(f"평균 수익률:        {results['avg_profit_rate']:>15.2f} %")
+    logger.info(f"총 실현 손익:       {results['total_profit']:>15,.0f} 원")
     
     # 손절 정보 출력
     if results.get('stop_loss_enabled', False):
-        print("-"*60)
-        print("손절 설정:")
-        print(f"  가격 손절:        {results.get('price_stop_loss_pct', 0):>15.1f} %")
-        print(f"  시간 손절:        {results.get('time_stop_loss_days', 0):>15} 일")
-        print(f"  손절 횟수:        {results.get('stop_loss_count', 0):>15} 회")
+        logger.info("-"*60)
+        logger.info("손절 설정:")
+        logger.info(f"  가격 손절:        {results.get('price_stop_loss_pct', 0):>15.1f} %")
+        logger.info(f"  시간 손절:        {results.get('time_stop_loss_days', 0):>15} 일")
+        logger.info(f"  손절 횟수:        {results.get('stop_loss_count', 0):>15} 회")
         stop_loss_ratio = (results.get('stop_loss_count', 0) / results['sell_trades'] * 100) if results['sell_trades'] > 0 else 0
-        print(f"  손절 비율:        {stop_loss_ratio:>15.2f} %")
+        logger.info(f"  손절 비율:        {stop_loss_ratio:>15.2f} %")
     
-    print("="*60 + "\n")
+    logger.info("="*60 + "\n")
 
 
 def plot_results(results: dict, save_path: str = None):

@@ -32,6 +32,7 @@ class BacktestEngine:
         ma_long: int = 60,  # 장기 이동평균
         ma_trend: int = 200,  # 장기 추세 이동평균 (필터용)
         rsi_sell_threshold: float = 80,  # RSI 매도 기준
+        profit_target_percent: float = 10.0,  # 매도 최소 수익률 기준 (%)
         rsi_buy_threshold: float = 3,  # RSI 매수 기준 (최적화: 5→3)
         price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화: -2→-5)
         cash_reserve_ratio: float = 0.2,  # 현금 보유 비율 (최적화: 20% 현금 유지)
@@ -52,6 +53,7 @@ class BacktestEngine:
         self.ma_long = ma_long
         self.ma_trend = ma_trend
         self.rsi_sell_threshold = rsi_sell_threshold
+        self.profit_target_percent = profit_target_percent
         self.rsi_buy_threshold = rsi_buy_threshold
         self.price_drop_threshold = price_drop_threshold
         self.cash_reserve_ratio = cash_reserve_ratio
@@ -285,11 +287,18 @@ class BacktestEngine:
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
             # RSIStrategy와 동일: math.ceil() 적용 (가격은 정수)
             breakeven_price = math.ceil(avg_purchase_price * self.sell_fee_rate)
+
+            # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
+            target_price = math.ceil(breakeven_price * (1 + (self.profit_target_percent / 100)))
             
             # 매도 조건 확인
-            # 1) RSI > 80 (과매수)
-            # 2) 현재가 > 손익분기점 (수수료+세금 고려해도 수익)
-            if rsi > self.rsi_sell_threshold and close > breakeven_price:
+            # 1) RSI > 80 (과매수) AND 손익분기점 초과
+            # 2) AND 목표가 도달 (손익분기점 기준 수익률)
+            if (
+                rsi > self.rsi_sell_threshold
+                and close > breakeven_price
+                and close >= target_price
+            ):
                 return True, close
             
             return False, None
