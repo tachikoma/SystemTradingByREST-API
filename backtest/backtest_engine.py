@@ -3,7 +3,10 @@ RSI 전략 백테스트 엔진
 
 RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를 수행합니다.
 
-주의: RSI 계산은 RSIStrategy와 동등하게 Wilder smoothing(EWMA, alpha=1/period, adjust=False)를 사용합니다.
+주의: 
+- RSI 계산 방식은 RSIStrategy와 동일하게 'cutler' (SMA) 또는 'wilder' (EWMA) 선택 가능
+- 거래 비용 계산은 RSIStrategy와 동일: BUY_FEE_RATE, SELL_FEE_RATE 분리 적용
+- 현금 보유 비율(CASH_RESERVE_RATIO) 적용: 투자 가능 금액의 20%를 현금으로 유지
 """
 
 import pandas as pd
@@ -31,8 +34,11 @@ class BacktestEngine:
         rsi_sell_threshold: float = 80,  # RSI 매도 기준
         rsi_buy_threshold: float = 3,  # RSI 매수 기준 (최적화: 5→3)
         price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화: -2→-5)
+        cash_reserve_ratio: float = 0.2,  # 현금 보유 비율 (최적화: 20% 현금 유지)
         commission_rate: float = 0.0035,  # 모의 투자 거래 수수료율 (편도 0.35%)
         tax_rate: float = 0.0015,  # 거래세 (매도 시만 0.15%)
+        rsi_method: str = 'cutler',  # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (EWMA)
+        rsi_min_periods: int = None,  # RSI 계산 최소 기간 (None이면 rsi_period 사용)
         # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
         enable_stop_loss: bool = False,  # 손절 비활성화 (기본값)
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%) - 극단적 상황용
@@ -48,8 +54,20 @@ class BacktestEngine:
         self.rsi_sell_threshold = rsi_sell_threshold
         self.rsi_buy_threshold = rsi_buy_threshold
         self.price_drop_threshold = price_drop_threshold
+        self.cash_reserve_ratio = cash_reserve_ratio
         self.commission_rate = commission_rate
         self.tax_rate = tax_rate
+        
+        # RSI 계산 방식 (RSIStrategy와 동일)
+        self.rsi_method = rsi_method.lower() if isinstance(rsi_method, str) else 'cutler'
+        if self.rsi_method not in ('cutler', 'wilder'):
+            logger.warning(f"Invalid RSI method '{rsi_method}', using 'cutler'")
+            self.rsi_method = 'cutler'
+        self.rsi_min_periods = rsi_min_periods if rsi_min_periods is not None else rsi_period
+        
+        # 거래 비용 비율 (RSIStrategy와 동일)
+        self.buy_fee_rate = 1 + commission_rate
+        self.sell_fee_rate = 1 + commission_rate + tax_rate
         
         # 손절 설정
         self.enable_stop_loss = enable_stop_loss
@@ -67,7 +85,7 @@ class BacktestEngine:
         self.stop_loss_count = 0  # 손절 횟수
         
     def calculate_rsi(self, prices: pd.Series, period: int = None) -> pd.Series:
-        """RSI 계산
+        """RSI 계산 (RSIStrategy와 동일한 로직)
         
         Args:
             prices: 종가 시계열
@@ -79,30 +97,61 @@ class BacktestEngine:
         if period is None:
             period = self.rsi_period
 
-        # Wilder smoothing (EWMA with alpha=1/period, adjust=False)
+        # gain/loss 계산
         delta = prices.diff(1)
-        gain = delta.clip(lower=0)
-        loss = -delta.clip(upper=0)
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta).where(delta < 0, 0.0)
+        
+        # 첫 번째 값은 NaN으로 설정
+        if len(gain) > 0:
+            gain.iloc[0] = np.nan
+            loss.iloc[0] = np.nan
+        
+        min_periods = self.rsi_min_periods
+        if min_periods < 1:
+            min_periods = 1
+        
+        # RSI 계산 방식 선택
+        if self.rsi_method == 'cutler':
+            # Cutler's RSI (SMA 기반)
+            if min_periods > period:
+                min_periods = period
+            avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
+            avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
+            
+            # RS 계산 (0으로 나누기 방지)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rs = avg_gain / avg_loss
+                rsi = 100.0 - (100.0 / (1.0 + rs))
+            
+            # 엣지 케이스 처리
+            rsi = rsi.astype(float)
+            rsi.loc[avg_loss == 0.0] = 100.0
+            both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
+            rsi.loc[both_zero_mask] = 50.0
+        else:
+            # Wilder's RSI (EWMA 기반)
+            df_len = len(prices)
+            if min_periods > df_len:
+                min_periods = max(1, df_len)
+            
+            avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
+            avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
+            
+            # RS 계산
+            rs = avg_gain / avg_loss
+            rsi = 100.0 - (100.0 / (1.0 + rs))
+            
+            # 엣지 케이스 처리 (np.isclose로 부동소수점 오차 허용)
+            both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
+            loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
+            gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
+            
+            rsi = rsi.astype(float)
+            rsi.loc[both_zero] = 50.0
+            rsi.loc[loss_zero] = 100.0
+            rsi.loc[gain_zero] = 0.0
 
-        # Use Wilder's smoothing (exponential with alpha=1/period)
-        avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-        avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-
-        # Relative strength
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-
-        # Edge-case handling to match RSIStrategy behavior
-        both_zero = (avg_gain == 0) & (avg_loss == 0)
-        loss_zero = (avg_loss == 0) & (~both_zero)
-        gain_zero = (avg_gain == 0) & (~both_zero)
-
-        rsi = rsi.copy()
-        rsi[both_zero] = 50.0
-        rsi[loss_zero] = 100.0
-        rsi[gain_zero] = 0.0
-
-        # Note: keep NaN for initial periods (min_periods behavior) to match RSIStrategy
         return rsi
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -234,11 +283,8 @@ class BacktestEngine:
                 return False, None
             
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
-            # 실제 수령액 = 매도금액 / (1 + commission_rate + tax_rate)
-            # 손익분기점 = 매입가 * (1 + commission_rate + tax_rate)
-            # RSIStrategy와 동일하게 math.ceil() 적용 (가격은 정수)
-            sell_fee_rate = 1 + self.commission_rate + self.tax_rate
-            breakeven_price = math.ceil(avg_purchase_price * sell_fee_rate)
+            # RSIStrategy와 동일: math.ceil() 적용 (가격은 정수)
+            breakeven_price = math.ceil(avg_purchase_price * self.sell_fee_rate)
             
             # 매도 조건 확인
             # 1) RSI > 80 (과매수)
@@ -303,7 +349,7 @@ class BacktestEngine:
             return False, None, ""
     
     def execute_buy(self, code: str, price: float, date: str, budget: float):
-        """매수 주문 실행
+        """매수 주문 실행 (RSIStrategy와 동일한 로직)
         
         Args:
             code: 종목 코드
@@ -319,18 +365,16 @@ class BacktestEngine:
         
         # 수수료 포함 실제 매수 금액 (RSIStrategy와 동일하게 math.floor 사용)
         buy_amount = quantity * price
-        commission = buy_amount * self.commission_rate
-        total_cost = math.floor(buy_amount * (1 + self.commission_rate))
+        total_cost = math.floor(buy_amount * self.buy_fee_rate)
         
         # 예산 체크
         if total_cost > self.cash:
             # 예산에 맞게 수량 재조정
-            quantity = int((self.cash / (1 + self.commission_rate)) / price)
+            quantity = int((self.cash / self.buy_fee_rate) / price)
             if quantity < 1:
                 return
             buy_amount = quantity * price
-            commission = buy_amount * self.commission_rate
-            total_cost = buy_amount + commission
+            total_cost = math.floor(buy_amount * self.buy_fee_rate)
         
         # 현금 차감
         self.cash -= total_cost
@@ -358,6 +402,7 @@ class BacktestEngine:
             }
         
         # 거래 기록
+        commission = total_cost - buy_amount
         self.trades.append({
             'date': date,
             'code': code,
@@ -373,7 +418,7 @@ class BacktestEngine:
         logger.info(f"[{date}] 매수: {display}, 가격: {price:,.0f}, 수량: {quantity}, 총액: {total_cost:,.0f}")
     
     def execute_sell(self, code: str, price: float, date: str):
-        """매도 주문 실행
+        """매도 주문 실행 (RSIStrategy와 동일한 로직)
         
         Args:
             code: 종목 코드
@@ -386,11 +431,9 @@ class BacktestEngine:
         quantity = self.holdings[code]['quantity']
         avg_price = self.holdings[code]['avg_price']
         
-        # 수수료 + 거래세 포함 실제 매도 금액
+        # 수수료 + 거래세 포함 실제 매도 금액 (RSIStrategy와 동일)
         sell_amount = quantity * price
-        commission = sell_amount * self.commission_rate
-        tax = sell_amount * self.tax_rate
-        net_proceeds = sell_amount - commission - tax
+        net_proceeds = math.floor(sell_amount / self.sell_fee_rate)
         
         # 현금 증가
         self.cash += net_proceeds
@@ -403,6 +446,7 @@ class BacktestEngine:
         del self.holdings[code]
         
         # 거래 기록
+        total_fee = sell_amount - net_proceeds
         self.trades.append({
             'date': date,
             'code': code,
@@ -410,8 +454,8 @@ class BacktestEngine:
             'price': price,
             'quantity': quantity,
             'amount': sell_amount,
-            'commission': commission,
-            'tax': tax,
+            'commission': total_fee * (self.commission_rate / (self.commission_rate + self.tax_rate)),
+            'tax': total_fee * (self.tax_rate / (self.commission_rate + self.tax_rate)),
             'net_proceeds': net_proceeds,
             'avg_buy_price': avg_price,
             'profit': profit,
@@ -549,10 +593,12 @@ class BacktestEngine:
                 # 매수 가능한 종목 수만큼만 매수
                 buy_candidates = buy_candidates[:available_slots]
                 
-                # 매수 예산 배분 (RSIStrategy와 동일: 남은 슬롯 기준)
-                # 남은 슬롯으로 현금을 나누어 종목당 예산 계산
+                # 매수 예산 배분 (RSIStrategy와 동일: 현금 보유 비율 적용)
+                # 전체 예수금의 (1 - CASH_RESERVE_RATIO)만 투자에 사용
+                # 남은 슬롯으로 나누어 종목당 예산 계산
                 if buy_candidates:
-                    budget_per_stock = self.cash / available_slots
+                    investable_cash = self.cash * (1 - self.cash_reserve_ratio)
+                    budget_per_stock = investable_cash / available_slots
                     
                     for code, price in buy_candidates:
                         self.execute_buy(code, price, date, budget_per_stock)

@@ -279,10 +279,18 @@ def main():
     # 2) 백테스트 엔진 생성
     # 최적 전략: 현금 20% 비중 + 진입 조건 강화 (RSI<3, 하락>-5%)
     # 기대 성과: 연수익률 25.53%, MDD -49.35%, 위험조정수익 0.5175
+    # RSI_METHOD는 기본값 'cutler' 사용 (환경변수로 변경 가능)
     engine = BacktestEngine(
-        initial_capital=10_000_000 * 0.8,  # 현금 20% 유지 (800만원 투자)
+        initial_capital=10_000_000,  # 초기 자본금 1천만원
         max_holdings=10,
-        # rsi_buy_threshold=3, price_drop_threshold=-5.0은 기본값으로 적용됨
+        cash_reserve_ratio=0.2,  # 현금 20% 보유 (RSIStrategy와 동일)
+        rsi_buy_threshold=3,  # RSI 매수 기준 (최적화된 값)
+        price_drop_threshold=-5.0,  # 가격 하락 기준 (최적화된 값)
+        rsi_method='cutler',  # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (EWMA)
+        rsi_min_periods=2,  # RSI 최소 기간 (RSI_PERIOD와 동일)
+        commission_rate=0.0035,  # 모의투자 수수료 0.35%
+        tax_rate=0.0015,  # 거래세 0.15% (매도 시)
+        enable_stop_loss=False,  # 손절 비활성화 (백테스트 최적화 결과)
     )
     
     # 3) 백테스트 실행 - 기간 설정
