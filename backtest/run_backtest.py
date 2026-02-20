@@ -115,6 +115,7 @@ def print_results(results: dict):
     logger.info(f"총 수익:            {results['final_value'] - results['initial_capital']:>15,.0f} 원")
     logger.info(f"총 수익률:          {results['total_return']:>15.2f} %")
     logger.info(f"연환산 수익률:      {results['annual_return']:>15.2f} %")
+    logger.info(f"매도 익절 기준:      {results['profit_target_percent']:>15.2f} %")
     logger.info(f"샤프 비율:          {results['sharpe_ratio']:>15.2f}")
     logger.info(f"MDD:                {results['mdd']:>15.2f} %")
     logger.info("-"*60)
@@ -155,8 +156,12 @@ def plot_results(results: dict, save_path: str = None):
     ax1 = axes[0]
     ax1.plot(df['date_dt'], df['portfolio_value'], linewidth=2, label='포트폴리오 가치')
     ax1.axhline(y=results['initial_capital'], color='red', linestyle='--', alpha=0.5, label='초기 자본')
+
     ax1.set_ylabel('포트폴리오 가치 (원)')
-    ax1.set_title(f'총 수익률: {results["total_return"]:.2f}% | 연환산 수익률: {results["annual_return"]:.2f}%')
+    ax1.set_title(
+        f'총 수익률: {results["total_return"]:.2f}% | 연환산 수익률: {results["annual_return"]:.2f}% '
+        f'| 매도 익절 기준: {results["profit_target_percent"]:.2f}%'
+    )
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x/1e6:.1f}M'))
@@ -316,6 +321,7 @@ def main():
         start_date=start_date,
         end_date=end_date
     )
+    results['profit_target_percent'] = engine.profit_target_percent
     
     # 4) 결과 출력
     print_results(results)
