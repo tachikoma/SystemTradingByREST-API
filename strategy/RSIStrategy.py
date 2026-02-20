@@ -1015,9 +1015,28 @@ class RSIStrategy(threading.Thread):
                         # 매도 주문 성공 시 일단 universe에 임시로 추가 (체결 완료될 때까지 유지)
                         self.universe[code] = holding_info[code]
                         logger.info("✅ 청산 주문 접수 완료: %s(%s)", code_name, code)
+
+                        # 시장가 주문이므로 실시간 호가/현재가를 이용해 예상값 계산
+                        rt_info = self.kiwoom.universe_realtime_transaction_info.get(code, {})
+                        estimated_price = rt_info.get('(최우선)매도호가') or rt_info.get('현재가') or 0
+                        sell_amount = quantity * estimated_price
+                        estimated_proceeds = math.floor(sell_amount / self.SELL_FEE_RATE) if estimated_price > 0 else 0
+                        purchase_price = self.kiwoom.balance[code].get('매입가', 0)
+                        purchase_amount = purchase_price * quantity
+                        estimated_profit = estimated_proceeds - purchase_amount
+                        estimated_profit_rate = (estimated_profit / purchase_amount * 100) if purchase_amount > 0 else 0.0
+
                         name = self.resolve_stock_name(code)
                         display = f"{name}({code})" if name else code
-                        send_message(f"✅ 청산 주문 접수\n종목: {display}\n수량: {quantity}주\n주문번호: {order_result.get('order_no', 'N/A')}")
+                        send_message(
+                            "✅ 청산 주문 접수\n"
+                            f"종목: {display}\n"
+                            f"수량: {quantity}주\n"
+                            f"가격(추정): {estimated_price:,}원\n"
+                            f"예상수령(추정): {estimated_proceeds:,}원\n"
+                            f"예상수익률(추정): {estimated_profit_rate:.2f}%\n"
+                            f"주문번호: {order_result.get('order_no', 'N/A')}"
+                        )
                     else:
                         error_msg = order_result.get('error_message', 'Unknown error')
                         logger.error("❌ 청산 주문 실패: %s(%s) - %s", code_name, code, error_msg)
@@ -1556,14 +1575,18 @@ class RSIStrategy(threading.Thread):
                 sell_amount = quantity * ask
                 estimated_proceeds = math.floor(sell_amount / self.SELL_FEE_RATE)  # 실제 수령액
                 total_fee = sell_amount - estimated_proceeds  # 총 비용
+                purchase_price = self.kiwoom.balance[code].get('매입가', 0)
+                purchase_amount = purchase_price * quantity
+                estimated_profit = estimated_proceeds - purchase_amount
+                estimated_profit_rate = (estimated_profit / purchase_amount * 100) if purchase_amount > 0 else 0.0
                 
                 # send_order()에서 이미 self.kiwoom.order[code]를 설정함
                 # 웹소켓 응답이 오면 자동으로 업데이트되고, 체결 완료 시 자동 삭제됨
                 
                 name = self.resolve_stock_name(code)
                 display = f"{name}({code})" if name else code
-                message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)".format(
-                    display, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee)
+                message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)\n예상수익률: {:.2f}%".format(
+                    display, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee, estimated_profit_rate)
                 logger.info(message)
                 send_message(message)
             else:
@@ -1706,6 +1729,7 @@ class RSIStrategy(threading.Thread):
             # (8)예수금 충분한지 미리 체크 (매수 수수료 포함)
             amount = quantity * bid
             estimated_cost = math.floor(amount * self.BUY_FEE_RATE)
+            total_cost = estimated_cost - amount
             
             if self.deposit < estimated_cost:
                 logger.warning("예수금 부족: deposit=%d, estimated_cost=%d", self.deposit, estimated_cost)
@@ -1724,8 +1748,8 @@ class RSIStrategy(threading.Thread):
                 # 텔레그램 메시지 전송 (종목명 우선 표시)
                 name = self.resolve_stock_name(code)
                 display = f"{name}({code})" if name else code
-                message = "📈 <b>매수 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예수금: {:,}원".format(
-                    display, order_result.get('order_no', 'N/A'), quantity, bid, self.deposit)
+                message = "📈 <b>매수 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상비용(수수료+세금): {:,}원\n예수금: {:,}원".format(
+                    display, order_result.get('order_no', 'N/A'), quantity, bid, total_cost, self.deposit)
                 logger.info(message)
                 send_message(message)
             else:
