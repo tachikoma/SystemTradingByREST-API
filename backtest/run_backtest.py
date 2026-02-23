@@ -284,12 +284,13 @@ def main():
         initial_capital=10_000_000,  # 초기 자본금 1천만원
         max_holdings=10,
         cash_reserve_ratio=0.2,  # 현금 20% 보유 (RSIStrategy와 동일)
+        rsi_sell_threshold=85,  # RSI 매도 기준 (최적화된 값)
         rsi_buy_threshold=3,  # RSI 매수 기준 (최적화된 값)
         price_drop_threshold=-5.0,  # 가격 하락 기준 (최적화된 값)
-        rsi_method='cutler',  # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (EWMA)
+        rsi_method='wilder',  # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (EWMA)
         rsi_min_periods=2,  # RSI 최소 기간 (RSI_PERIOD와 동일)
-        commission_rate=0.0035,  # 모의투자 수수료 0.35%
-        tax_rate=0.0015,  # 거래세 0.15% (매도 시)
+        commission_rate=0.00015,  # 수수료 0.015%
+        tax_rate=0.0020,  # 거래세 0.20% (매도 시)
         enable_stop_loss=False,  # 손절 비활성화 (백테스트 최적화 결과)
     )
     
