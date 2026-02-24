@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
 from util.logging_config import get_logger
+import os
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,7 @@ class BacktestEngine:
         ma_long: int = 60,  # 장기 이동평균
         ma_trend: int = 200,  # 장기 추세 이동평균 (필터용)
         rsi_sell_threshold: float = 80,  # RSI 매도 기준
+        profit_target_percent: float = 10.0,  # 매도 최소 수익률 기준 (%)
         rsi_buy_threshold: float = 3,  # RSI 매수 기준 (최적화: 5→3)
         price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화: -2→-5)
         cash_reserve_ratio: float = 0.2,  # 현금 보유 비율 (최적화: 20% 현금 유지)
@@ -52,6 +54,7 @@ class BacktestEngine:
         self.ma_long = ma_long
         self.ma_trend = ma_trend
         self.rsi_sell_threshold = rsi_sell_threshold
+        self.profit_target_percent = profit_target_percent
         self.rsi_buy_threshold = rsi_buy_threshold
         self.price_drop_threshold = price_drop_threshold
         self.cash_reserve_ratio = cash_reserve_ratio
@@ -66,8 +69,106 @@ class BacktestEngine:
         self.rsi_min_periods = rsi_min_periods if rsi_min_periods is not None else rsi_period
         
         # 거래 비용 비율 (RSIStrategy와 동일)
-        self.buy_fee_rate = 1 + commission_rate
-        self.sell_fee_rate = 1 + commission_rate + tax_rate
+        # Allow environment overrides for key parameters so .env can control backtest behavior
+        try:
+            v = os.getenv('RSI_SELL_THRESHOLD')
+            if v is not None:
+                self.rsi_sell_threshold = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('PROFIT_TARGET_PERCENT')
+            if v is not None:
+                self.profit_target_percent = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('RSI_BUY_THRESHOLD')
+            if v is not None:
+                self.rsi_buy_threshold = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('CASH_RESERVE_RATIO')
+            if v is not None:
+                tmp = float(v)
+                if tmp > 1:
+                    tmp = tmp / 100.0
+                self.cash_reserve_ratio = tmp
+        except Exception:
+            pass
+        try:
+            v = os.getenv('RSI_METHOD')
+            if v is not None:
+                vv = str(v).strip().lower()
+                if vv in ('cutler', 'wilder'):
+                    self.rsi_method = vv
+        except Exception:
+            pass
+
+        # Commission / tax environment overrides
+        # Prefer TRADING_FEE_PERCENT_{MOCK,REAL} and TRADING_TAX_PERCENT_{MOCK,REAL}
+        # Values in .env are expressed in percent (e.g., 0.35 meaning 0.35%), so divide by 100.
+        try:
+            mode = os.getenv('KIWOOM_MODE', os.getenv('KIW_MODE', 'mock')).strip().lower()
+        except Exception:
+            mode = 'mock'
+
+        def _parse_trading_percent(val):
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                # treat as percent value in config (0.35 => 0.35%)
+                return f / 100.0
+            except Exception:
+                return None
+
+        fee_val = None
+        tax_val = None
+        if mode == 'real':
+            fee_val = os.getenv('TRADING_FEE_PERCENT_REAL')
+            tax_val = os.getenv('TRADING_TAX_PERCENT_REAL')
+        else:
+            fee_val = os.getenv('TRADING_FEE_PERCENT_MOCK')
+            tax_val = os.getenv('TRADING_TAX_PERCENT_MOCK')
+
+        parsed_fee = _parse_trading_percent(fee_val)
+        parsed_tax = _parse_trading_percent(tax_val)
+
+        # fallback: allow COMMISSION_RATE / TAX_RATE env in either decimal or percent form
+        def _parse_rate_env(name):
+            val = os.getenv(name)
+            if val is None:
+                return None
+            try:
+                f = float(val)
+                # if value looks like percent (>=0.01), assume percent; otherwise assume decimal
+                if f > 1:
+                    return f / 100.0
+                if f > 0.01:
+                    return f / 100.0
+                return f
+            except Exception:
+                return None
+
+        if parsed_fee is not None:
+            self.commission_rate = parsed_fee
+        else:
+            parsed = _parse_rate_env('COMMISSION_RATE')
+            if parsed is not None:
+                self.commission_rate = parsed
+
+        if parsed_tax is not None:
+            self.tax_rate = parsed_tax
+        else:
+            parsed = _parse_rate_env('TAX_RATE')
+            if parsed is not None:
+                self.tax_rate = parsed
+
+        # compute fee multipliers
+        self.buy_fee_rate = 1 + self.commission_rate
+        self.sell_fee_rate = 1 + self.commission_rate + self.tax_rate
         
         # 손절 설정
         self.enable_stop_loss = enable_stop_loss
@@ -285,11 +386,18 @@ class BacktestEngine:
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
             # RSIStrategy와 동일: math.ceil() 적용 (가격은 정수)
             breakeven_price = math.ceil(avg_purchase_price * self.sell_fee_rate)
+
+            # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
+            target_price = math.ceil(breakeven_price * (1 + (self.profit_target_percent / 100)))
             
             # 매도 조건 확인
-            # 1) RSI > 80 (과매수)
-            # 2) 현재가 > 손익분기점 (수수료+세금 고려해도 수익)
-            if rsi > self.rsi_sell_threshold and close > breakeven_price:
+            # 1) RSI > 80 (과매수) AND 손익분기점 초과
+            # 2) AND 목표가 도달 (손익분기점 기준 수익률)
+            if (
+                rsi > self.rsi_sell_threshold
+                and close > breakeven_price
+                and close >= target_price
+            ):
                 return True, close
             
             return False, None

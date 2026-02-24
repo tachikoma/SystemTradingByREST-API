@@ -74,6 +74,7 @@ class RSIStrategy(threading.Thread):
     MA_LONG = 60  # 장기 이동평균
     MA_TREND = 200  # 장기 추세 이동평균 (필터용)
     RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
+    PROFIT_TARGET_PERCENT = 10.0  # 매도 최소 수익률 기준 (%)
     RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
@@ -178,6 +179,38 @@ class RSIStrategy(threading.Thread):
             pass
 
         logger.info("RSI 계산 방식: %s", self.RSI_METHOD)
+
+        # 환경변수로 RSI 및 전략 파라미터 덮어쓰기 (있을 경우)
+        try:
+            v = os.getenv('RSI_SELL_THRESHOLD')
+            if v is not None:
+                self.RSI_SELL_THRESHOLD = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('PROFIT_TARGET_PERCENT')
+            if v is not None:
+                self.PROFIT_TARGET_PERCENT = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('RSI_BUY_THRESHOLD')
+            if v is not None:
+                self.RSI_BUY_THRESHOLD = float(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('CASH_RESERVE_RATIO')
+            if v is not None:
+                tmp = float(v)
+                if tmp > 1:
+                    tmp = tmp / 100.0
+                self.CASH_RESERVE_RATIO = tmp
+        except Exception:
+            pass
+
+        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s",
+                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO)
 
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
@@ -1525,11 +1558,27 @@ class RSIStrategy(threading.Thread):
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
             breakeven_price = math.ceil(purchase_price * self.SELL_FEE_RATE)
 
-            # 로그: RSI 및 조건 여부 
-            condition_met = (rsi > self.RSI_SELL_THRESHOLD and close > breakeven_price)
-            logger.info("check_sell_signal %s RSI=%.2f close=%d breakeven=%d condition=%s", display, rsi, close, breakeven_price, condition_met)
+            # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
+            target_price = math.ceil(breakeven_price * (1 + (self.PROFIT_TARGET_PERCENT / 100)))
+
+            # 로그: RSI 및 조건 여부
+            condition_met = (
+                rsi > self.RSI_SELL_THRESHOLD
+                and close > breakeven_price
+                and close >= target_price
+            )
+            logger.info(
+                "check_sell_signal %s RSI=%.2f close=%d breakeven=%d target_price=%d target_pct=%.2f condition=%s",
+                display,
+                rsi,
+                close,
+                breakeven_price,
+                target_price,
+                self.PROFIT_TARGET_PERCENT,
+                condition_met,
+            )
             
-            # 매도 조건: RSI 과열 + 수수료/세금 고려해도 수익
+            # 매도 조건: RSI 과열+손익분기점 돌파 AND 목표가(손익분기점 기준) 도달
             if condition_met:
                 estimated_profit_rate = ((close - breakeven_price) / purchase_price) * 100
                 logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d, breakeven=%d, 예상수익률=%.2f%%)", 
