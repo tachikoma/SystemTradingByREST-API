@@ -22,4 +22,7 @@ fi
 # Ensure logs directory exists to avoid "Directory nonexistent" errors
 mkdir -p "$PROJECT_ROOT/logs"
 
+# Run from project root so Poetry can always find pyproject.toml
+cd "$PROJECT_ROOT" || exit 1
+
 nohup poetry run python "$PROJECT_ROOT/scripts/watchdog.py" >> "$PROJECT_ROOT/logs/kiwoom_nohup.log" 2>&1 &
