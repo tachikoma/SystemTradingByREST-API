@@ -1,257 +1,60 @@
 # System Trading Copilot Instructions
 
-## 프로젝트 개요
-키움증권 REST API 기반 한국 주식 자동매매 시스템. RSI 전략으로 KOSPI/KOSDAQ 종목을 매매하며, 9.7년(2016-2025) 백테스트 검증된 최적화 전략을 실전 운영 중.
+## 목적
+이 문서는 Copilot이 이 저장소에서 일관된 방식으로 작업하도록 하는 최소 운영 지침이다.
 
-## 핵심 아키텍처
+## 역할과 환경
+- 환경: Visual Studio Code + GitHub Copilot
+- 역할: 유지보수성과 일관성을 우선하는 시니어 개발 보조
 
-### 주요 컴포넌트 (3-Layer Structure)
-1. **API Layer** (`api/Kiwoom.py`): REST API + WebSocket 통신
-   - 토큰 갱신, rate limit 처리(retry with exponential backoff)
-   - 실시간 시세 수신 (WebSocket, 비동기 스레드)
-   - Mock/Real 모드 지원 (`self.mock` flag)
+## 언어 규칙 (Strict)
+- 채팅, 설명, 문서화는 항상 한국어로 작성한다.
+- 코드 주석과 로직 설명 주석은 한국어로 작성한다.
+- 기술 용어가 모호하면 한국어 뒤에 영어 용어를 괄호로 병기한다.
+  - 예: 의존성 주입(Dependency Injection)
 
-2. **Strategy Layer** (`strategy/RSIStrategy.py`): Threading 기반 매매 로직
-   - `threading.Thread` 상속, 백그라운드 실행
-   - 5분마다 동기화 (`SYNC_INTERVAL = 300`)
-   - 30일마다 유니버스 재구성 (`UNIVERSE_UPDATE_DAYS = 30`)
-   - 매일 15:30~16:00 장 종료 후 데이터 자동 캐싱
+## Git/문서화 규칙
+- 커밋 메시지는 한국어 Conventional Commits 형식으로 작성한다.
+  - 예: `feat: 로그인 기능 구현`
+- README, API 문서, 가이드 문서는 한국어로 작성한다.
+- 커밋 작업 중 Git 사용자 정보(`user.name`, `user.email`)를 변경하지 않는다.
+- 사용자 요청 범위를 벗어난 파일 변경은 커밋에 포함하지 않는다.
 
-3. **Utility Layer** (`util/`): 공통 인프라
-   - `db_helper.py`: SQLite 캐시 (유니버스, 가격 데이터)
-   - `time_helper.py`: 한국 시간대 처리 (`ZoneInfo("Asia/Seoul")`)
-   - `make_up_universe.py`: 유니버스 생성 (키움 API 우선, 네이버 크롤링 fallback)
+## 코드 스타일/품질
+- 변수, 함수, 클래스 이름은 의미 있는 영어 이름을 사용한다.
+- Clean Code 원칙(단일 책임, 낮은 결합도, 높은 응집도, 명확한 네이밍)을 따른다.
+- 모델 종류와 무관하게 논리적 일관성을 유지한다.
 
-### 데이터 흐름
-```
-main.py → Kiwoom(API) ← RSIStrategy(Thread)
-                ↓
-         WebSocket → 실시간 시세
-                ↓
-         SQLite(캐시) ← make_up_universe(크롤러)
-```
+## 프로젝트 핵심 불변 규칙
+- 아래 전략 파라미터는 사전 승인 없이 변경하지 않는다.
+  - `RSI_BUY_THRESHOLD = 3`
+  - `PRICE_DROP_THRESHOLD = -5.0`
+  - `CASH_RESERVE_RATIO = 0.2`
+  - `enable_stop_loss=False`
 
-## 최적화된 전략 파라미터 (2026-01-01 적용)
-**절대 변경하지 말 것** - 9.7년 백테스트로 검증된 최적값:
-- `RSI_BUY_THRESHOLD = 3` (5→3, 더 강한 과매도에서 진입)
-- `PRICE_DROP_THRESHOLD = -5.0` (-2→-5, 더 큰 하락 후 진입)
-- `CASH_RESERVE_RATIO = 0.2` (20% 현금 유지)
-- **손절 비활성화** (`enable_stop_loss=False`) - 백테스트상 손절 없음이 최고 성능
+## 시간 처리 규칙
+- 시간은 반드시 `util.time_helper.get_korea_time()`을 사용한다.
+- `datetime.now()` 직접 사용을 금지한다.
+- 거래 가능 시간 판단은 `check_transaction_open()`으로 처리한다.
+- 휴장일 판단은 `is_market_closed_day()`와 휴장일 상수를 사용한다.
 
-성과: 연수익률 25.53%, MDD -49.35%, Sharpe 0.98
-문서: `backtest/MDD_REDUCTION_FINAL_RECOMMENDATION.md`
+## 애플리케이션 초기화 순서
+아래 순서를 반드시 지킨다.
+1. `.env` 로드
+2. 로깅 초기화
+3. 나머지 모듈 import
 
-## 프로젝트별 관례
+## API 호출 규칙
+- 연속 호출 시 rate limit을 고려해 대기한다.
+- 모의투자/실전투자 간 대기 간격 차이를 반영한다.
+- `_request()`의 retry + exponential backoff 동작을 우회하지 않는다.
 
-### 시간 처리
-**항상** `util.time_helper.get_korea_time()` 사용:
-```python
-from util.time_helper import get_korea_time, check_transaction_open, is_market_closed_day
-now = get_korea_time()  # timezone-aware KST
-if check_transaction_open():  # 장 중(09:00-15:20) 체크 + 휴장일 자동 제외
-if is_market_closed_day():  # 주말/공휴일 체크
-```
-❌ `datetime.now()` 직접 사용 금지 (서버 시간대 의존)
+## 데이터/보안 규칙
+- `.env` 및 비밀키는 절대 커밋하지 않는다.
+- DB 작업은 기존 헬퍼 패턴과 트랜잭션 컨텍스트를 우선 사용한다.
 
-**한국 증시 시간대 구조**:
-- `09:00-15:20`: 정규시장 매매 가능 시간
-- `15:20-15:30`: 장 종료 동시호가 (신규 주문 불가)
-- `15:30`: 공식 장 마감 (종가 확정)
-- `15:30-16:00`: 데이터 캐싱 시간대
-
-**휴장일 처리 (2026-01-05 적용)**:
-- `check_transaction_open()`: 주말/공휴일 자동 필터링 (휴장일은 항상 False 반환)
-- `MARKET_HOLIDAYS_2026`: 2026년 한국 주식시장 휴장일 리스트 (`util/time_helper.py`)
-- **매년 초 업데이트 필요** - 한국거래소 영업일 달력 참고
-- 임시 휴장일 발생 시 리스트에 추가 후 재배포
-
-### 환경변수 로딩 순서
-`main.py`의 초기화 순서 **반드시 준수**:
-```python
-# 1. .env 로드 (최우선)
-load_dotenv(dotenv_path=Path(__file__).parent / '.env')
-# 2. 로깅 초기화 (KIW_LOG_LEVEL 반영)
-from util.logging_config import configure_logging
-configure_logging()
-# 3. 나머지 모듈 import
-from api.Kiwoom import Kiwoom
-```
-이유: 로거 초기화 시점에 환경변수 필요
-
-### 데이터베이스 패턴
-- 전략별 DB 분리: `{strategy_name}.db` (예: `RSIStrategy.db`)
-- 백테스트 DB: `backtest_data.db` (크롤링된 과거 데이터)
-- 함수: `check_table_exist()`, `insert_df_to_db()`, `execute_sql()`
-- **트랜잭션 자동처리**: `with sqlite3.connect(...)` 사용
-
-### API Rate Limit 처리
-Kiwoom API는 초당 요청 제한 있음:
-```python
-# 연속 API 호출 시 대기
-self.kiwoom.get_order()
-time.sleep(0.1)  # 100ms 대기 (권장)
-self.kiwoom.get_balance()
-```
-`api/Kiwoom.py`의 `_request()`: rate limit 시 retry + exponential backoff
-
-**모의투자 vs 실전투자 Rate Limit 차이**:
-- 모의투자: 0.2초 간격 권장 (rate limit이 더 엄격)
-- 실전투자: 0.1초 간격으로 안정적
-- 환경변수로 조절 가능: `KIWOOM_API_SLEEP_MOCK`, `KIWOOM_API_SLEEP_REAL`
-- `fetch_all_stocks_from_kiwoom()`에서 자동 선택
-
-### 모의투자 블랙리스트
-모의투자에서 거래 불가 종목은 `strategy/RSIStrategy.py`:
-```python
-self.mock_trade_blacklist  # Set[str]
-self.add_to_mock_blacklist(code, name, reason)  # DB 저장
-```
-실전 투자에서는 사용 안 함 (`if not self.kiwoom.mock: return`)
-
-## 개발 워크플로우
-
-### 환경 설정
-```bash
-# Python 3.11+ 필수 (macOS 기본 Python 3.9 사용 금지)
-poetry install  # pyproject.toml 기반 의존성 설치
-cp .env.example .env  # API 키 설정
-
-# .env 파일 설정
-# KIWOOM_MODE=mock  # 'mock' 또는 'real'
-# KIWOOM_MOCK_APPKEY=...  # 모의투자 키
-# KIWOOM_MOCK_SECRETKEY=...
-# KIWOOM_REAL_APPKEY=...  # 실전투자 키 (선택)
-# KIWOOM_REAL_SECRETKEY=...
-```
-
-### 실행
-```bash
-# 모의 투자 (기본값)
-poetry run python main.py
-
-# 실전 투자 (환경변수로 모드 변경)
-KIWOOM_MODE=real poetry run python main.py
-# 또는 .env 파일에서 KIWOOM_MODE=real 설정
-```
-
-### 백테스트
-```bash
-# 전체 기간 백테스트 (DB의 모든 데이터)
-poetry run python -m backtest.run_backtest
-
-# 최근 5년만
-poetry run python -m backtest.run_backtest --years 5
-
-# 특정 기간
-poetry run python -m backtest.run_backtest --start 20200101 --end 20231231
-```
-
-결과: `backtest/output/trades_YYYYMMDD_HHMMSS.csv`
-
-### 테스트
-```bash
-# 단위 테스트 (mock 기반, 빠름)
-poetry run pytest
-
-# 통합 테스트 (실제 API 호출, 모의투자 계정 필요)
-export RUN_INTEGRATION=1
-export KIW_APPKEY=<appkey>
-export KIW_SECRET=<secret>
-poetry run pytest -m integration tests/test_integration_readonly.py
-
-# ⚠️ 실제 주문 테스트 (위험! 테스트 계정만 사용)
-export RUN_REAL_ORDERS=1
-poetry run pytest -m integration tests/test_integration_order.py
-```
-
-### 로깅
-환경변수 또는 `pyproject.toml`에서 설정:
-```bash
-export KIW_LOG_LEVEL=DEBUG  # DEBUG, INFO, WARNING, ERROR
-export KIW_LOG_DIR=./logs
-```
-로그: `logs/kiwoom.log` (RotatingFileHandler, 자동 rotate)
-
-## 통합 지점 & 외부 의존성
-
-### 외부 서비스
-1. **키움증권 REST API** (OpenAPI+)
-   - 인증: OAuth2 (client_credentials)
-   - Base URL: `https://mockapi.kiwoom.com` (mock) / `https://api.kiwoom.com` (real)
-   - WebSocket: `wss://mockapi.kiwoom.com:10000/api/dostk/websocket` (mock) / `wss://api.kiwoom.com:10000/api/dostk/websocket` (real)
-   - Rate limit: 초당 ~10 요청 (명시적 제한 없음, 경험적 수치), 0.1초 간격 권장 (안정적)
-
-2. **네이버 금융** (크롤링)
-   - URL: `https://finance.naver.com/sise/sise_market_sum.nhn?sosok={0|1}`
-   - 필드: 종목명, 현재가, ROE, PER, PBR 등
-   - 장시간에만 실행 (`util/make_up_universe.py::is_market_hours()`)
-
-3. **FinanceDataReader** (백테스트 데이터)
-   - `pip install finance-datareader`
-   - `fdr.DataReader('005930', '20200101')` 형식
-
-### 크로스 컴포넌트 통신
-- **Kiwoom ↔ RSIStrategy**: `Kiwoom` 인스턴스를 Strategy 생성자에 주입
-- **WebSocket → Strategy**: `kiwoom.universe_realtime_transaction_info` Dict 업데이트
-- **DB Cache**: SQLite로 API 재호출 방지 (가격 데이터, 유니버스)
-
-### 유니버스 생성
-- **키움 API 기반** (권장): `get_universe(kiwoom_client, use_kiwoom_api=True)`
-  - ka10099: 전체 종목 리스트 (코스피 + 코스닥)
-  - ka10001: 종목별 상세 정보 (거래량, 거래대금, 등락률, 시가총액 등)
-  - 함수: `fetch_all_stocks_from_kiwoom()` - 전체 종목 수집 (4,234개)
-   - 캐싱: `all_stocks_kiwoom.parquet` (당일 재사용)
-  - Rate limit 대응: 0.1초 간격, 전체 수집 시간 약 7분
-- **스마트 전략**:
-  - Universe 재구성: 30일마다 (종목 리스트 변경)
-  - 데이터 캐싱: 매일 장 종료 후 15:30~16:00 (최신 데이터 갱신)
-  - 장 중 크롤링 실패 시: 캐시 파일 사용
-- **네이버 크롤링** (fallback): API 실패 시 자동 전환
-- **파일 구조**:
-   - `all_stocks_kiwoom.parquet`: 전체 종목 (키움 API, ~4,234개)
-   - `all_stocks_naver.parquet`: 전체 종목 (네이버, ~4,233개)
-   - `universe.parquet`: 필터링된 투자 종목 (100개)
-
-## 백테스트 분석 도구
-전략 최적화용 스크립트들 (`backtest/`):
-- `compare_stop_loss.py`: 손절 전략 비교 (결론: 손절 불필요)
-- `test_mdd_reduction.py`: MDD 감소 방법 8가지 테스트
-- `test_cumulative_rsi.py`: Cumulative RSI 전략 검증
-- `optimize_mdd_reduction.py`: 파라미터 그리드 서치
-
-분석 문서: `backtest/STOP_LOSS_ANALYSIS.md`, `backtest/MDD_REDUCTION_METHODS.md`
-
-## 주의사항
-
-### 보안
-- `.env` 파일 **절대 커밋 금지** (이미 `.gitignore`에 포함)
-- API 키는 `.env.example`에 샘플로만 유지
-
-### 거래 비용
-`strategy/RSIStrategy.py` 초기화 시 .env에서 읽음:
-```python
-# 모의투자 (KIWOOM_MODE=mock)
-TRADING_FEE_PERCENT_MOCK=0.35  # 수수료 0.35%
-TRADING_TAX_PERCENT_MOCK=0.0   # 거래세 없음
-
-# 실전투자 (KIWOOM_MODE=real)
-TRADING_FEE_PERCENT_REAL=0.015  # 수수료 0.015%
-TRADING_TAX_PERCENT_REAL=0.20   # 거래세 0.20% (매도만), 2026년 기준
-```
-모드에 따라 자동 선택되며, 백테스트도 동일 비율 사용 (`backtest_engine.py`)
-
-### 스레드 안전성
-- `RSIStrategy`는 `threading.Thread` - 별도 스레드 실행
-- WebSocket은 `asyncio` 기반 독립 스레드
-- Lock 필요 시 `threading.Lock()` 사용
-
-### macOS 특이사항
-- 기본 Python 3.9는 사용 불가 → Homebrew로 3.11+ 설치
-- M1/M2 Mac: `pandas`, `numpy` arm64 버전 자동 설치됨
-
-## 파일 참조
-- 전략 로직: [strategy/RSIStrategy.py](strategy/RSIStrategy.py)
-- API 클라이언트: [api/Kiwoom.py](api/Kiwoom.py)
-- 백테스트 엔진: [backtest/backtest_engine.py](backtest/backtest_engine.py)
-- 진입점: [main.py](main.py)
-- 설정: [pyproject.toml](pyproject.toml)
+## 참고 파일
+- 전략: `strategy/RSIStrategy.py`
+- API: `api/Kiwoom.py`
+- 백테스트 엔진: `backtest/backtest_engine.py`
+- 진입점: `main.py`
