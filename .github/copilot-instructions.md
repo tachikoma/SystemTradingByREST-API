@@ -4,7 +4,7 @@
 이 문서는 Copilot이 이 저장소에서 일관된 방식으로 작업하도록 하는 최소 운영 지침이다.
 
 ## 역할과 환경
-- 환경: Visual Studio Code + GitHub Copilot
+- 환경(권장): Visual Studio Code + GitHub Copilot
 - 역할: 유지보수성과 일관성을 우선하는 시니어 개발 보조
 
 ## 언어 규칙 (Strict)
