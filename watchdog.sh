@@ -25,4 +25,16 @@ mkdir -p "$PROJECT_ROOT/logs"
 # Run from project root so Poetry can always find pyproject.toml
 cd "$PROJECT_ROOT" || exit 1
 
-nohup poetry run python "$PROJECT_ROOT/scripts/watchdog.py" >> "$PROJECT_ROOT/logs/kiwoom_nohup.log" 2>&1 &
+# cron often has a minimal PATH, so resolve Poetry explicitly.
+if command -v poetry >/dev/null 2>&1; then
+	POETRY_BIN="$(command -v poetry)"
+elif [ -x "$HOME/.local/bin/poetry" ]; then
+	POETRY_BIN="$HOME/.local/bin/poetry"
+elif [ -x "$HOME/.poetry/bin/poetry" ]; then
+	POETRY_BIN="$HOME/.poetry/bin/poetry"
+else
+	echo "poetry executable not found (PATH=$PATH)" >&2
+	exit 1
+fi
+
+nohup "$POETRY_BIN" run python "$PROJECT_ROOT/scripts/watchdog.py" >> "$PROJECT_ROOT/logs/kiwoom_nohup.log" 2>&1 &
