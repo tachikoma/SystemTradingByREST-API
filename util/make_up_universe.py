@@ -620,22 +620,10 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
         # 필터 적용 중 예외가 발생하면 원래 데이터프레임을 유지
         logger.warning("우선주 필터 적용 중 오류 발생: 종목코드 기반 필터링을 건너뜁니다.")
 
-    # 2. 변동성 지표 계산
-    # - 등락률 절대값: 당일 변동성
-    df['변동성_지표'] = abs(df['등락률'])
-    # - 외국인비율: 유동성 대리변수 (사용 비율이 높을수록 안정적) <- 현재는 사용하지 않음
-    
-    # 3. 거래 활발도 계산 (거래대금 대비 시가총액 비율)
-    df['거래회전율'] = df['거래대금'] / df['시가총액'] * 100
-    
-    # 4. 변동성 + 거래활발도 기준 종합 점수
-    # 변동성 상위 50% + 거래회전율 상위 50% 종목 선호
-    df['변동성_순위'] = df['변동성_지표'].rank(method='max', ascending=False)
-    df['거래회전율_순위'] = df['거래회전율'].rank(method='max', ascending=False)
-    df['종합_순위'] = (df['변동성_순위'] + df['거래회전율_순위']) / 2
-
-    # 5. 종합 순위로 정렬
-    df = df.sort_values(by=['종합_순위'])
+    # 2. 거래대금(1순위) + 시가총액(2순위) 기준 정렬
+    # 당일 등락률은 일일 이벤트에 민감하게 반응하므로 제외.
+    # 거래대금과 시가총액은 단기 변동이 적어 유니버스 안정성이 높아짐.
+    df = df.sort_values(by=['거래대금', '시가총액'], ascending=[False, False])
 
     # 필터링한 데이터프레임의 index 번호를 새로 매김
     df = df.reset_index(drop=True)
@@ -786,7 +774,7 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
 
     # 임시로 생성된 대용량 컬럼들을 삭제하여 메모리 사용을 줄입니다.
     try:
-        tmp_cols = ['변동성_지표', '거래회전율', '변동성_순위', '거래회전율_순위', '종합_순위', '_vol_numeric']
+        tmp_cols = ['_vol_numeric']
         for c in tmp_cols:
             if c in df.columns:
                 try:
