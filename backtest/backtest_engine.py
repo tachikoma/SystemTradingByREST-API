@@ -32,20 +32,22 @@ class BacktestEngine:
         ma_short: int = 20,  # 단기 이동평균
         ma_long: int = 60,  # 장기 이동평균
         ma_trend: int = 200,  # 장기 추세 이동평균 (필터용)
-        rsi_sell_threshold: float = 80,  # RSI 매도 기준
-        profit_target_percent: float = 10.0,  # 매도 최소 수익률 기준 (%)
-        rsi_buy_threshold: float = 3,  # RSI 매수 기준 (최적화: 5→3)
-        price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화: -2→-5)
-        cash_reserve_ratio: float = 0.2,  # 현금 보유 비율 (최적화: 20% 현금 유지)
-        commission_rate: float = 0.0035,  # 모의 투자 거래 수수료율 (편도 0.35%)
-        tax_rate: float = 0.0015,  # 거래세 (매도 시만 0.15%)
-        rsi_method: str = 'cutler',  # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (EWMA)
-        rsi_min_periods: int = None,  # RSI 계산 최소 기간 (None이면 rsi_period 사용)
+        # 전략 파라미터: None → .env → 하드코딩 기본값 순으로 적용
+        # 명시적으로 값을 전달하면 .env를 무시하고 해당 값이 최우선 적용됨
+        rsi_sell_threshold: float = None,    # env: RSI_SELL_THRESHOLD, 기본값: 80
+        profit_target_percent: float = None, # env: PROFIT_TARGET_PERCENT, 기본값: 10.0
+        rsi_buy_threshold: float = None,     # env: RSI_BUY_THRESHOLD, 기본값: 3
+        price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%)
+        cash_reserve_ratio: float = None,    # env: CASH_RESERVE_RATIO, 기본값: 0.2
+        commission_rate: float = None,       # env: TRADING_FEE_PERCENT_{MODE}, 기본값: 0.0035
+        tax_rate: float = None,              # env: TRADING_TAX_PERCENT_{MODE}, 기본값: 0.0015
+        rsi_method: str = None,              # env: RSI_METHOD, 기본값: 'cutler'
+        rsi_min_periods: int = None,         # None이면 rsi_period 사용
         # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
-        enable_stop_loss: bool = False,  # 가격 손절 비활성화 (기본값)
-        price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%) - 극단적 상황용
-        enable_time_stop_loss: bool = False,  # 시간 손절 독립 플래그 (가격 손절과 별도 제어)
-        time_stop_loss_days: int = 180,  # 시간 손절 기준 (일): 180일 이상 보유 시 강제 청산
+        enable_stop_loss: bool = False,      # 가격 손절 비활성화 (최적화 기본값)
+        price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%)
+        enable_time_stop_loss: bool = True, # 시간 손절 독립 플래그 (최적화 기본값)
+        time_stop_loss_days: int = 365,      # 시간 손절 기준 (일) (최적화 기본값)
         symbol_names: Dict[str, str] = None,
     ):
         self.initial_capital = initial_capital
@@ -54,134 +56,94 @@ class BacktestEngine:
         self.ma_short = ma_short
         self.ma_long = ma_long
         self.ma_trend = ma_trend
-        self.rsi_sell_threshold = rsi_sell_threshold
-        self.profit_target_percent = profit_target_percent
-        self.rsi_buy_threshold = rsi_buy_threshold
         self.price_drop_threshold = price_drop_threshold
-        self.cash_reserve_ratio = cash_reserve_ratio
-        self.commission_rate = commission_rate
-        self.tax_rate = tax_rate
-        
-        # RSI 계산 방식 (RSIStrategy와 동일)
-        self.rsi_method = rsi_method.lower() if isinstance(rsi_method, str) else 'cutler'
-        if self.rsi_method not in ('cutler', 'wilder'):
-            logger.warning(f"Invalid RSI method '{rsi_method}', using 'cutler'")
-            self.rsi_method = 'cutler'
         self.rsi_min_periods = rsi_min_periods if rsi_min_periods is not None else rsi_period
-        
-        # 거래 비용 비율 (RSIStrategy와 동일)
-        # Allow environment overrides for key parameters so .env can control backtest behavior
-        try:
-            v = os.getenv('RSI_SELL_THRESHOLD')
-            if v is not None:
-                self.rsi_sell_threshold = float(v)
-        except Exception:
-            pass
-        try:
-            v = os.getenv('PROFIT_TARGET_PERCENT')
-            if v is not None:
-                self.profit_target_percent = float(v)
-        except Exception:
-            pass
-        try:
-            v = os.getenv('RSI_BUY_THRESHOLD')
-            if v is not None:
-                self.rsi_buy_threshold = float(v)
-        except Exception:
-            pass
-        try:
+
+        # --- 우선순위 적용 헬퍼: 명시적 파라미터 > .env > 하드코딩 기본값 ---
+        def _resolve_float(explicit, env_name, fallback):
+            """명시적 값이 있으면 그것을 쓰고, 없으면 env, 그것도 없으면 fallback 사용"""
+            if explicit is not None:
+                return float(explicit)
+            v = os.getenv(env_name)
+            return float(v) if v is not None else fallback
+
+        self.rsi_sell_threshold   = _resolve_float(rsi_sell_threshold,   'RSI_SELL_THRESHOLD',    80.0)
+        self.profit_target_percent = _resolve_float(profit_target_percent, 'PROFIT_TARGET_PERCENT', 10.0)
+        self.rsi_buy_threshold    = _resolve_float(rsi_buy_threshold,     'RSI_BUY_THRESHOLD',      3.0)
+
+        # CASH_RESERVE_RATIO: 퍼센트(20) 또는 소수(0.2) 두 형식 모두 허용
+        if cash_reserve_ratio is not None:
+            self.cash_reserve_ratio = float(cash_reserve_ratio)
+        else:
             v = os.getenv('CASH_RESERVE_RATIO')
             if v is not None:
                 tmp = float(v)
-                if tmp > 1:
-                    tmp = tmp / 100.0
-                self.cash_reserve_ratio = tmp
-        except Exception:
-            pass
-        try:
-            v = os.getenv('RSI_METHOD')
-            if v is not None:
-                vv = str(v).strip().lower()
-                if vv in ('cutler', 'wilder'):
-                    self.rsi_method = vv
-        except Exception:
-            pass
+                self.cash_reserve_ratio = tmp / 100.0 if tmp > 1 else tmp
+            else:
+                self.cash_reserve_ratio = 0.2
 
-        # Commission / tax environment overrides
-        # Prefer TRADING_FEE_PERCENT_{MOCK,REAL} and TRADING_TAX_PERCENT_{MOCK,REAL}
-        # Values in .env are expressed in percent (e.g., 0.35 meaning 0.35%), so divide by 100.
+        # RSI 계산 방식
+        _rsi_method = rsi_method if rsi_method is not None else os.getenv('RSI_METHOD', 'cutler')
+        _rsi_method = _rsi_method.strip().lower() if isinstance(_rsi_method, str) else 'cutler'
+        if _rsi_method not in ('cutler', 'wilder'):
+            logger.warning(f"Invalid RSI method '{_rsi_method}', using 'cutler'")
+            _rsi_method = 'cutler'
+        self.rsi_method = _rsi_method
+
+        # 거래 비용: 명시적 파라미터 우선, 없으면 KIWOOM_MODE에 맞는 env 키에서 로드
         try:
             mode = os.getenv('KIWOOM_MODE', os.getenv('KIW_MODE', 'mock')).strip().lower()
         except Exception:
             mode = 'mock'
 
-        def _parse_trading_percent(val):
+        def _parse_percent_env(val):
+            """퍼센트 표기(0.35 → 0.0035) 변환"""
             if val is None:
                 return None
             try:
-                f = float(val)
-                # treat as percent value in config (0.35 => 0.35%)
-                return f / 100.0
+                return float(val) / 100.0
             except Exception:
                 return None
 
-        fee_val = None
-        tax_val = None
-        if mode == 'real':
-            fee_val = os.getenv('TRADING_FEE_PERCENT_REAL')
-            tax_val = os.getenv('TRADING_TAX_PERCENT_REAL')
-        else:
-            fee_val = os.getenv('TRADING_FEE_PERCENT_MOCK')
-            tax_val = os.getenv('TRADING_TAX_PERCENT_MOCK')
-
-        parsed_fee = _parse_trading_percent(fee_val)
-        parsed_tax = _parse_trading_percent(tax_val)
-
-        # fallback: allow COMMISSION_RATE / TAX_RATE env in either decimal or percent form
         def _parse_rate_env(name):
+            """소수 또는 퍼센트 표기 자동 감지 변환"""
             val = os.getenv(name)
             if val is None:
                 return None
             try:
                 f = float(val)
-                # if value looks like percent (>=0.01), assume percent; otherwise assume decimal
-                if f > 1:
-                    return f / 100.0
-                if f > 0.01:
-                    return f / 100.0
-                return f
+                return f / 100.0 if f > 0.01 else f
             except Exception:
                 return None
 
-        if parsed_fee is not None:
-            self.commission_rate = parsed_fee
+        if commission_rate is not None:
+            self.commission_rate = float(commission_rate)
         else:
-            parsed = _parse_rate_env('COMMISSION_RATE')
-            if parsed is not None:
-                self.commission_rate = parsed
+            parsed = _parse_percent_env(os.getenv(f'TRADING_FEE_PERCENT_{mode.upper()}')) \
+                     or _parse_rate_env('COMMISSION_RATE')
+            self.commission_rate = parsed if parsed is not None else 0.0035
 
-        if parsed_tax is not None:
-            self.tax_rate = parsed_tax
+        if tax_rate is not None:
+            self.tax_rate = float(tax_rate)
         else:
-            parsed = _parse_rate_env('TAX_RATE')
-            if parsed is not None:
-                self.tax_rate = parsed
+            parsed = _parse_percent_env(os.getenv(f'TRADING_TAX_PERCENT_{mode.upper()}')) \
+                     or _parse_rate_env('TAX_RATE')
+            self.tax_rate = parsed if parsed is not None else 0.0015
 
-        # compute fee multipliers
-        self.buy_fee_rate = 1 + self.commission_rate
+        self.buy_fee_rate  = 1 + self.commission_rate
         self.sell_fee_rate = 1 + self.commission_rate + self.tax_rate
-        
+
         # 손절 설정
-        self.enable_stop_loss = enable_stop_loss
-        self.price_stop_loss_pct = price_stop_loss_pct
+        self.enable_stop_loss      = enable_stop_loss
+        self.price_stop_loss_pct   = price_stop_loss_pct
         self.enable_time_stop_loss = enable_time_stop_loss
-        self.time_stop_loss_days = time_stop_loss_days
-        
+        self.time_stop_loss_days   = time_stop_loss_days
+
         # 포트폴리오 상태
         self.cash = initial_capital
         self.symbol_names = symbol_names or {}
         self.holdings: Dict[str, Dict] = {}  # {code: {'quantity': int, 'avg_price': float, 'buy_date': str}}
-        
+
         # 거래 기록
         self.trades: List[Dict] = []
         self.daily_portfolio_value: List[Dict] = []
