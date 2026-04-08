@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 import logging
 from util.logging_config import get_logger
+from util.rsi_calc import compute_rsi
 import os
 
 logger = get_logger(__name__)
@@ -150,7 +151,7 @@ class BacktestEngine:
         self.stop_loss_count = 0  # 손절 횟수
         
     def calculate_rsi(self, prices: pd.Series, period: int = None) -> pd.Series:
-        """RSI 계산 (RSIStrategy와 동일한 로직)
+        """RSI 계산 — util.rsi_calc.compute_rsi 위임
         
         Args:
             prices: 종가 시계열
@@ -161,63 +162,12 @@ class BacktestEngine:
         """
         if period is None:
             period = self.rsi_period
-
-        # gain/loss 계산
-        delta = prices.diff(1)
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        
-        # 첫 번째 값은 NaN으로 설정
-        if len(gain) > 0:
-            gain.iloc[0] = np.nan
-            loss.iloc[0] = np.nan
-        
-        min_periods = self.rsi_min_periods
-        if min_periods < 1:
-            min_periods = 1
-        
-        # RSI 계산 방식 선택
-        if self.rsi_method == 'cutler':
-            # Cutler's RSI (SMA 기반)
-            if min_periods > period:
-                min_periods = period
-            avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
-            avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
-            
-            # RS 계산 (0으로 나누기 방지)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                rs = avg_gain / avg_loss
-                rsi = 100.0 - (100.0 / (1.0 + rs))
-            
-            # 엣지 케이스 처리
-            rsi = rsi.astype(float)
-            rsi.loc[avg_loss == 0.0] = 100.0
-            both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
-            rsi.loc[both_zero_mask] = 50.0
-        else:
-            # Wilder's RSI (EWMA 기반)
-            df_len = len(prices)
-            if min_periods > df_len:
-                min_periods = max(1, df_len)
-            
-            avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
-            avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
-            
-            # RS 계산
-            rs = avg_gain / avg_loss
-            rsi = 100.0 - (100.0 / (1.0 + rs))
-            
-            # 엣지 케이스 처리 (np.isclose로 부동소수점 오차 허용)
-            both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
-            loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
-            gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
-            
-            rsi = rsi.astype(float)
-            rsi.loc[both_zero] = 50.0
-            rsi.loc[loss_zero] = 100.0
-            rsi.loc[gain_zero] = 0.0
-
-        return rsi
+        return compute_rsi(
+            prices=prices.astype('float64'),
+            period=period,
+            min_periods=self.rsi_min_periods,
+            method=self.rsi_method,
+        )
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """기술적 지표 계산

@@ -11,6 +11,7 @@ import traceback
 import threading
 import gc
 from util.logging_config import get_logger
+from util.rsi_calc import compute_rsi
 
 logger = get_logger(__name__)
 
@@ -1403,52 +1404,16 @@ class RSIStrategy(threading.Thread):
 
                 s = pd.Series(closes.astype('float64'))
 
-                # compute RSI on series
-                delta = s.diff(1)
-                gain = delta.where(delta > 0, 0.0)
-                loss = (-delta).where(delta < 0, 0.0)
-                if len(gain) > 0:
-                    gain.iloc[0] = np.nan
-                    loss.iloc[0] = np.nan
-
                 period = int(self.RSI_PERIOD)
                 try:
                     min_periods = int(os.getenv('RSI_MIN_PERIODS', str(period)))
                 except Exception:
                     min_periods = period
-                if min_periods < 1:
-                    min_periods = 1
 
                 method = getattr(self, 'RSI_METHOD', 'cutler')
                 method = method.lower() if isinstance(method, str) else 'cutler'
 
-                if method == 'cutler':
-                    if min_periods > period:
-                        min_periods = period
-                    avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
-                    avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        rs = avg_gain / avg_loss
-                        rsi = 100.0 - (100.0 / (1.0 + rs))
-                    rsi = rsi.astype(float)
-                    rsi.loc[avg_loss == 0.0] = 100.0
-                    both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
-                    rsi.loc[both_zero_mask] = 50.0
-                else:
-                    df_len = len(s)
-                    if min_periods > df_len:
-                        min_periods = max(1, df_len)
-                    avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
-                    avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
-                    rs = avg_gain / avg_loss
-                    rsi = 100.0 - (100.0 / (1.0 + rs))
-                    both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
-                    loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
-                    gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
-                    rsi = rsi.astype(float)
-                    rsi.loc[both_zero] = 50.0
-                    rsi.loc[loss_zero] = 100.0
-                    rsi.loc[gain_zero] = 0.0
+                rsi = compute_rsi(s, period=period, min_periods=min_periods, method=method)
 
                 df = pd.DataFrame({'close': s.values})
                 df[f'RSI({self.RSI_PERIOD})'] = rsi.values
@@ -1481,48 +1446,15 @@ class RSIStrategy(threading.Thread):
 
                 # reuse original RSI computation on df
                 s = df['close'].astype('float64')
-                delta = s.diff(1)
-                gain = delta.where(delta > 0, 0.0)
-                loss = (-delta).where(delta < 0, 0.0)
-                if len(gain) > 0:
-                    gain.iloc[0] = np.nan
-                    loss.iloc[0] = np.nan
                 period = int(self.RSI_PERIOD)
                 try:
                     min_periods = int(os.getenv('RSI_MIN_PERIODS', str(period)))
                 except Exception:
                     min_periods = period
-                if min_periods < 1:
-                    min_periods = 1
                 method = getattr(self, 'RSI_METHOD', 'cutler')
                 method = method.lower() if isinstance(method, str) else 'cutler'
-                if method == 'cutler':
-                    if min_periods > period:
-                        min_periods = period
-                    avg_gain = gain.rolling(window=period, min_periods=min_periods).mean()
-                    avg_loss = loss.rolling(window=period, min_periods=min_periods).mean()
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        rs = avg_gain / avg_loss
-                        rsi = 100.0 - (100.0 / (1.0 + rs))
-                    rsi = rsi.astype(float)
-                    rsi.loc[avg_loss == 0.0] = 100.0
-                    both_zero_mask = (avg_gain == 0.0) & (avg_loss == 0.0)
-                    rsi.loc[both_zero_mask] = 50.0
-                else:
-                    df_len = len(s)
-                    if min_periods > df_len:
-                        min_periods = max(1, df_len)
-                    avg_gain = gain.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
-                    avg_loss = loss.ewm(alpha=1.0/period, min_periods=min_periods, adjust=False).mean()
-                    rs = avg_gain / avg_loss
-                    rsi = 100.0 - (100.0 / (1.0 + rs))
-                    both_zero = np.isclose(avg_gain, 0.0) & np.isclose(avg_loss, 0.0)
-                    loss_zero = np.isclose(avg_loss, 0.0) & (~both_zero)
-                    gain_zero = np.isclose(avg_gain, 0.0) & (~both_zero)
-                    rsi = rsi.astype(float)
-                    rsi.loc[both_zero] = 50.0
-                    rsi.loc[loss_zero] = 100.0
-                    rsi.loc[gain_zero] = 0.0
+
+                rsi = compute_rsi(s, period=period, min_periods=min_periods, method=method)
 
                 df[f'RSI({self.RSI_PERIOD})'] = rsi
                 return df, float(close)
