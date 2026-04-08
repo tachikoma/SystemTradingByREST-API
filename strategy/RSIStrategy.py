@@ -127,6 +127,8 @@ class RSIStrategy(threading.Thread):
         self.last_full_cache_time = None
         self.full_cache_in_progress = False
         self.full_cache_done_today = False
+        # 오후 매수 윈도우 실행 여부 추적 (fallback 처리용)
+        self.buy_window_done_today = False
         # 가격 데이터 준비 상태 추적
         self.price_data_ready = False
         self.last_price_data_date = None
@@ -912,6 +914,7 @@ class RSIStrategy(threading.Thread):
                 if now.hour == 1:
                     self.universe_updated_today = False
                     self.full_cache_done_today = False
+                    self.buy_window_done_today = False
                 
                 # (0)장중인지 확인
                 if not check_transaction_open():
@@ -1659,8 +1662,26 @@ class RSIStrategy(threading.Thread):
     def check_buy_signal_and_order(self, code):
         """매수 대상인지 확인하고 주문을 접수하는 함수"""
         # 매수 가능 시간 확인
-        if not check_adjacent_transaction_closed():
+        # 기본: 오후 14:50~15:20 허용
+        # fallback: 오전 09:00~09:20 (오후 윈도우를 놓쳤을 때만)
+        try:
+            from util.time_helper import is_buy_window_open, is_morning_buy_fallback_window
+        except Exception:
+            # 호환성: 모듈 임포트 실패 시 기존 함수를 시도
+            try:
+                from util.time_helper import check_adjacent_transaction_closed as is_buy_window_open
+            except Exception:
+                is_buy_window_open = lambda: False
+            is_morning_buy_fallback_window = lambda: False
+
+        in_afternoon_window = is_buy_window_open()
+        in_morning_fallback = is_morning_buy_fallback_window() and not self.buy_window_done_today
+
+        if not in_afternoon_window and not in_morning_fallback:
             return False
+
+        if in_afternoon_window:
+            self.buy_window_done_today = True
 
         # RSI 계산 (공통 함수 사용)
         df, close = self.calculate_rsi(code)

@@ -78,14 +78,28 @@ def check_transaction_closed():
     return end_time < now
 
 
-def check_adjacent_transaction_closed():
-    """현재 시간이 장 종료 부근인지 확인하는 함수(매수 시간 확인용, 한국 시간 기준)
-    
-    15:00~15:20: 장 마감 임박 구간 (신규 매수 금지)
-    - 당일 급매수로 인한 리스크 방지
+def is_buy_window_open():
+    """현재 시간이 기본 매수 허용 구간인지 확인하는 함수(한국 시간 기준)
+
+    기본 매수 허용 구간: 14:50 ~ 15:20
+    - 종가 근접 매수로 백테스트와의 정합성을 유지하기 위함
+    - 15:00 기준보다 10분 앞당겨 서버 부하와 주문 집중을 완화
     """
     now = get_korea_time()
-    base_time = now.replace(hour=15, minute=0, second=0, microsecond=0)
-    end_time = now.replace(hour=15, minute=20, second=0, microsecond=0)
-    return base_time <= now < end_time
+    start = now.replace(hour=14, minute=50, second=0, microsecond=0)
+    end = now.replace(hour=15, minute=20, second=0, microsecond=0)
+    return start <= now < end
+
+
+def is_morning_buy_fallback_window():
+    """오전 fallback 매수 허용 구간 확인 (한국 시간 기준)
+
+    매수 허용 구간: 09:00 ~ 09:20
+    - 전일 오후 윈도우를 놓쳤을 때(서버/네트워크 장애 등) 예외적으로 재시도하기 위한 구간
+    - 이 구간은 `RSIStrategy.buy_window_done_today` 플래그가 False일 경우에만 유효하게 사용됨
+    """
+    now = get_korea_time()
+    start = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    end = now.replace(hour=9, minute=20, second=0, microsecond=0)
+    return start <= now < end
 
