@@ -666,8 +666,8 @@ class BacktestEngine:
                     
                     if buy_signal:
                         buy_candidates.append((code, buy_price))
-                
-                # 매수 가능한 종목 수만큼만 매수
+
+                # 매수 가능한 종목 수만큼만 매수 (universe 처리 순서 유지 — 실전과 동일)
                 buy_candidates = buy_candidates[:available_slots]
                 
                 # 매수 예산 배분 (RSIStrategy와 동일: 현금 보유 비율 적용)
