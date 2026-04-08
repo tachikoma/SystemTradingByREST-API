@@ -126,12 +126,26 @@ def print_results(results: dict):
     logger.info(f"평균 수익률:        {results['avg_profit_rate']:>15.2f} %")
     logger.info(f"총 실현 손익:       {results['total_profit']:>15,.0f} 원")
     
+    # 미청산 포지션 출력
+    open_positions = results.get('open_positions', {})
+    if open_positions:
+        open_value = results.get('open_positions_value', 0)
+        logger.info("-"*60)
+        logger.info(f"미청산 포지션:      {len(open_positions):>15} 종목  (평가금액: {open_value:,.0f} 원)")
+        logger.info("  ※ 위 최종 자산에는 미청산 포지션 평가금액이 포함됩니다.")
+        for code, pos in open_positions.items():
+            logger.info(
+                f"  [{code}] 수량: {pos['quantity']}주, 평균단가: {pos['avg_price']:,.0f}원, 매수일: {pos['buy_date']}"
+            )
+    
     # 손절 정보 출력
-    if results.get('stop_loss_enabled', False):
+    if results.get('stop_loss_enabled', False) or results.get('time_stop_loss_enabled', False):
         logger.info("-"*60)
         logger.info("손절 설정:")
-        logger.info(f"  가격 손절:        {results.get('price_stop_loss_pct', 0):>15.1f} %")
-        logger.info(f"  시간 손절:        {results.get('time_stop_loss_days', 0):>15} 일")
+        if results.get('stop_loss_enabled', False):
+            logger.info(f"  가격 손절:        {results.get('price_stop_loss_pct', 0):>15.1f} %")
+        if results.get('stop_loss_enabled', False) or results.get('time_stop_loss_enabled', False):
+            logger.info(f"  시간 손절:        {results.get('time_stop_loss_days', 0):>15} 일")
         logger.info(f"  손절 횟수:        {results.get('stop_loss_count', 0):>15} 회")
         stop_loss_ratio = (results.get('stop_loss_count', 0) / results['sell_trades'] * 100) if results['sell_trades'] > 0 else 0
         logger.info(f"  손절 비율:        {stop_loss_ratio:>15.2f} %")
@@ -296,7 +310,9 @@ def main():
         rsi_min_periods=2,  # RSI 최소 기간 (RSI_PERIOD와 동일)
         commission_rate=0.00015,  # 수수료 0.015%
         tax_rate=0.0020,  # 거래세 0.20% (매도 시)
-        enable_stop_loss=False,  # 손절 비활성화 (백테스트 최적화 결과)
+        enable_stop_loss=False,  # 가격 손절 비활성화 (백테스트 최적화 결과)
+        enable_time_stop_loss=True,  # 시간 손절 활성화 (장기 미청산 포지션 방지)
+        time_stop_loss_days=365,  # 1년 이상 보유 시 강제 청산 (백테스트 최적화 결과)
     )
     
     # 3) 백테스트 실행 - 기간 설정

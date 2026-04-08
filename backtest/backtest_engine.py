@@ -42,9 +42,10 @@ class BacktestEngine:
         rsi_method: str = 'cutler',  # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (EWMA)
         rsi_min_periods: int = None,  # RSI 계산 최소 기간 (None이면 rsi_period 사용)
         # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
-        enable_stop_loss: bool = False,  # 손절 비활성화 (기본값)
+        enable_stop_loss: bool = False,  # 가격 손절 비활성화 (기본값)
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%) - 극단적 상황용
-        time_stop_loss_days: int = 180,  # 시간 손절 기준 (일) - 매우 보수적
+        enable_time_stop_loss: bool = False,  # 시간 손절 독립 플래그 (가격 손절과 별도 제어)
+        time_stop_loss_days: int = 180,  # 시간 손절 기준 (일): 180일 이상 보유 시 강제 청산
         symbol_names: Dict[str, str] = None,
     ):
         self.initial_capital = initial_capital
@@ -173,6 +174,7 @@ class BacktestEngine:
         # 손절 설정
         self.enable_stop_loss = enable_stop_loss
         self.price_stop_loss_pct = price_stop_loss_pct
+        self.enable_time_stop_loss = enable_time_stop_loss
         self.time_stop_loss_days = time_stop_loss_days
         
         # 포트폴리오 상태
@@ -426,7 +428,7 @@ class BacktestEngine:
         Returns:
             (손절 신호 여부, 매도 가격, 손절 사유)
         """
-        if not self.enable_stop_loss:
+        if not self.enable_stop_loss and not self.enable_time_stop_loss:
             return False, None, ""
         
         try:
@@ -437,18 +439,20 @@ class BacktestEngine:
             current = df.iloc[idx]
             close = current['close']
             
-            # 1. 가격 손절 체크
-            price_change_pct = ((close - avg_purchase_price) / avg_purchase_price) * 100
-            if price_change_pct <= self.price_stop_loss_pct:
-                return True, close, f"가격손절({price_change_pct:.2f}%)"
+            # 1. 가격 손절 체크 (enable_stop_loss가 True일 때만)
+            if self.enable_stop_loss:
+                price_change_pct = ((close - avg_purchase_price) / avg_purchase_price) * 100
+                if price_change_pct <= self.price_stop_loss_pct:
+                    return True, close, f"가격손절({price_change_pct:.2f}%)"
             
-            # 2. 시간 손절 체크
-            buy_date_dt = pd.to_datetime(buy_date, format='%Y%m%d')
-            current_date_dt = pd.to_datetime(date, format='%Y%m%d')
-            holding_days = (current_date_dt - buy_date_dt).days
-            
-            if holding_days > self.time_stop_loss_days:
-                return True, close, f"시간손절({holding_days}일)"
+            # 2. 시간 손절 체크 (enable_time_stop_loss가 True일 때만)
+            if self.enable_time_stop_loss:
+                buy_date_dt = pd.to_datetime(buy_date, format='%Y%m%d')
+                current_date_dt = pd.to_datetime(date, format='%Y%m%d')
+                holding_days = (current_date_dt - buy_date_dt).days
+                
+                if holding_days > self.time_stop_loss_days:
+                    return True, close, f"시간손절({holding_days}일)"
             
             return False, None, ""
             
@@ -546,9 +550,11 @@ class BacktestEngine:
         # 현금 증가
         self.cash += net_proceeds
         
-        # 수익률 계산
-        profit = sell_amount - (quantity * avg_price)
-        profit_rate = (profit / (quantity * avg_price)) * 100
+        # 수익률 계산 (매수/매도 수수료 모두 반영)
+        # buy_cost: 매수 시 실제 지출 금액 (수수료 포함)
+        buy_cost = quantity * avg_price * self.buy_fee_rate
+        profit = net_proceeds - buy_cost
+        profit_rate = (profit / buy_cost) * 100
         
         # 포지션 제거
         del self.holdings[code]
@@ -624,6 +630,7 @@ class BacktestEngine:
         self.holdings = {}
         self.trades = []
         self.daily_portfolio_value = []
+        self.stop_loss_count = 0
         
         # 지표 계산
         processed_data = {}
@@ -749,10 +756,10 @@ class BacktestEngine:
         # 샤프 비율 (무위험 수익률 0% 가정)
         sharpe_ratio = (df['returns'].mean() / df['returns'].std()) * np.sqrt(252) if df['returns'].std() != 0 else 0
         
-        # MDD (Maximum Drawdown)
-        cumulative = (1 + df['returns']).cumprod()
-        running_max = cumulative.expanding().max()
-        drawdown = (cumulative - running_max) / running_max
+        # MDD (Maximum Drawdown) — 포트폴리오 가치 직접 기반으로 계산 (NaN 전파 없음)
+        value_series = df['portfolio_value']
+        peak = value_series.expanding().max()
+        drawdown = (value_series - peak) / peak
         mdd = drawdown.min() * 100
         
         # 승률 계산 (수익 거래 비율)
@@ -777,9 +784,12 @@ class BacktestEngine:
             'avg_profit_rate': avg_profit_rate,
             'total_profit': sum([t.get('profit', 0) for t in sell_trades]),
             'stop_loss_count': self.stop_loss_count,  # 손절 횟수
-            'stop_loss_enabled': self.enable_stop_loss,  # 손절 활성화 여부
+            'stop_loss_enabled': self.enable_stop_loss,  # 가격 손절 활성화 여부
+            'time_stop_loss_enabled': self.enable_time_stop_loss,  # 시간 손절 활성화 여부
             'price_stop_loss_pct': self.price_stop_loss_pct,  # 가격 손절 기준
             'time_stop_loss_days': self.time_stop_loss_days,  # 시간 손절 기준
+            'open_positions': dict(self.holdings),  # 미청산 포지션
+            'open_positions_value': final_value - self.cash,  # 미청산 포지션 평가금액
             'daily_values': df
         }
         
