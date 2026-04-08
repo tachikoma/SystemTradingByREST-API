@@ -78,6 +78,7 @@ class RSIStrategy(threading.Thread):
     RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
+    MORNING_FALLBACK_GAP_UP_THRESHOLD = 3.0  # 오전 fallback 갭업 차단 기준 (%) — 이 이상 갭업이면 매수 보류
     REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (API 제한)
     # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (Wilder/EWMA)
     RSI_METHOD = 'cutler'
@@ -211,8 +212,15 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
 
-        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s",
-                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO)
+        try:
+            v = os.getenv('MORNING_FALLBACK_GAP_UP_THRESHOLD')
+            if v is not None:
+                self.MORNING_FALLBACK_GAP_UP_THRESHOLD = float(v)
+        except Exception:
+            pass
+
+        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s",
+                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD)
 
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
@@ -1688,6 +1696,29 @@ class RSIStrategy(threading.Thread):
         
         if df is None or close is None:
             return False
+
+        # 오전 fallback 전용: 갭 확인
+        # 전일 종가 대비 금일 시가(또는 현재가)가 +3% 이상 갭업이면 신호 소멸로 매수 보류
+        # 갭다운이면 신호 강화로 진행 (로그만 기록)
+        if in_morning_fallback:
+            try:
+                rt_info = self.kiwoom.universe_realtime_transaction_info.get(code, {})
+                # 시가 우선, 없으면 현재가로 대체
+                today_open = rt_info.get('시가') or rt_info.get('현재가')
+                # df[-2]는 전일 종가 (df[-1]은 calculate_rsi에서 appended된 현재가)
+                prev_close = float(df['close'].iloc[-2]) if len(df) >= 2 else None
+
+                if today_open and prev_close and prev_close != 0:
+                    gap_pct = (float(today_open) - prev_close) / prev_close * 100
+                    _name = self.resolve_stock_name(code)
+                    _display = f"{_name}({code})" if _name else code
+                    if gap_pct >= self.MORNING_FALLBACK_GAP_UP_THRESHOLD:
+                        # 갭업: 당일 이미 반등 -> 매수 시점 소멸
+                        logger.info("오전 fallback 갭업으로 매수 보류 %s: gap=%.2f%% (기준=%.1f%%)", _display, gap_pct, self.MORNING_FALLBACK_GAP_UP_THRESHOLD)
+                        return False
+                    logger.info("오전 fallback 갭 확인 통과 %s: gap=%.2f%% -> 매수 진행", _display, gap_pct)
+            except Exception as _gap_err:
+                logger.warning("오전 fallback 갭 확인 중 오류 (%s): %s — 갭 확인 건너뜀", code, _gap_err)
         
         try:
             # DataFrame 길이 체크
