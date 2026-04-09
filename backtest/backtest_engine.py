@@ -24,34 +24,45 @@ logger = get_logger(__name__)
 
 class BacktestEngine:
     """백테스트 실행 엔진"""
+
+    DEFAULT_INITIAL_CAPITAL = 10_000_000
+    DEFAULT_RSI_SELL_THRESHOLD = 85.0
+    DEFAULT_PROFIT_TARGET_PERCENT = 10.0
+    DEFAULT_RSI_BUY_THRESHOLD = 3.0
+    DEFAULT_CASH_RESERVE_RATIO = 0.2
+    DEFAULT_COMMISSION_RATE_MOCK = 0.0035
+    DEFAULT_COMMISSION_RATE_REAL = 0.00015
+    DEFAULT_TAX_RATE_MOCK = 0.0000
+    DEFAULT_TAX_RATE_REAL = 0.0020
+    DEFAULT_RSI_METHOD = 'wilder'
+    DEFAULT_TIME_STOP_LOSS_DAYS = 90
     
     def __init__(
         self,
-        initial_capital: float = 10_000_000,  # 초기 자본금 (1천만원)
+        initial_capital: Optional[float] = None,  # env: INITIAL_CAPITAL, 기본값: DEFAULT_INITIAL_CAPITAL
         max_holdings: int = 10,  # 최대 보유 종목 수
         rsi_period: int = 2,  # RSI 계산 기간
         ma_short: int = 20,  # 단기 이동평균
         ma_long: int = 60,  # 장기 이동평균
         ma_trend: int = 200,  # 장기 추세 이동평균 (필터용)
-        # 전략 파라미터: None → .env → 하드코딩 기본값 순으로 적용
+        # 전략 파라미터: None → .env → 엔진 내부 기본값 순으로 적용
         # 명시적으로 값을 전달하면 .env를 무시하고 해당 값이 최우선 적용됨
-        rsi_sell_threshold: float = None,    # env: RSI_SELL_THRESHOLD, 기본값: 80
-        profit_target_percent: float = None, # env: PROFIT_TARGET_PERCENT, 기본값: 10.0
-        rsi_buy_threshold: float = None,     # env: RSI_BUY_THRESHOLD, 기본값: 3
-        price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%)
-        cash_reserve_ratio: float = None,    # env: CASH_RESERVE_RATIO, 기본값: 0.2
-        commission_rate: float = None,       # env: TRADING_FEE_PERCENT_{MODE}, 기본값: 0.0035
-        tax_rate: float = None,              # env: TRADING_TAX_PERCENT_{MODE}, 기본값: 0.0015
-        rsi_method: str = None,              # env: RSI_METHOD, 기본값: 'cutler'
+        rsi_sell_threshold: Optional[float] = None,    # env: RSI_SELL_THRESHOLD, 기본값: DEFAULT_RSI_SELL_THRESHOLD
+        profit_target_percent: float = None, # env: PROFIT_TARGET_PERCENT, 기본값: DEFAULT_PROFIT_TARGET_PERCENT
+        rsi_buy_threshold: float = None,     # env: RSI_BUY_THRESHOLD, 기본값: DEFAULT_RSI_BUY_THRESHOLD
+        price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화된 값)
+        cash_reserve_ratio: float = None,    # env: CASH_RESERVE_RATIO, 기본값: DEFAULT_CASH_RESERVE_RATIO
+        commission_rate: float = None,       # env: TRADING_FEE_PERCENT_{MODE}, 기본값: 모드별 기본 수수료
+        tax_rate: float = None,              # env: TRADING_TAX_PERCENT_{MODE}, 기본값: 모드별 기본 거래세
+        rsi_method: str = None,              # env: RSI_METHOD, 기본값: DEFAULT_RSI_METHOD
         rsi_min_periods: int = None,         # None이면 rsi_period 사용
         # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
         enable_stop_loss: bool = False,      # 가격 손절 비활성화 (최적화 기본값)
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%)
         enable_time_stop_loss: bool = True, # 시간 손절 독립 플래그 (최적화 기본값)
-        time_stop_loss_days: int = 365,      # 시간 손절 기준 (일) (최적화 기본값)
+        time_stop_loss_days: Optional[int] = None,  # env: TIME_STOP_LOSS_DAYS, 기본값: DEFAULT_TIME_STOP_LOSS_DAYS
         symbol_names: Dict[str, str] = None,
     ):
-        self.initial_capital = initial_capital
         self.max_holdings = max_holdings
         self.rsi_period = rsi_period
         self.ma_short = ma_short
@@ -60,7 +71,7 @@ class BacktestEngine:
         self.price_drop_threshold = price_drop_threshold
         self.rsi_min_periods = rsi_min_periods if rsi_min_periods is not None else rsi_period
 
-        # --- 우선순위 적용 헬퍼: 명시적 파라미터 > .env > 하드코딩 기본값 ---
+        # --- 우선순위 적용 헬퍼: 명시적 파라미터 > .env > 엔진 내부 기본값 ---
         def _resolve_float(explicit, env_name, fallback):
             """명시적 값이 있으면 그것을 쓰고, 없으면 env, 그것도 없으면 fallback 사용"""
             if explicit is not None:
@@ -68,9 +79,17 @@ class BacktestEngine:
             v = os.getenv(env_name)
             return float(v) if v is not None else fallback
 
-        self.rsi_sell_threshold   = _resolve_float(rsi_sell_threshold,   'RSI_SELL_THRESHOLD',    80.0)
-        self.profit_target_percent = _resolve_float(profit_target_percent, 'PROFIT_TARGET_PERCENT', 10.0)
-        self.rsi_buy_threshold    = _resolve_float(rsi_buy_threshold,     'RSI_BUY_THRESHOLD',      3.0)
+        def _resolve_int(explicit, env_name, fallback):
+            """명시적 값이 있으면 그것을 쓰고, 없으면 env, 그것도 없으면 fallback 사용"""
+            if explicit is not None:
+                return int(explicit)
+            v = os.getenv(env_name)
+            return int(v) if v is not None else fallback
+
+        self.initial_capital = _resolve_float(initial_capital, 'INITIAL_CAPITAL', self.DEFAULT_INITIAL_CAPITAL)
+        self.rsi_sell_threshold   = _resolve_float(rsi_sell_threshold, 'RSI_SELL_THRESHOLD', self.DEFAULT_RSI_SELL_THRESHOLD)
+        self.profit_target_percent = _resolve_float(profit_target_percent, 'PROFIT_TARGET_PERCENT', self.DEFAULT_PROFIT_TARGET_PERCENT)
+        self.rsi_buy_threshold    = _resolve_float(rsi_buy_threshold, 'RSI_BUY_THRESHOLD', self.DEFAULT_RSI_BUY_THRESHOLD)
 
         # CASH_RESERVE_RATIO: 퍼센트(20) 또는 소수(0.2) 두 형식 모두 허용
         if cash_reserve_ratio is not None:
@@ -81,14 +100,14 @@ class BacktestEngine:
                 tmp = float(v)
                 self.cash_reserve_ratio = tmp / 100.0 if tmp > 1 else tmp
             else:
-                self.cash_reserve_ratio = 0.2
+                self.cash_reserve_ratio = self.DEFAULT_CASH_RESERVE_RATIO
 
         # RSI 계산 방식
-        _rsi_method = rsi_method if rsi_method is not None else os.getenv('RSI_METHOD', 'cutler')
-        _rsi_method = _rsi_method.strip().lower() if isinstance(_rsi_method, str) else 'cutler'
+        _rsi_method = rsi_method if rsi_method is not None else os.getenv('RSI_METHOD', self.DEFAULT_RSI_METHOD)
+        _rsi_method = _rsi_method.strip().lower() if isinstance(_rsi_method, str) else self.DEFAULT_RSI_METHOD
         if _rsi_method not in ('cutler', 'wilder'):
-            logger.warning(f"Invalid RSI method '{_rsi_method}', using 'cutler'")
-            _rsi_method = 'cutler'
+            logger.warning(f"Invalid RSI method '{_rsi_method}', using '{self.DEFAULT_RSI_METHOD}'")
+            _rsi_method = self.DEFAULT_RSI_METHOD
         self.rsi_method = _rsi_method
 
         # 거래 비용: 명시적 파라미터 우선, 없으면 KIWOOM_MODE에 맞는 env 키에서 로드
@@ -96,6 +115,10 @@ class BacktestEngine:
             mode = os.getenv('KIWOOM_MODE', os.getenv('KIW_MODE', 'mock')).strip().lower()
         except Exception:
             mode = 'mock'
+
+        is_real_mode = mode == 'real'
+        default_commission_rate = self.DEFAULT_COMMISSION_RATE_REAL if is_real_mode else self.DEFAULT_COMMISSION_RATE_MOCK
+        default_tax_rate = self.DEFAULT_TAX_RATE_REAL if is_real_mode else self.DEFAULT_TAX_RATE_MOCK
 
         def _parse_percent_env(val):
             """퍼센트 표기(0.35 → 0.0035) 변환"""
@@ -122,14 +145,14 @@ class BacktestEngine:
         else:
             parsed = _parse_percent_env(os.getenv(f'TRADING_FEE_PERCENT_{mode.upper()}')) \
                      or _parse_rate_env('COMMISSION_RATE')
-            self.commission_rate = parsed if parsed is not None else 0.0035
+            self.commission_rate = parsed if parsed is not None else default_commission_rate
 
         if tax_rate is not None:
             self.tax_rate = float(tax_rate)
         else:
             parsed = _parse_percent_env(os.getenv(f'TRADING_TAX_PERCENT_{mode.upper()}')) \
                      or _parse_rate_env('TAX_RATE')
-            self.tax_rate = parsed if parsed is not None else 0.0015
+            self.tax_rate = parsed if parsed is not None else default_tax_rate
 
         self.buy_fee_rate  = 1 + self.commission_rate
         self.sell_fee_rate = 1 + self.commission_rate + self.tax_rate
@@ -138,10 +161,10 @@ class BacktestEngine:
         self.enable_stop_loss      = enable_stop_loss
         self.price_stop_loss_pct   = price_stop_loss_pct
         self.enable_time_stop_loss = enable_time_stop_loss
-        self.time_stop_loss_days   = time_stop_loss_days
+        self.time_stop_loss_days   = _resolve_int(time_stop_loss_days, 'TIME_STOP_LOSS_DAYS', self.DEFAULT_TIME_STOP_LOSS_DAYS)
 
         # 포트폴리오 상태
-        self.cash = initial_capital
+        self.cash = self.initial_capital
         self.symbol_names = symbol_names or {}
         self.holdings: Dict[str, Dict] = {}  # {code: {'quantity': int, 'avg_price': float, 'buy_date': str}}
 

@@ -78,6 +78,7 @@ class RSIStrategy(threading.Thread):
     PROFIT_TARGET_PERCENT = 10.0  # 매도 최소 수익률 기준 (%)
     RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
+    TIME_STOP_LOSS_DAYS = 90  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도 (최적화: 90일)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
     MORNING_FALLBACK_GAP_UP_THRESHOLD = 3.0  # 오전 fallback 갭업 차단 기준 (%) — 이 이상 갭업이면 매수 보류
     REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (API 제한)
@@ -220,8 +221,15 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
 
-        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s",
-                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD)
+        try:
+            v = os.getenv('TIME_STOP_LOSS_DAYS')
+            if v is not None:
+                self.TIME_STOP_LOSS_DAYS = int(v)
+        except Exception:
+            pass
+
+        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s",
+                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS)
 
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
@@ -259,6 +267,23 @@ class RSIStrategy(threading.Thread):
             # Kiwoom > 잔고 확인
             self.kiwoom.get_balance()
             self._stop_event.wait(0.3)  # API 호출 간격 확보 (interruptible)
+
+            # DB에서 매수일 복원: 프로그램 재시작 후에도 시간 손절이 올바르게 동작하도록 함
+            try:
+                saved_dates = load_all_purchase_dates()
+                for code, purchase_date in saved_dates.items():
+                    if code in self.kiwoom.balance:
+                        if not self.kiwoom.balance[code].get('매수일'):
+                            self.kiwoom.balance[code]['매수일'] = purchase_date
+                            logger.info("DB에서 매수일 복원: %s -> %s", code, purchase_date)
+                # DB에 있지만 이미 청산된 종목은 DB에서 삭제
+                current_holdings = set(self.kiwoom.balance.keys())
+                for code in list(saved_dates.keys()):
+                    if code not in current_holdings:
+                        delete_purchase_date(code)
+                        logger.info("청산 확인으로 매수일 DB 정리: %s", code)
+            except Exception as e:
+                logger.warning("매수일 DB 복원 중 오류 (무시): %s", e)
 
             # Kiwoom > 예수금 확인
             self.deposit = self.kiwoom.get_deposit()
@@ -1481,7 +1506,24 @@ class RSIStrategy(threading.Thread):
                 return False
             
             purchase_price = self.kiwoom.balance[code]['매입가']
-            
+
+            # 시간 손절: 매수일 기준 N일 초과 시 강제 매도
+            purchase_date_str = self.kiwoom.balance[code].get('매수일')
+            if purchase_date_str:
+                try:
+                    purchase_date = datetime.datetime.strptime(purchase_date_str, '%Y%m%d').date()
+                    holding_days = (get_korea_time().date() - purchase_date).days
+                    if holding_days > self.TIME_STOP_LOSS_DAYS:
+                        name = self.resolve_stock_name(code)
+                        display = f"{name}({code})" if name else code
+                        logger.info(
+                            "시간 손절 발생: %s (보유일=%d일, 기준=%d일, 매입가=%d원)",
+                            display, holding_days, self.TIME_STOP_LOSS_DAYS, purchase_price
+                        )
+                        return True
+                except Exception as e:
+                    logger.warning("매수일 파싱 오류 (%s): %s", code, e)
+
             # 금일의 RSI(N) 구하기
             if len(df) == 0:
                 logger.warning("DataFrame이 비어있습니다: %s", code)

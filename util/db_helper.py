@@ -96,6 +96,82 @@ def load_all_stock_names(db_name: str) -> Dict[str, str]:
     return result
 
 
+_PURCHASE_DATE_DB = "RSIStrategy"
+_PURCHASE_DATE_TABLE = "purchase_dates"
+
+
+def _ensure_purchase_dates_table() -> None:
+    """purchase_dates 테이블 생성 보장: code TEXT PRIMARY KEY, purchase_date TEXT (YYYYMMDD)"""
+    try:
+        with sqlite3.connect(_db_path(_PURCHASE_DATE_DB)) as con:
+            cur = con.cursor()
+            cur.execute(
+                f"""CREATE TABLE IF NOT EXISTS {_PURCHASE_DATE_TABLE} (
+                       code TEXT PRIMARY KEY,
+                       purchase_date TEXT NOT NULL
+                   )"""
+            )
+            con.commit()
+    except Exception as e:
+        logger.exception("_ensure_purchase_dates_table 실패: %s", e)
+
+
+def upsert_purchase_date(code: str, purchase_date: str) -> None:
+    """종목 매수일을 저장/갱신한다. purchase_date 형식: YYYYMMDD"""
+    try:
+        _ensure_purchase_dates_table()
+        with sqlite3.connect(_db_path(_PURCHASE_DATE_DB)) as con:
+            cur = con.cursor()
+            cur.execute(
+                f"INSERT OR REPLACE INTO {_PURCHASE_DATE_TABLE} (code, purchase_date) VALUES (?, ?)",
+                (code, purchase_date),
+            )
+            con.commit()
+    except Exception as e:
+        logger.exception("upsert_purchase_date 실패 (%s): %s", code, e)
+
+
+def get_purchase_date(code: str) -> Optional[str]:
+    """DB에서 종목 매수일을 조회한다. 없으면 None 반환."""
+    try:
+        _ensure_purchase_dates_table()
+        with sqlite3.connect(_db_path(_PURCHASE_DATE_DB)) as con:
+            cur = con.cursor()
+            cur.execute(f"SELECT purchase_date FROM {_PURCHASE_DATE_TABLE} WHERE code = ?", (code,))
+            row = cur.fetchone()
+            return row[0] if row else None
+    except Exception as e:
+        logger.exception("get_purchase_date 실패 (%s): %s", code, e)
+        return None
+
+
+def load_all_purchase_dates() -> Dict[str, str]:
+    """DB에 저장된 모든 code->purchase_date 맵을 반환한다."""
+    result: Dict[str, str] = {}
+    try:
+        _ensure_purchase_dates_table()
+        with sqlite3.connect(_db_path(_PURCHASE_DATE_DB)) as con:
+            cur = con.cursor()
+            cur.execute(f"SELECT code, purchase_date FROM {_PURCHASE_DATE_TABLE}")
+            for code, purchase_date in cur.fetchall():
+                result[code] = purchase_date
+    except Exception as e:
+        logger.exception("load_all_purchase_dates 실패: %s", e)
+    return result
+
+
+def delete_purchase_date(code: str) -> None:
+    """DB에서 종목 매수일 기록을 삭제한다."""
+    try:
+        _ensure_purchase_dates_table()
+        with sqlite3.connect(_db_path(_PURCHASE_DATE_DB)) as con:
+            cur = con.cursor()
+            cur.execute(f"DELETE FROM {_PURCHASE_DATE_TABLE} WHERE code = ?", (code,))
+            con.commit()
+    except Exception as e:
+        logger.exception("delete_purchase_date 실패 (%s): %s", code, e)
+
+
 if __name__ == "__main__":
     result = check_table_exist("RSIStrategy", "universe")
     print(f"Table 'universe' exists: {result}")

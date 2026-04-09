@@ -13,6 +13,7 @@ import websockets
 import threading
 from util.logging_config import get_logger
 from util.notifier import notify_on_exception
+from util.db_helper import upsert_purchase_date, delete_purchase_date
 
 # Kiwoom API 응답에서 사용되는 요청 한도 초과 메시지 키워드
 RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
@@ -738,7 +739,12 @@ class Kiwoom:
             # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             if cont_yn == "Y":
                 time.sleep(0.2)
+        # 기존 balance에서 매수일 정보 보존 (API 조회로 초기화되지 않도록)
+        existing_dates = {code: info.get('매수일') for code, info in self.balance.items()}
         self.balance = {code: info for code, info in all_holdings}
+        for code in self.balance:
+            preserved = existing_dates.get(code)
+            self.balance[code]['매수일'] = preserved if preserved else None
         return self.balance
 
     def set_real_reg(self, str_code_list, str_opt_type='0'):
@@ -896,6 +902,7 @@ class Kiwoom:
                         logger.info(f"매수 체결로 balance 업데이트: {code} 수량 {old_qty}->{new_qty}, 평균가 {new_avg_price}")
                     else:
                         # 신규 매수
+                        today_str = datetime.date.today().strftime('%Y%m%d')
                         self.balance[code] = {
                             '종목명': real_data.get('302', '').strip(),
                             '보유수량': exec_qty,
@@ -903,8 +910,10 @@ class Kiwoom:
                             '수익률': 0.0,
                             '현재가': current_price,
                             '매입금액': exec_qty * current_price,
-                            '매매가능수량': exec_qty
+                            '매매가능수량': exec_qty,
+                            '매수일': today_str
                         }
+                        upsert_purchase_date(code, today_str)
                         logger.info(f"신규 매수 체결로 balance 추가: {code} 수량 {exec_qty}, 가격 {current_price}")
                 
                 elif order_type_normalized == '매도':
@@ -915,6 +924,7 @@ class Kiwoom:
                         if new_qty <= 0:
                             # 전량 매도
                             del self.balance[code]
+                            delete_purchase_date(code)
                             logger.info(f"전량 매도 체결로 balance에서 제거: {code}")
                         else:
                             # 일부 매도

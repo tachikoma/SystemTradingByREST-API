@@ -13,12 +13,12 @@
 ### 1. RSI 계산 방식
 **문제점**: 
 - 실제 전략: `RSI_METHOD` 환경변수로 'cutler' (SMA) 또는 'wilder' (EWMA) 선택 가능
-- 백테스트 엔진: 항상 'wilder' 방식만 사용
+- 백테스트 엔진: 현재는 `RSI_METHOD` 환경변수와 생성자 인자로 동일하게 제어 가능하며, 기본값은 'wilder'
 
 **수정**:
 ```python
 # 새로운 파라미터 추가
-rsi_method: str = 'cutler'  # 'cutler' (SMA) 또는 'wilder' (EWMA)
+rsi_method: str = None  # env: RSI_METHOD, 기본값: 'wilder'
 rsi_min_periods: int = None  # RSI 계산 최소 기간
 
 # calculate_rsi() 메서드를 RSIStrategy와 동일하게 재작성
@@ -119,7 +119,7 @@ poetry run python -c "from backtest.backtest_engine import BacktestEngine; ..."
 3. **유니버스 동기화**: 백테스트 유니버스를 실전 전략과 동일하게 구성
 
 ### 주의사항
-- 백테스트 실행 시 `rsi_method='cutler'`인지 확인 (기본값)
+- 백테스트 실행 시 `rsi_method='wilder'` 기본값 또는 `.env` 설정값을 확인
 - `cash_reserve_ratio=0.2`가 항상 적용되는지 확인
 - 기존 백테스트 결과는 이 수정 전 로직으로 생성되었으므로 재실행 권장
 

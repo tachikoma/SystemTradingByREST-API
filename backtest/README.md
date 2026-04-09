@@ -8,9 +8,13 @@ RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를
 
 ```python
 BacktestEngine(
-    initial_capital=10_000_000 * 0.8,  # 현금 20% 유지 (800만원 투자)
-    rsi_buy_threshold=3,                # 5 → 3 (더 강한 과매도)
-    price_drop_threshold=-5.0,          # -2% → -5% (더 큰 하락)
+    initial_capital=10_000_000,   # 초기 자본금 (env: INITIAL_CAPITAL)
+    cash_reserve_ratio=0.2,       # 현금 20% 유지
+    rsi_sell_threshold=85,        # 매도 기준 강화
+    rsi_buy_threshold=3,          # 5 → 3 (더 강한 과매도)
+    price_drop_threshold=-5.0,    # -2% → -5% (더 큰 하락)
+    rsi_method='wilder',          # 현재 기본 RSI 방식
+    time_stop_loss_days=90,       # 90일 초과 보유 시 청산
 )
 ```
 
@@ -88,11 +92,14 @@ engine = BacktestEngine(
     rsi_period=2,                 # RSI 계산 기간
     ma_short=20,                  # 단기 이동평균
     ma_long=60,                   # 장기 이동평균
-    rsi_sell_threshold=80,        # RSI 매도 기준
-    rsi_buy_threshold=5,          # RSI 매수 기준
-    price_drop_threshold=-2,      # 가격 하락 기준 (%)
+    cash_reserve_ratio=0.2,       # 현금 보유 비율
+    rsi_sell_threshold=85,        # RSI 매도 기준
+    rsi_buy_threshold=3,          # RSI 매수 기준
+    price_drop_threshold=-5.0,    # 가격 하락 기준 (%)
+    rsi_method='wilder',          # RSI 계산 방식
     commission_rate=0.00015,      # 거래 수수료율
-    tax_rate=0.0025               # 거래세 (매도 시)
+    tax_rate=0.0020,              # 거래세 (매도 시)
+    time_stop_loss_days=90        # 시간 손절 기준 (일)
 )
 
 # 백테스트 실행
