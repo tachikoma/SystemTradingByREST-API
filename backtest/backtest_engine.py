@@ -308,16 +308,27 @@ class BacktestEngine:
             
             idx = df.index.get_loc(date)
             current = df.iloc[idx]
-            
+            previous = df.iloc[idx - 1] if idx > 0 else None
+
+            open_price = current['open']
             close = current['close']
-            rsi = current['rsi']
+            current_rsi = current['rsi']
+            prev_rsi = previous['rsi'] if previous is not None else np.nan
 
             # display (name(code)) for logging
             display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
-            logger.debug("check_sell_signal %s date=%s rsi=%.2f close=%d", display, date, rsi, close)
+            logger.debug(
+                "check_sell_signal %s date=%s prev_rsi=%.2f current_rsi=%.2f open=%d close=%d",
+                display,
+                date,
+                prev_rsi,
+                current_rsi,
+                open_price,
+                close,
+            )
             
             # 값 유효성 체크
-            if np.isnan(rsi):
+            if np.isnan(prev_rsi) and np.isnan(current_rsi):
                 return False, None
             
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
@@ -328,13 +339,12 @@ class BacktestEngine:
             target_price = math.ceil(breakeven_price * (1 + (self.profit_target_percent / 100)))
             
             # 매도 조건 확인
-            # 1) RSI > 80 (과매수) AND 손익분기점 초과
-            # 2) AND 목표가 도달 (손익분기점 기준 수익률)
-            if (
-                rsi > self.rsi_sell_threshold
-                and close > breakeven_price
-                and close >= target_price
-            ):
+            # 1) 전일 종가 기준 RSI가 과매수면 당일 시가 체결을 우선 시도
+            # 2) 시가 체결이 안 되면 당일 종가 RSI와 종가 기준으로 폴백
+            if prev_rsi > self.rsi_sell_threshold and open_price >= target_price:
+                return True, open_price
+
+            if current_rsi > self.rsi_sell_threshold and close >= target_price:
                 return True, close
             
             return False, None
