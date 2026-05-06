@@ -10,7 +10,7 @@ API 재호출 없이 로컬 DB만으로 실행 가능합니다.
     poetry run python backtest/rebuild_snapshots.py
 
 환경변수:
-    MONTHLY_UNIVERSE_SIZE: 월별 유니버스 크기 (기본 100)
+    MONTHLY_UNIVERSE_SIZE: 월별 유니버스 크기 (기본 250)
     DB_DIR: DB 파일 디렉토리 (기본 ./data)
 """
 
@@ -151,7 +151,7 @@ def rebuild_availability(conn: sqlite3.Connection, universe: dict, price_data: d
 
 def rebuild_snapshots(conn: sqlite3.Connection, universe: dict, price_data: dict):
     """universe_snapshots 테이블 재생성 (실전 전략 동일 기준)"""
-    snapshot_size = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '100'))
+    snapshot_size = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '250'))
     logger.info(f"월별 유니버스 크기: {snapshot_size}개 (MONTHLY_UNIVERSE_SIZE)")
 
     # 1차 필터: 우선주 + 이름 키워드 제외 (시간 불변)

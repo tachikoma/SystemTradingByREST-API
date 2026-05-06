@@ -50,9 +50,11 @@ class HistoricalDataFetcher:
         """유니버스 설정 - 기존 자동매매 프로그램의 종목 리스트 사용"""
         logger.info("유니버스 설정 시작...")
         
-        # 유니버스 리스트 가져오기
-        universe_list = get_universe()
-        logger.info(f"유니버스 종목 수: {len(universe_list)}")
+        # 유니버스 리스트 가져오기 (MONTHLY_UNIVERSE_SIZE 환경변수 기준, 기본 250)
+        # kiwoom_client 전달: 장 종료 후면 API로 당일 최신 데이터 갱신, 장 중이면 크롤링
+        universe_max = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '250'))
+        universe_list = get_universe(kiwoom_client=self.kiwoom, max_codes=universe_max)
+        logger.info(f"유니버스 종목 수: {len(universe_list)} (max_codes={universe_max})")
         logger.debug(f"유니버스 종목명 샘플 (처음 10개): {universe_list[:10]}")
         
         # KOSPI와 KOSDAQ 종목 코드 가져오기
@@ -162,7 +164,7 @@ class HistoricalDataFetcher:
             logger.warning("가용 기간으로 저장할 종목이 없습니다.")
 
         # 2) YYYYMM별 유니버스 구성 저장 — 실전 전략과 동일한 필터 소급 적용
-        snapshot_size = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '100'))
+        snapshot_size = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '250'))
 
         # 2-a) 1차 필터: 우선주 제외 + 종목명 키워드 제외 (시간 불변 필터)
         strategy_filtered_universe = {
@@ -390,11 +392,6 @@ def main():
     print(f"\n총 {len(fetcher.universe)}개 종목의 약 {TARGET_YEARS}년치 데이터를 수집합니다.")
     print(f"DB 파일: {DB_NAME}.db")
     print(f"예상 소요 시간: 약 {len(fetcher.universe) * MAX_LOOPS * 0.5 / 60:.1f}분")
-    
-    response = input("\n계속하시겠습니까? (y/n): ").strip().lower()
-    if response != 'y':
-        logger.info("사용자에 의해 취소되었습니다.")
-        sys.exit(0)
     
     # 전체 데이터 수집 시작
     start_time = time.time()

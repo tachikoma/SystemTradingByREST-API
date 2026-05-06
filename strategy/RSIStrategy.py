@@ -81,7 +81,10 @@ class RSIStrategy(threading.Thread):
     TIME_STOP_LOSS_DAYS = 90  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도 (최적화: 90일)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
     MORNING_FALLBACK_GAP_UP_THRESHOLD = 3.0  # 오전 fallback 갭업 차단 기준 (%) — 이 이상 갭업이면 매수 보류
-    REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (API 제한)
+    REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (WebSocket API 제한)
+    POLLING_MAX_CODES  = 150  # 폴링(REST) 추가 감시 최대 종목 수
+    POLLING_RATE_LIMIT = 0.2  # 종목당 REST 호출 간격 (초) — rate limit 방지
+    POLLING_LOG_INTERVAL = 50  # N종목마다 폴링 진행 로그 출력
     # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (Wilder/EWMA)
     RSI_METHOD = 'cutler'
     
@@ -248,6 +251,12 @@ class RSIStrategy(threading.Thread):
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
 
+        # 폴링(REST) 관련 상태 변수
+        # WebSocket에 등록된 코드 집합 — 폴링 대상 결정에 사용
+        self._realtime_registered_codes: set = set()
+        # 루프 직전 실시간 데이터 스냅샷 — 루프 중 변경 방지
+        self._rt_snapshot: dict = {}
+
         self.init_strategy()
 
     def init_strategy(self):
@@ -304,6 +313,9 @@ class RSIStrategy(threading.Thread):
 
             # 유니버스 실시간 체결정보 등록
             self.set_universe_real_time()
+
+            # WebSocket 미등록 종목 REST 폴링 워커 시작
+            self._start_polling_worker()
 
             self.is_init_success = True
 
@@ -721,7 +733,10 @@ class RSIStrategy(threading.Thread):
             
             try:
                 # 스마트 유니버스 생성: 장 종료 후면 API로 당일 데이터 갱신, 장 중이면 크롤링
-                universe_list = get_universe(kiwoom_client=self.kiwoom)
+                universe_list = get_universe(
+                    kiwoom_client=self.kiwoom,
+                    max_codes=self.REALTIME_MAX_CODES + self.POLLING_MAX_CODES,
+                )
                 logger.info("Universe list: %s", universe_list)
             except Exception as e:
                 error_msg = f"Universe 생성 실패: {e}"
@@ -1143,6 +1158,10 @@ class RSIStrategy(threading.Thread):
                 except Exception as e:
                     logger.error("ensure_holdings_in_universe 호출 중 오류: %s", e)
 
+                # 루프 시작 전 실시간 데이터 스냅샷 확정
+                # — 루프 실행 중 WebSocket/폴링 워커에 의한 값 변경이 개별 종목 판단에 영향을 주지 않도록 고정
+                self._rt_snapshot = dict(self.kiwoom.universe_realtime_transaction_info)
+
                 for idx, code in enumerate(self.universe.keys()):
                     logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
                     self._stop_event.wait(0.3)  # 종목별 처리 간격 (interruptible)
@@ -1322,8 +1341,68 @@ class RSIStrategy(threading.Thread):
         logger.info("실시간 등록 종목(%d): %s", len(selected[:self.REALTIME_MAX_CODES]), selected[:self.REALTIME_MAX_CODES])
         try:
             self.kiwoom.set_real_reg(codes, "0")
+            # WebSocket 등록 코드 집합 업데이트 — 폴링 대상 결정에 사용
+            self._realtime_registered_codes = set(selected[:self.REALTIME_MAX_CODES])
+            logger.info("WebSocket 등록 코드 갱신: %d종목", len(self._realtime_registered_codes))
         except Exception as e:
             logger.error("실시간 등록 요청 실패: %s", e)
+
+    def _start_polling_worker(self):
+        """WebSocket 미등록 종목을 주기적으로 REST API로 조회하는 백그라운드 워커 시작.
+
+        WebSocket(100개 제한) 외의 유니버스 종목의 현재가를 POLLING_RATE_LIMIT 간격으로
+        get_stock_info(ka10001)로 조회하여 universe_realtime_transaction_info에 기록합니다.
+        rate limit: 종목당 0.2초 → 초당 5건 (키움 제한 10건/초의 절반)
+        """
+        def worker():
+            logger.info("폴링 워커 시작: REST API로 WebSocket 미등록 종목 현재가 조회")
+            while not self._stop_event.is_set():
+                try:
+                    # WebSocket 미등록 종목 = 폴링 대상
+                    polling_targets = [
+                        code for code in list(self.universe.keys())
+                        if code not in self._realtime_registered_codes
+                    ][:self.POLLING_MAX_CODES]
+
+                    if not polling_targets:
+                        self._stop_event.wait(10)
+                        continue
+
+                    logger.debug("폴링 워커: %d종목 조회 시작", len(polling_targets))
+                    for idx, code in enumerate(polling_targets):
+                        if self._stop_event.is_set():
+                            break
+                        try:
+                            info = self.kiwoom.get_stock_info(code)
+                            if info:
+                                cur_prc = abs(int(float(info.get('cur_prc', 0) or 0)))
+                                trde_qty = abs(int(float(info.get('trde_qty', 0) or 0)))
+                                # WebSocket 포맷과 동일한 키로 저장 (기존 코드 변경 불필요)
+                                self.kiwoom.universe_realtime_transaction_info[code] = {
+                                    '현재가': cur_prc,
+                                    '누적거래량': trde_qty,
+                                    '_from_polling': True,  # 폴링 출처 식별용
+                                }
+                        except Exception as e:
+                            logger.debug("폴링 실패 (%s): %s", code, e)
+
+                        if idx % self.POLLING_LOG_INTERVAL == 0 and idx > 0:
+                            logger.debug("폴링 워커 진행: %d/%d", idx, len(polling_targets))
+
+                        # 종목별 호출 간격 (rate limit 방지)
+                        self._stop_event.wait(self.POLLING_RATE_LIMIT)
+
+                except Exception as e:
+                    logger.warning("폴링 워커 예외: %s", e)
+
+                # 배치 완료 후 짧은 대기 (다음 순회 시작)
+                self._stop_event.wait(5)
+
+            logger.info("폴링 워커 종료")
+
+        t = threading.Thread(target=worker, name='polling-worker', daemon=True)
+        t.start()
+        logger.info("폴링 워커 스레드 시작 완료 (최대 %d종목 REST 폴링)", self.POLLING_MAX_CODES)
 
     @notify_on_exception(fallback_return=None)
     def ensure_holdings_in_universe(self):
@@ -1540,13 +1619,15 @@ class RSIStrategy(threading.Thread):
             logger.warning("Universe item not found for code: %s", code)
             return None, None
 
-        # 실시간 체결 정보 확인
-        if code not in self.kiwoom.universe_realtime_transaction_info.keys():
+        # 실시간 체결 정보 확인 (루프 전 캡처된 스냅샷 사용 — 루프 중 변경 영향 차단)
+        # _rt_snapshot이 없는 경우(초기화 전 직접 호출 등) 라이브 데이터로 폴백
+        rt_source = self._rt_snapshot if self._rt_snapshot else self.kiwoom.universe_realtime_transaction_info
+        if code not in rt_source:
             logger.info("실시간 체결정보가 아직 없습니다: %s", code)
             return None, None
 
         try:
-            realtime_info = self.kiwoom.universe_realtime_transaction_info[code]
+            realtime_info = rt_source[code]
             close = realtime_info.get('현재가')
 
             # 우선 compact 데이터 사용
@@ -1819,7 +1900,9 @@ class RSIStrategy(threading.Thread):
         # 갭다운이면 신호 강화로 진행 (로그만 기록)
         if in_morning_fallback:
             try:
-                rt_info = self.kiwoom.universe_realtime_transaction_info.get(code, {})
+                # 스냅샷 우선 사용 (없으면 라이브 데이터 폴백)
+                rt_source = self._rt_snapshot if self._rt_snapshot else self.kiwoom.universe_realtime_transaction_info
+                rt_info = rt_source.get(code, {})
                 # 시가 우선, 없으면 현재가로 대체
                 today_open = rt_info.get('시가') or rt_info.get('현재가')
                 # df[-2]는 전일 종가 (df[-1]은 calculate_rsi에서 appended된 현재가)

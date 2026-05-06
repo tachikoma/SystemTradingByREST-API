@@ -390,13 +390,14 @@ def crawler(code, page, fields):
     return df
 
 
-def get_universe(kiwoom_client=None, use_kiwoom_api=False):
+def get_universe(kiwoom_client=None, use_kiwoom_api=False, max_codes=200):
     """
     유니버스를 생성하는 함수 (스마트 캐싱 전략)
     
     Args:
         kiwoom_client: Kiwoom API 클라이언트 (장 종료 후 자동으로 사용)
         use_kiwoom_api: 키움 API 강제 사용 (기본값: False, 자동 판단)
+        max_codes: 유니버스 최대 종목 수 (기본값: 200)
     
     Returns:
         list: 종목명 리스트
@@ -413,7 +414,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
         try:
             df = fetch_all_stocks_from_kiwoom(kiwoom_client)
             logger.info(f"✅ 키움 API로 {len(df)}개 종목 정보 획득 및 캐싱 완료")
-            universe = _filter_and_create_universe(df)
+            universe = _filter_and_create_universe(df, max_codes=max_codes)
             try:
                 del df
                 gc.collect()
@@ -429,7 +430,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                 cached_df = _try_load_cache()
                 if cached_df is not None:
                     logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
-                    universe = _filter_and_create_universe(cached_df)
+                    universe = _filter_and_create_universe(cached_df, max_codes=max_codes)
                     try:
                         del cached_df
                         gc.collect()
@@ -494,7 +495,7 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False):
                 logger.error(f"크롤링 실패이고 사용 가능한 캐시도 없습니다.")
                 raise Exception(f"크롤링 실패이고 사용 가능한 캐시도 없습니다: {e}")
 
-    universe = _filter_and_create_universe(df)
+    universe = _filter_and_create_universe(df, max_codes=max_codes)
     try:
         del df
         gc.collect()
@@ -547,7 +548,7 @@ def _try_load_cache():
     return None
 
 
-def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
+def _filter_and_create_universe(df, kiwoom_client=None, max_codes=200):
     """
     DataFrame을 받아서 필터링하고 유니버스를 생성하는 내부 함수
     네이버 크롤링과 키움 API 모두에서 공통으로 사용
@@ -640,8 +641,8 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=100):
         if first_col != '종목코드':
             df = df.rename(columns={first_col: '종목코드'})
 
-    # 상위 100개만 추출
-    df = df.loc[:99]
+    # 상위 max_codes개만 추출
+    df = df.loc[:max_codes - 1]
     
     # Universe 최소 개수 검증 (비정상 데이터 방지)
     MIN_UNIVERSE_SIZE = 10
