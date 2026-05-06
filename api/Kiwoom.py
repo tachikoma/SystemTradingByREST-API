@@ -9,6 +9,7 @@ import pandas as pd
 from util.const import *
 from util.time_helper import get_korea_time
 import asyncio
+import concurrent.futures
 import websockets
 import threading
 from util.logging_config import get_logger
@@ -958,10 +959,24 @@ class Kiwoom:
             self._login_send_lock = None
         try:
             self.asyncio_loop.run_until_complete(self._websocket_main_loop())
+        except asyncio.CancelledError:
+            # Python 3.12에서는 CancelledError가 스레드까지 전파될 수 있으므로 정상 종료로 처리합니다.
+            logger.info("WebSocket loop cancelled during shutdown.")
         except Exception as e:
             logger.exception(f"WebSocket loop error: {e}")
         finally:
-            self.asyncio_loop.close()
+            # 루프 종료 전 남아있는 태스크를 정리해 "Task was destroyed but it is pending" 경고를 방지합니다.
+            try:
+                pending_tasks = [t for t in asyncio.all_tasks(self.asyncio_loop) if not t.done()]
+                for task in pending_tasks:
+                    task.cancel()
+                if pending_tasks:
+                    self.asyncio_loop.run_until_complete(asyncio.gather(*pending_tasks, return_exceptions=True))
+                self.asyncio_loop.run_until_complete(self.asyncio_loop.shutdown_asyncgens())
+            except Exception as e:
+                logger.debug(f"Error while finalizing websocket loop: {e}")
+            finally:
+                self.asyncio_loop.close()
 
     @notify_on_exception(fallback_return=None)
     async def _websocket_main_loop(self):
@@ -1111,6 +1126,10 @@ class Kiwoom:
                 # 기본 대기시간은 5초
                 try:
                     fut.result(timeout=5)
+                except (asyncio.CancelledError, concurrent.futures.CancelledError):
+                    logger.info("WebSocket shutdown coroutine cancelled during shutdown.")
+                except concurrent.futures.TimeoutError:
+                    logger.warning("WebSocket shutdown coroutine timed out after 5 seconds.")
                 except Exception as e:
                     logger.warning(f"Exception while waiting for websocket shutdown: {e}")
             except Exception as e:
@@ -1161,12 +1180,6 @@ class Kiwoom:
                 self.is_websocket_connected = False
                 self._websocket_logged_in = False
                 self._websocket_login_sent = False
-            except Exception:
-                pass
-            # 루프 중지 요청 (실행 중인 루프에서 호출되므로 안전)
-            try:
-                loop = asyncio.get_running_loop()
-                loop.stop()
             except Exception:
                 pass
 
