@@ -36,6 +36,8 @@ class BacktestEngine:
     DEFAULT_TAX_RATE_REAL = 0.0020
     DEFAULT_RSI_METHOD = 'wilder'
     DEFAULT_TIME_STOP_LOSS_DAYS = 90
+    DEFAULT_SLIPPAGE_BUY = 0.002   # 0.2% 매수 슬리피지 (체결 불리)
+    DEFAULT_SLIPPAGE_SELL = 0.002  # 0.2% 매도 슬리피지 (체결 불리)
     
     def __init__(
         self,
@@ -61,6 +63,8 @@ class BacktestEngine:
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%)
         enable_time_stop_loss: bool = True, # 시간 손절 독립 플래그 (최적화 기본값)
         time_stop_loss_days: Optional[int] = None,  # env: TIME_STOP_LOSS_DAYS, 기본값: DEFAULT_TIME_STOP_LOSS_DAYS
+        slippage_buy: float = None,              # env: SLIPPAGE_BUY, 기본값: DEFAULT_SLIPPAGE_BUY
+        slippage_sell: float = None,             # env: SLIPPAGE_SELL, 기본값: DEFAULT_SLIPPAGE_SELL
         symbol_names: Dict[str, str] = None,
     ):
         self.max_holdings = max_holdings
@@ -162,6 +166,10 @@ class BacktestEngine:
         self.price_stop_loss_pct   = price_stop_loss_pct
         self.enable_time_stop_loss = enable_time_stop_loss
         self.time_stop_loss_days   = _resolve_int(time_stop_loss_days, 'TIME_STOP_LOSS_DAYS', self.DEFAULT_TIME_STOP_LOSS_DAYS)
+
+        # 슬리피지 설정 (매수 시 불리하게 적용: 가격 상승, 매도 시 불리하게 적용: 가격 하락)
+        self.slippage_buy  = _resolve_float(slippage_buy,  'SLIPPAGE_BUY',  self.DEFAULT_SLIPPAGE_BUY)
+        self.slippage_sell = _resolve_float(slippage_sell, 'SLIPPAGE_SELL', self.DEFAULT_SLIPPAGE_SELL)
 
         # 포트폴리오 상태
         self.cash = self.initial_capital
@@ -420,33 +428,35 @@ class BacktestEngine:
         
         Args:
             code: 종목 코드
-            price: 매수 가격
+            price: 매수 가격 (신호 기준 가격; 슬리피지는 내부 적용)
             date: 거래 날짜
             budget: 매수에 사용할 예산
         """
+        # 슬리피지 적용: 매수 시 실제 체결 가격은 신호 가격보다 slippage_buy만큼 높음
+        execution_price = math.ceil(price * (1 + self.slippage_buy))
         # 매수 가능 수량 계산 (RSIStrategy와 동일하게 math.floor 사용)
-        quantity = math.floor(budget / price)
+        quantity = math.floor(budget / execution_price)
         
         if quantity < 1:
             return
         
-        # 수수료 포함 실제 매수 금액 (RSIStrategy와 동일하게 math.floor 사용)
-        buy_amount = quantity * price
+        # 수수료 포함 실제 매수 금액 (슬리피지 적용 가격 기준, RSIStrategy와 동일하게 math.floor 사용)
+        buy_amount = quantity * execution_price
         total_cost = math.floor(buy_amount * self.buy_fee_rate)
         
         # 예산 체크
         if total_cost > self.cash:
             # 예산에 맞게 수량 재조정
-            quantity = int((self.cash / self.buy_fee_rate) / price)
+            quantity = int((self.cash / self.buy_fee_rate) / execution_price)
             if quantity < 1:
                 return
-            buy_amount = quantity * price
+            buy_amount = quantity * execution_price
             total_cost = math.floor(buy_amount * self.buy_fee_rate)
         
         # 현금 차감
         self.cash -= total_cost
         
-        # 포지션 추가 또는 업데이트
+        # 포지션 추가 또는 업데이트 (avg_price는 슬리피지 적용 가격으로 기록)
         if code in self.holdings:
             # 기존 보유 종목 추가 매수
             old_quantity = self.holdings[code]['quantity']
@@ -464,7 +474,7 @@ class BacktestEngine:
             # 신규 매수
             self.holdings[code] = {
                 'quantity': quantity,
-                'avg_price': price,
+                'avg_price': execution_price,
                 'buy_date': date
             }
         
@@ -474,7 +484,8 @@ class BacktestEngine:
             'date': date,
             'code': code,
             'type': 'buy',
-            'price': price,
+            'price': price,             # 신호 기준 가격
+            'execution_price': execution_price,  # 슬리피지 적용 체결 가격
             'quantity': quantity,
             'amount': buy_amount,
             'commission': commission,
@@ -482,14 +493,14 @@ class BacktestEngine:
         })
         
         display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
-        logger.info(f"[{date}] 매수: {display}, 가격: {price:,.0f}, 수량: {quantity}, 총액: {total_cost:,.0f}")
+        logger.info(f"[{date}] 매수: {display}, 신호가: {price:,.0f}, 체결가: {execution_price:,.0f}(+슬리피지), 수량: {quantity}, 총액: {total_cost:,.0f}")
     
     def execute_sell(self, code: str, price: float, date: str):
         """매도 주문 실행 (RSIStrategy와 동일한 로직)
         
         Args:
             code: 종목 코드
-            price: 매도 가격
+            price: 매도 가격 (신호 기준 가격; 슬리피지는 내부 적용)
             date: 거래 날짜
         """
         if code not in self.holdings:
@@ -498,8 +509,11 @@ class BacktestEngine:
         quantity = self.holdings[code]['quantity']
         avg_price = self.holdings[code]['avg_price']
         
-        # 수수료 + 거래세 포함 실제 매도 금액 (RSIStrategy와 동일)
-        sell_amount = quantity * price
+        # 슬리피지 적용: 매도 시 실제 체결 가격은 신호 가격보다 slippage_sell만큼 낮음
+        execution_price = math.floor(price * (1 - self.slippage_sell))
+
+        # 수수료 + 거래세 포함 실제 매도 금액 (슬리피지 적용 가격 기준, RSIStrategy와 동일)
+        sell_amount = quantity * execution_price
         net_proceeds = math.floor(sell_amount / self.sell_fee_rate)
         
         # 현금 증가
@@ -516,15 +530,17 @@ class BacktestEngine:
         
         # 거래 기록
         total_fee = sell_amount - net_proceeds
+        fee_denom = self.commission_rate + self.tax_rate
         self.trades.append({
             'date': date,
             'code': code,
             'type': 'sell',
-            'price': price,
+            'price': price,             # 신호 기준 가격
+            'execution_price': execution_price,  # 슬리피지 적용 체결 가격
             'quantity': quantity,
             'amount': sell_amount,
-            'commission': total_fee * (self.commission_rate / (self.commission_rate + self.tax_rate)),
-            'tax': total_fee * (self.tax_rate / (self.commission_rate + self.tax_rate)),
+            'commission': total_fee * (self.commission_rate / fee_denom) if fee_denom else 0,
+            'tax': total_fee * (self.tax_rate / fee_denom) if fee_denom else 0,
             'net_proceeds': net_proceeds,
             'avg_buy_price': avg_price,
             'profit': profit,
@@ -532,8 +548,8 @@ class BacktestEngine:
         })
         
         display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
-        logger.info(f"[{date}] 매도: {display}, 가격: {price:,.0f}, 수량: {quantity}, "
-                   f"수익: {profit:,.0f} ({profit_rate:.2f}%)")
+        logger.info(f"[{date}] 매도: {display}, 신호가: {price:,.0f}, 체결가: {execution_price:,.0f}(-슬리피지), "
+                   f"수량: {quantity}, 수익: {profit:,.0f} ({profit_rate:.2f}%)")
     
     def calculate_portfolio_value(self, date: str, price_data: Dict[str, pd.DataFrame]) -> float:
         """현재 포트폴리오 가치 계산
@@ -566,7 +582,9 @@ class BacktestEngine:
         self, 
         price_data: Dict[str, pd.DataFrame],
         start_date: str = None,
-        end_date: str = None
+        end_date: str = None,
+        availability_map: Dict[str, tuple] = None,
+        monthly_universe_map: Dict[str, set] = None,
     ) -> Dict:
         """백테스트 실행
         
@@ -574,11 +592,21 @@ class BacktestEngine:
             price_data: {종목코드: OHLCV DataFrame} 딕셔너리
             start_date: 시작 날짜 (YYYYMMDD)
             end_date: 종료 날짜 (YYYYMMDD)
+            availability_map: {종목코드: (earliest_yyyymm, latest_yyyymm)} 딕셔너리.
+                지정하면 각 거래일마다 해당 날짜에 데이터가 존재하는 종목만 매수 신호 검토.
+                생존편향 제거를 위한 워크포워드 백테스트에서 활용합니다.
+            monthly_universe_map: {YYYYMM: {code1, code2, ...}} 딕셔너리.
+                지정하면 해당 월 스냅샷에 포함된 종목만 매수 신호 검토.
+                진짜 월별 워크포워드 유니버스 적용 시 사용합니다.
             
         Returns:
             백테스트 결과 딕셔너리
         """
         logger.info("백테스트 시작...")
+        if availability_map:
+            logger.info("워크포워드 모드: 종목별 데이터 가용 기간 필터 적용")
+        if monthly_universe_map:
+            logger.info("워크포워드 모드: 월별 유니버스 스냅샷 필터 적용")
         
         # 초기화
         self.cash = self.initial_capital
@@ -652,6 +680,19 @@ class BacktestEngine:
                     # 이미 보유 중이면 스킵
                     if code in self.holdings:
                         continue
+
+                    # 월별 유니버스 스냅샷 필터
+                    if monthly_universe_map:
+                        month_codes = monthly_universe_map.get(date[:6], set())
+                        if month_codes and code not in month_codes:
+                            continue
+
+                    # 워크포워드 모드: 해당 날짜에 데이터가 존재하는 종목만 매수 신호 검토
+                    if availability_map and code in availability_map:
+                        date_yyyymm = date[:6]
+                        earliest, latest = availability_map[code][:2]
+                        if not (earliest <= date_yyyymm <= latest):
+                            continue
                     
                     buy_signal, buy_price = self.check_buy_signal(
                         code, date, df, current_holdings
@@ -743,6 +784,8 @@ class BacktestEngine:
             'time_stop_loss_enabled': self.enable_time_stop_loss,  # 시간 손절 활성화 여부
             'price_stop_loss_pct': self.price_stop_loss_pct,  # 가격 손절 기준
             'time_stop_loss_days': self.time_stop_loss_days,  # 시간 손절 기준
+            'slippage_buy': self.slippage_buy,    # 매수 슬리피지 비율
+            'slippage_sell': self.slippage_sell,  # 매도 슬리피지 비율
             'open_positions': dict(self.holdings),  # 미청산 포지션
             'open_positions_value': final_value - self.cash,  # 미청산 포지션 평가금액
             'daily_values': df

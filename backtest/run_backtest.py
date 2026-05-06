@@ -44,6 +44,107 @@ plt.rcParams['font.family'] = 'AppleGothic'  # macOS
 plt.rcParams['axes.unicode_minus'] = False  # 마이너스 기호 깨짐 방지
 
 
+def load_universe_availability(db_name: str) -> dict:
+    """DB에서 종목별 데이터 가용 기간 로드
+
+    fetch_historical_data.py가 생성한 'universe_availability' 테이블을 읽어
+    {code: (earliest_yyyymm, latest_yyyymm, code_name)} 딕셔너리를 반환합니다.
+
+    테이블이 없으면 빈 딕셔너리를 반환합니다.
+    """
+    if not check_table_exist(db_name, 'universe_availability'):
+        return {}
+    sql = "SELECT code, code_name, earliest_yyyymm, latest_yyyymm FROM universe_availability"
+    cur = execute_sql(db_name, sql)
+    result = {}
+    for row in cur.fetchall():
+        code, code_name, earliest, latest = row
+        result[code] = (earliest, latest, code_name)
+    return result
+
+
+def load_monthly_universe_snapshots(db_name: str) -> dict:
+    """DB에서 YYYYMM별 유니버스 스냅샷 로드
+
+    Returns:
+        {YYYYMM: set([code1, code2, ...])}
+    """
+    if not check_table_exist(db_name, 'universe_snapshots'):
+        return {}
+
+    sql = "SELECT yyyymm, code FROM universe_snapshots"
+    cur = execute_sql(db_name, sql)
+
+    snapshot_map = {}
+    for yyyymm, code in cur.fetchall():
+        if yyyymm not in snapshot_map:
+            snapshot_map[yyyymm] = set()
+        snapshot_map[yyyymm].add(code)
+    return snapshot_map
+
+
+def run_walk_forward_backtest(
+    price_data: dict,
+    start_date: str,
+    end_date: str,
+    db_name: str = 'backtest_data',
+) -> dict:
+    """워크포워드 백테스트 실행
+
+    매수 신호 탐색 시 각 날짜에 데이터가 실제 존재하는 종목만 유니버스로 사용합니다.
+    이를 통해 생존편향(survivorship bias)을 제거합니다.
+
+    Args:
+        price_data: {종목코드: DataFrame} 전체 가격 데이터
+        start_date: 백테스트 시작 날짜 (YYYYMMDD)
+        end_date: 백테스트 종료 날짜 (YYYYMMDD)
+        db_name: DB 이름
+
+    Returns:
+        백테스트 결과 딕셔너리 (calculate_results() 형식과 동일)
+    """
+    availability = load_universe_availability(db_name)
+    monthly_snapshots = load_monthly_universe_snapshots(db_name)
+
+    if not availability:
+        logger.warning(
+            "universe_availability 테이블이 없습니다. "
+            "fetch_historical_data.py를 재실행하여 스냅샷을 생성하거나, "
+            "--walk-forward 없이 실행하세요."
+        )
+        return {}
+
+    if not monthly_snapshots:
+        logger.warning(
+            "universe_snapshots 테이블이 없습니다. "
+            "fetch_historical_data.py를 재실행하여 월별 스냅샷을 생성하거나, "
+            "--walk-forward 없이 실행하세요."
+        )
+        return {}
+
+    symbol_names = {code: info[2] for code, info in availability.items()}
+    availability_map = {code: (info[0], info[1]) for code, info in availability.items()}
+
+    engine = BacktestEngine(
+        max_holdings=10,
+        rsi_min_periods=2,
+        symbol_names=symbol_names,
+    )
+
+    logger.info(
+        f"워크포워드 백테스트: {start_date} ~ {end_date}, "
+        f"{len(availability_map)}개 종목 가용성 + {len(monthly_snapshots)}개월 월별 유니버스 스냅샷 적용"
+    )
+
+    return engine.run_backtest(
+        price_data=price_data,
+        start_date=start_date,
+        end_date=end_date,
+        availability_map=availability_map,
+        monthly_universe_map=monthly_snapshots,
+    )
+
+
 def load_price_data_from_db(strategy_name: str = 'backtest_data') -> tuple:
     """DB에서 가격 데이터 로드
     
@@ -130,6 +231,14 @@ def print_results(results: dict):
     logger.info(f"승률:               {results['win_rate']:>15.2f} %")
     logger.info(f"평균 수익률:        {results['avg_profit_rate']:>15.2f} %")
     logger.info(f"총 실현 손익:       {results['total_profit']:>15,.0f} 원")
+    
+    # 슬리피지 정보 출력
+    slippage_buy = results.get('slippage_buy', 0)
+    slippage_sell = results.get('slippage_sell', 0)
+    if slippage_buy or slippage_sell:
+        logger.info("-"*60)
+        logger.info(f"매수 슬리피지:      {slippage_buy * 100:>14.2f} %")
+        logger.info(f"매도 슬리피지:      {slippage_sell * 100:>14.2f} %")
     
     # 미청산 포지션 출력
     open_positions = results.get('open_positions', {})
@@ -272,6 +381,17 @@ def parse_arguments():
         default='backtest_data',
         help='DB 이름 (기본값: backtest_data)'
     )
+
+    parser.add_argument(
+        '--walk-forward',
+        action='store_true',
+        default=False,
+        help=(
+            '워크포워드 모드 활성화: 월별 유니버스 스냅샷(YYYYMM)과 종목별 가용 기간을 함께 적용. '
+            'universe_snapshots/universe_availability 테이블이 필요합니다 '
+            '(fetch_historical_data.py 실행 시 자동 생성).'
+        )
+    )
     
     return parser.parse_args()
 
@@ -301,7 +421,6 @@ def main():
         return
     
     # 2) 백테스트 엔진 생성
-    # 최적 전략: 현금 20% 비중 + 진입 조건 강화 (RSI<3, 하락>-5%)
     # 환경 변수 대상 항목은 BacktestEngine 기본값 또는 .env 값 사용
     engine = BacktestEngine(
         max_holdings=10,
@@ -324,15 +443,26 @@ def main():
         start_date = db_start_date if db_start_date else datetime.now().strftime('%Y%m%d')
         end_date = args.end if args.end else (db_end_date if db_end_date else datetime.now().strftime('%Y%m%d'))
         logger.info(f"백테스트 기간 설정: {start_date} ~ {end_date} (DB 전체 기간)")
-    
-    results = engine.run_backtest(
-        price_data=price_data,
-        start_date=start_date,
-        end_date=end_date
-    )
+
+    # 4) 워크포워드 or 일반 백테스트 분기
+    if args.walk_forward:
+        logger.info("워크포워드 모드로 백테스트를 실행합니다.")
+        results = run_walk_forward_backtest(
+            price_data=price_data,
+            start_date=start_date,
+            end_date=end_date,
+            db_name=args.db,
+        )
+        if not results:
+            logger.error("워크포워드 백테스트 실패. universe_snapshots / universe_availability 테이블을 확인하세요.")
+            return
+    else:
+        results = engine.run_backtest(
+            price_data=price_data,
+            start_date=start_date,
+            end_date=end_date
+        )
     results['profit_target_percent'] = engine.profit_target_percent
-    
-    # 4) 결과 출력
     print_results(results)
     
     # 5) 결과 시각화
@@ -342,9 +472,10 @@ def main():
     plot_path = output_dir / f'backtest_result_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png'
     plot_results(results, save_path=str(plot_path))
     
-    # 6) 거래 내역 저장
-    trades_path = output_dir / f'trades_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
-    export_trades_to_csv(engine, str(trades_path))
+    # 6) 거래 내역 저장 (워크포워드 모드에서는 외부 engine에 거래가 없으므로 스킵)
+    if not args.walk_forward:
+        trades_path = output_dir / f'trades_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        export_trades_to_csv(engine, str(trades_path))
     
     logger.info("백테스트 완료!")
 

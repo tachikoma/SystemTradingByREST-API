@@ -1,11 +1,11 @@
 """
-백테스트용 국내 주식 10년치 과거 데이터 수집 프로그램
+백테스트용 국내 주식 12년치 과거 데이터 수집 프로그램
 
-키움 REST API를 이용하여 주식 10년치 일봉 데이터를 수집하고
+키움 REST API를 이용하여 주식 12년치 일봉 데이터를 수집하고
 backtest_data.db 파일로 저장합니다.
 
 API 한번에 최대 600개(약 3년치) 데이터를 받아올 수 있으므로
-10년치를 위해 최대 4번 연속 조회를 수행합니다.
+12년치를 위해 최대 5번 연속 조회를 수행합니다.
 """
 
 import os
@@ -28,9 +28,9 @@ logger = get_logger('fetch_historical_data')
 # 상수 정의
 DB_NAME = "backtest_data"  # DB 파일명 (backtest_data.db로 저장됨)
 MAX_DATA_PER_CALL = 600  # API 한번에 가져올 수 있는 최대 데이터 개수 (약 3년치)
-TARGET_YEARS = 10  # 목표 수집 기간 (년)
-TARGET_DAYS = TARGET_YEARS * 365  # 목표 수집 기간 (일) - 약 3650일
-MAX_LOOPS = 4  # 최대 API 호출 횟수 (4번 * 600개 = 2400개, 약 10년치)
+TARGET_YEARS = 12  # 목표 수집 기간 (년)
+TARGET_DAYS = TARGET_YEARS * 365  # 목표 수집 기간 (일) - 약 4380일
+MAX_LOOPS = 5  # 최대 API 호출 횟수 (5번 * 600개 = 3000개, 약 12년치)
 
 
 class HistoricalDataFetcher:
@@ -90,6 +90,135 @@ class HistoricalDataFetcher:
         logger.info("유니버스를 DB에 저장했습니다.")
             
         return self.universe
+
+    # 실전 전략(_filter_and_create_universe)과 동일한 종목명 제외 키워드
+    _NAME_EXCLUDE_KEYWORDS = [
+        "지주", "홀딩스", "스팩", "리츠", "캐피탈",
+        "CD금리", "KOFR금리", "머니마켓",
+    ]
+
+    # 최소 일평균 거래대금 기준 (원 단위): 실전 전략의 30억(=3,000백만원) 기준과 동일
+    _MIN_DAILY_TRADING_VALUE = 3_000_000_000  # 30억 원
+
+    def _passes_strategy_filter(self, code: str, code_name: str) -> bool:
+        """실전 전략과 동일한 종목 필터 통과 여부 확인
+
+        1. 종목코드 끝자리 '0' (우선주 제외)
+        2. 종목명 제외 키워드 (지주/홀딩스/스팩/리츠/캐피탈 등)
+        """
+        # 우선주 제외: 코드 끝자리 '0'인 종목만 허용
+        if not code.endswith('0'):
+            return False
+        # 종목명 제외 키워드
+        for keyword in self._NAME_EXCLUDE_KEYWORDS:
+            if keyword in code_name:
+                return False
+        return True
+
+    def save_universe_snapshots(self, price_data_by_code: dict):
+        """워크포워드용 유니버스 스냅샷을 DB에 저장 (실전 전략 동일 기준 적용)
+
+        1) universe_availability: 종목별 데이터 가용 기간
+        2) universe_snapshots: YYYYMM별 실제 유니버스 구성 종목
+
+        실전 전략(_filter_and_create_universe)과 동일한 필터링 기준을 각 월에 소급 적용합니다:
+        - 해당 월에 가격 데이터가 존재하는 종목만 후보
+        - 우선주 제외 (종목코드 끝자리 '0')
+        - 종목명 제외 키워드 필터 (지주/홀딩스/스팩/리츠/캐피탈/CD금리/KOFR금리/머니마켓)
+        - 최소 일평균 거래대금 기준 (30억 = close * volume 월평균 > 3,000,000,000원)
+        - 거래대금 기준 상위 N개 선택 (N = MONTHLY_UNIVERSE_SIZE 환경변수, 기본 100)
+
+        Args:
+            price_data_by_code: {
+                code: {
+                    'earliest': 'YYYYMM',
+                    'latest': 'YYYYMM',
+                    'monthly_liquidity': {'YYYYMM': float, ...}
+                },
+                ...
+            }
+        """
+        logger.info("월별 유니버스 스냅샷 저장 시작 (실전 전략 동일 기준 적용)...")
+
+        # 1) 종목별 데이터 가용 기간 저장
+        availability_records = []
+        for code, code_name in self.universe.items():
+            if code not in price_data_by_code:
+                continue
+            availability_records.append({
+                'code': code,
+                'code_name': code_name,
+                'earliest_yyyymm': price_data_by_code[code]['earliest'],
+                'latest_yyyymm': price_data_by_code[code]['latest'],
+            })
+
+        if availability_records:
+            availability_df = pd.DataFrame(availability_records)
+            insert_df_to_db(self.db_name, 'universe_availability', availability_df)
+            logger.info(
+                f"종목별 데이터 가용 기간 저장 완료: {len(availability_records)}개 종목 → 'universe_availability' 테이블"
+            )
+        else:
+            logger.warning("가용 기간으로 저장할 종목이 없습니다.")
+
+        # 2) YYYYMM별 유니버스 구성 저장 — 실전 전략과 동일한 필터 소급 적용
+        snapshot_size = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '100'))
+
+        # 2-a) 1차 필터: 우선주 제외 + 종목명 키워드 제외 (시간 불변 필터)
+        strategy_filtered_universe = {
+            code: code_name
+            for code, code_name in self.universe.items()
+            if code in price_data_by_code and self._passes_strategy_filter(code, code_name)
+        }
+        excluded_count = len(self.universe) - len(strategy_filtered_universe)
+        logger.info(
+            f"1차 필터(우선주+이름키워드) 통과: {len(strategy_filtered_universe)}개 / {len(self.universe)}개 "
+            f"({excluded_count}개 제외)"
+        )
+
+        # 2-b) 월별 거래대금 데이터 수집 (1차 필터 통과 종목만)
+        monthly_rows = []
+        for code, code_name in strategy_filtered_universe.items():
+            monthly_liquidity = price_data_by_code[code].get('monthly_liquidity', {})
+            for yyyymm, liquidity in monthly_liquidity.items():
+                monthly_rows.append({
+                    'yyyymm': yyyymm,
+                    'code': code,
+                    'code_name': code_name,
+                    'monthly_trading_value': float(liquidity),
+                })
+
+        if not monthly_rows:
+            logger.warning("월별 유니버스 스냅샷으로 저장할 데이터가 없습니다.")
+            return
+
+        monthly_df = pd.DataFrame(monthly_rows)
+
+        # 2-c) 2차 필터: 해당 월 최소 일평균 거래대금 기준 (30억 미만 제외)
+        before_liquidity_filter = len(monthly_df)
+        monthly_df = monthly_df[monthly_df['monthly_trading_value'] >= self._MIN_DAILY_TRADING_VALUE]
+        logger.info(
+            f"2차 필터(최소 거래대금 30억): {len(monthly_df)}개 / {before_liquidity_filter}개 행 통과"
+        )
+
+        # 2-d) 월별 거래대금 기준 상위 N개 선택
+        monthly_df = monthly_df.sort_values(['yyyymm', 'monthly_trading_value'], ascending=[True, False])
+        monthly_df['liquidity_rank'] = monthly_df.groupby('yyyymm')['monthly_trading_value'].rank(
+            method='first', ascending=False
+        )
+        monthly_df = monthly_df[monthly_df['liquidity_rank'] <= snapshot_size].copy()
+        monthly_df['liquidity_rank'] = monthly_df['liquidity_rank'].astype(int)
+        monthly_df = monthly_df.sort_values(['yyyymm', 'liquidity_rank'])
+
+        insert_df_to_db(self.db_name, 'universe_snapshots', monthly_df)
+
+        # 월별 후보 종목 수 분포 로그
+        codes_per_month = monthly_df.groupby('yyyymm')['code'].count()
+        logger.info(
+            f"월별 유니버스 스냅샷 저장 완료: {monthly_df['yyyymm'].nunique()}개월, "
+            f"월당 종목 수 min={codes_per_month.min()} / avg={codes_per_month.mean():.1f} / max={codes_per_month.max()} "
+            f"(목표 상위 {snapshot_size}개) → 'universe_snapshots' 테이블"
+        )
     
     def fetch_stock_data(self, code: str, max_loops: int = MAX_LOOPS) -> pd.DataFrame:
         """
@@ -170,6 +299,7 @@ class HistoricalDataFetcher:
         
         success_count = 0
         fail_count = 0
+        price_data_range = {}  # 종목별 데이터 가용 기간 및 월별 거래대금 메타
         
         for idx, (code, name) in enumerate(self.universe.items(), 1):
             logger.info(f"\n[{idx}/{total_stocks}] {name} ({code})")
@@ -185,6 +315,18 @@ class HistoricalDataFetcher:
                 # DB에 저장
                 self.save_to_db(code, df)
                 success_count += 1
+                # 데이터 가용 기간 + 월별 거래대금 기록
+                earliest = str(df.index.min())[:6]
+                latest = str(df.index.max())[:6]
+                tmp = df[['close', 'volume']].copy()
+                tmp['yyyymm'] = tmp.index.astype(str).str[:6]
+                tmp['trading_value'] = tmp['close'].astype(float) * tmp['volume'].astype(float)
+                monthly_liquidity = tmp.groupby('yyyymm')['trading_value'].mean().to_dict()
+                price_data_range[code] = {
+                    'earliest': earliest,
+                    'latest': latest,
+                    'monthly_liquidity': monthly_liquidity,
+                }
             else:
                 fail_count += 1
             
@@ -202,6 +344,10 @@ class HistoricalDataFetcher:
         logger.info(f"성공: {success_count}")
         logger.info(f"실패: {fail_count}")
         logger.info(f"DB 파일: {self.db_name}.db")
+
+        # 종목별 데이터 가용 기간을 DB에 저장 (워크포워드 백테스트에서 활용)
+        if price_data_range:
+            self.save_universe_snapshots(price_data_range)
 
 
 def main():
