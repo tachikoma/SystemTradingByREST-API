@@ -622,7 +622,7 @@ class RSIStrategy(threading.Thread):
                     
                     if universe_created_at:
                         try:
-                            self.last_universe_update = datetime.datetime.strptime(
+                            self.last_universe_update = datetime.strptime(
                                 universe_created_at, "%Y%m%d"
                             ).replace(tzinfo=ZoneInfo("Asia/Seoul"))
                             days_ago = (get_korea_time().date() - self.last_universe_update.date()).days
@@ -710,7 +710,7 @@ class RSIStrategy(threading.Thread):
             # DB의 created_at을 last_universe_update로 설정 (YYYYMMDD 형식 파싱)
             if universe_created_at:
                 try:
-                    self.last_universe_update = datetime.datetime.strptime(
+                    self.last_universe_update = datetime.strptime(
                         universe_created_at, "%Y%m%d"
                     ).replace(tzinfo=ZoneInfo("Asia/Seoul"))
                     days_ago = (get_korea_time().date() - self.last_universe_update.date()).days
@@ -1511,7 +1511,7 @@ class RSIStrategy(threading.Thread):
             purchase_date_str = self.kiwoom.balance[code].get('매수일')
             if purchase_date_str:
                 try:
-                    purchase_date = datetime.datetime.strptime(purchase_date_str, '%Y%m%d').date()
+                    purchase_date = datetime.strptime(purchase_date_str, '%Y%m%d').date()
                     holding_days = (get_korea_time().date() - purchase_date).days
                     if holding_days > self.TIME_STOP_LOSS_DAYS:
                         name = self.resolve_stock_name(code)
