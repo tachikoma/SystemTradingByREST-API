@@ -145,6 +145,20 @@ class RSIStrategy(threading.Thread):
             self._last_rollover_date = get_korea_time().date()
         except Exception:
             self._last_rollover_date = None
+
+        # MA200 미형성 스킵 집계(일일)
+        try:
+            self.ma200_skip_date = get_korea_time().strftime('%Y%m%d')
+        except Exception:
+            self.ma200_skip_date = None
+        self.ma200_skip_counts = {}
+        self.ma200_skip_reported_date = None
+        try:
+            self.MA200_SKIP_REPORT_TOP_N = int(os.getenv('MA200_SKIP_REPORT_TOP_N', '10'))
+            if self.MA200_SKIP_REPORT_TOP_N < 1:
+                self.MA200_SKIP_REPORT_TOP_N = 10
+        except Exception:
+            self.MA200_SKIP_REPORT_TOP_N = 10
         
         # 모의투자 매매제한 종목 블랙리스트 (모의투자에서만 사용)
         self.mock_trade_blacklist = set()
@@ -514,7 +528,8 @@ class RSIStrategy(threading.Thread):
         """가격 DataFrame -> compact dict 변환
 
         반환값: dict with keys `last_20_closes` (np.float32 array),
-        `ma_latest` (dict of ma20/ma60/ma200 as float32), `last_date` (index last)
+        `ma_latest` (dict of ma20/ma60/ma200 as float32), `last_date` (index last),
+        `close_count` (유효 종가 개수)
         """
         try:
             if price_df is None or len(price_df) == 0:
@@ -522,6 +537,7 @@ class RSIStrategy(threading.Thread):
                     'last_20_closes': np.array([], dtype='float32'),
                     'ma_latest': {'ma20': np.float32(np.nan), 'ma60': np.float32(np.nan), 'ma200': np.float32(np.nan)},
                     'last_date': None,
+                    'close_count': 0,
                 }
 
             # Close 컬럼은 반드시 'close'로 고정
@@ -531,6 +547,7 @@ class RSIStrategy(threading.Thread):
                     'last_20_closes': np.array([], dtype='float32'),
                     'ma_latest': {'ma20': np.float32(np.nan), 'ma60': np.float32(np.nan), 'ma200': np.float32(np.nan)},
                     'last_date': None,
+                    'close_count': 0,
                 }
 
             closes = price_df['close'].astype('float32').dropna()
@@ -560,6 +577,7 @@ class RSIStrategy(threading.Thread):
                 'last_20_closes': last_20,
                 'ma_latest': {'ma20': ma20, 'ma60': ma60, 'ma200': ma200},
                 'last_date': last_date,
+                'close_count': int(len(closes)),
             }
         except Exception as e:
             logger.warning('Compact price info 생성 실패: %s', e)
@@ -567,7 +585,120 @@ class RSIStrategy(threading.Thread):
                 'last_20_closes': np.array([], dtype='float32'),
                 'ma_latest': {'ma20': np.float32(np.nan), 'ma60': np.float32(np.nan), 'ma200': np.float32(np.nan)},
                 'last_date': None,
+                'close_count': 0,
             }
+
+    def _record_ma200_skip(self, code):
+        """MA200 미형성으로 인한 매수 스킵을 일일 카운팅합니다."""
+        try:
+            today = get_korea_time().strftime('%Y%m%d')
+        except Exception:
+            return
+
+        if self.ma200_skip_date != today:
+            self.ma200_skip_date = today
+            self.ma200_skip_counts = {}
+            self.ma200_skip_reported_date = None
+
+        self.ma200_skip_counts[code] = int(self.ma200_skip_counts.get(code, 0)) + 1
+
+    def _write_ma200_skip_report_csv(self, report_date, counts, reported_at, total_count):
+        """MA200 스킵 집계를 CSV로 누적 저장합니다."""
+        if report_date is None:
+            return
+        if counts is None:
+            counts = {}
+
+        try:
+            db_dir = os.getenv('DB_DIR', './data')
+            os.makedirs(db_dir, exist_ok=True)
+            csv_path = os.path.join(db_dir, 'ma200_skip_daily_report.csv')
+
+            import csv
+            file_exists = os.path.exists(csv_path)
+            with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow([
+                        'date',
+                        'code',
+                        'code_name',
+                        'skip_count',
+                        'total_skip_count',
+                        'unique_codes',
+                        'reported_at',
+                    ])
+
+                if len(counts) == 0:
+                    writer.writerow([
+                        report_date,
+                        '',
+                        '',
+                        0,
+                        int(total_count),
+                        0,
+                        reported_at,
+                    ])
+                else:
+                    unique_codes = len(counts)
+                    for code, cnt in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+                        name = self.resolve_stock_name(code) or ''
+                        writer.writerow([
+                            report_date,
+                            code,
+                            name,
+                            int(cnt),
+                            int(total_count),
+                            unique_codes,
+                            reported_at,
+                        ])
+        except Exception as e:
+            logger.warning("MA200 스킵 리포트 CSV 저장 실패: %s", e)
+
+    def _send_ma200_skip_daily_report(self, now=None):
+        """장 마감 이후 MA200 미형성 스킵 요약을 1회 전송합니다."""
+        try:
+            if now is None:
+                now = get_korea_time()
+            report_date = now.strftime('%Y%m%d')
+
+            if self.ma200_skip_reported_date == report_date:
+                return
+
+            # 장 종료 후(매수 윈도우 종료 이후) 하루 1회 리포트 전송
+            if now.hour < 15 or (now.hour == 15 and now.minute < 21):
+                return
+
+            counts = dict(self.ma200_skip_counts) if self.ma200_skip_date == report_date else {}
+            total_count = int(sum(counts.values()))
+            unique_count = len(counts)
+
+            top_n = int(self.MA200_SKIP_REPORT_TOP_N)
+            ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+            lines = [
+                f"📊 MA200 미형성 스킵 일일 리포트 ({report_date})",
+                f"총 스킵 건수: {total_count}",
+                f"스킵 종목 수: {unique_count}",
+            ]
+
+            if len(ranked) == 0:
+                lines.append("상위 종목: 없음")
+            else:
+                lines.append(f"상위 {len(ranked)}종목:")
+                for code, cnt in ranked:
+                    name = self.resolve_stock_name(code)
+                    display = f"{name}({code})" if name else code
+                    lines.append(f"- {display}: {int(cnt)}회")
+
+            send_message("\n".join(lines))
+            logger.info("MA200 스킵 일일 리포트 전송 완료: date=%s total=%d unique=%d", report_date, total_count, unique_count)
+
+            reported_at = now.strftime('%Y-%m-%d %H:%M:%S')
+            self._write_ma200_skip_report_csv(report_date, counts, reported_at, total_count)
+            self.ma200_skip_reported_date = report_date
+        except Exception as e:
+            logger.warning("MA200 스킵 일일 리포트 전송 실패: %s", e)
 
     @notify_on_exception(fallback_return=None)
     def check_and_get_universe(self, force_update=False):
@@ -949,9 +1080,21 @@ class RSIStrategy(threading.Thread):
                     self.universe_updated_today = False
                     self.full_cache_done_today = False
                     self.buy_window_done_today = False
+                    # 날짜 변경 시 집계/리포트 상태 초기화
+                    try:
+                        today = get_korea_time().strftime('%Y%m%d')
+                        if self.ma200_skip_date != today:
+                            self.ma200_skip_date = today
+                            self.ma200_skip_counts = {}
+                            self.ma200_skip_reported_date = None
+                    except Exception:
+                        pass
                 
                 # (0)장중인지 확인
                 if not check_transaction_open():
+                    # 장 마감 이후 MA200 미형성 스킵 일일 리포트를 1회 전송
+                    self._send_ma200_skip_daily_report(now)
+
                     # 장 시작 전: 날짜 롤오버 시 가격 데이터 갱신이 실패했다면 재시도
                     if not self.price_data_ready and self._price_data_retry_count < self.PRICE_DATA_MAX_RETRIES:
                         logger.info("가격 데이터 미준비: 장 시작 전 재시도 %d/%d", self._price_data_retry_count + 1, self.PRICE_DATA_MAX_RETRIES)
@@ -1708,9 +1851,9 @@ class RSIStrategy(threading.Thread):
             ma200 = ma_latest.get('ma200')
 
             if ma20 is None or ma60 is None or ma200 is None:
-                df['ma20'] = df['close'].rolling(window=self.MA_SHORT, min_periods=1).mean()
-                df['ma60'] = df['close'].rolling(window=self.MA_LONG, min_periods=1).mean()
-                df['ma200'] = df['close'].rolling(window=self.MA_TREND, min_periods=1).mean()
+                df['ma20'] = df['close'].rolling(window=self.MA_SHORT, min_periods=self.MA_SHORT).mean()
+                df['ma60'] = df['close'].rolling(window=self.MA_LONG, min_periods=self.MA_LONG).mean()
+                df['ma200'] = df['close'].rolling(window=self.MA_TREND, min_periods=self.MA_TREND).mean()
                 ma20 = df['ma20'].iloc[-1]
                 ma60 = df['ma60'].iloc[-1]
                 ma200 = df['ma200'].iloc[-1]
@@ -1737,6 +1880,27 @@ class RSIStrategy(threading.Thread):
             
             # 로그: RSI 및 지표값 
             logger.info("check_buy_signal %s RSI=%.2f ma20=%.2f ma60=%.2f ma200=%.2f", display, rsi, ma20, ma60, ma200)
+
+            # 신규 상장 등으로 MA200이 형성되지 않은 경우는 정상 스킵으로 처리
+            try:
+                close_count = int(uni_item.get('close_count', 0) or 0)
+            except Exception:
+                close_count = 0
+            if close_count <= 0:
+                try:
+                    close_count = int(df['close'].astype(float).notna().sum())
+                except Exception:
+                    close_count = 0
+
+            if not np.isfinite(ma200) and close_count < self.MA_TREND:
+                logger.info(
+                    "MA200 미형성으로 매수 신호 스킵 (%s): close_count=%d, required=%d",
+                    display,
+                    close_count,
+                    self.MA_TREND,
+                )
+                self._record_ma200_skip(code)
+                return False
             
             # 값들이 유효한지 체크
             if np.isnan(rsi) or np.isinf(rsi) or np.isnan(ma20) or np.isinf(ma20) or np.isnan(ma60) or np.isinf(ma60) or np.isnan(ma200) or np.isinf(ma200):

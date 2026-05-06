@@ -209,9 +209,9 @@ class BacktestEngine:
         df['rsi'] = rsi_series
         
         # 이동평균 계산
-        df['ma20'] = df['close'].rolling(window=self.ma_short, min_periods=1).mean()
-        df['ma60'] = df['close'].rolling(window=self.ma_long, min_periods=1).mean()
-        df['ma200'] = df['close'].rolling(window=self.ma_trend, min_periods=1).mean()
+        df['ma20'] = df['close'].rolling(window=self.ma_short, min_periods=self.ma_short).mean()
+        df['ma60'] = df['close'].rolling(window=self.ma_long, min_periods=self.ma_long).mean()
+        df['ma200'] = df['close'].rolling(window=self.ma_trend, min_periods=self.ma_trend).mean()
         
         return df
     
@@ -264,6 +264,16 @@ class BacktestEngine:
             close_2days_ago = df.iloc[idx - 2]['close']
             
             # 값 유효성 체크
+            if np.isnan(ma200) and (idx + 1) < self.ma_trend:
+                logger.debug(
+                    "MA200 미형성으로 매수 신호 스킵 %s date=%s close_count=%d required=%d",
+                    display,
+                    date,
+                    idx + 1,
+                    self.ma_trend,
+                )
+                return False, None
+
             if np.isnan(rsi) or np.isnan(ma20) or np.isnan(ma60) or np.isnan(ma200) or close_2days_ago == 0:
                 return False, None
             
