@@ -54,8 +54,8 @@ class BacktestEngine:
         rsi_buy_threshold: float = None,     # env: RSI_BUY_THRESHOLD, 기본값: DEFAULT_RSI_BUY_THRESHOLD
         price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화된 값)
         cash_reserve_ratio: float = None,    # env: CASH_RESERVE_RATIO, 기본값: DEFAULT_CASH_RESERVE_RATIO
-        commission_rate: float = None,       # env: TRADING_FEE_PERCENT_{MODE}, 기본값: 모드별 기본 수수료
-        tax_rate: float = None,              # env: TRADING_TAX_PERCENT_{MODE}, 기본값: 모드별 기본 거래세
+        commission_rate: float = None,       # env: TRADING_FEE_PERCENT_REAL, 기본값: 실전 기본 수수료
+        tax_rate: float = None,              # env: TRADING_TAX_PERCENT_REAL, 기본값: 실전 기본 거래세
         rsi_method: str = None,              # env: RSI_METHOD, 기본값: DEFAULT_RSI_METHOD
         rsi_min_periods: int = None,         # None이면 rsi_period 사용
         # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
@@ -114,15 +114,10 @@ class BacktestEngine:
             _rsi_method = self.DEFAULT_RSI_METHOD
         self.rsi_method = _rsi_method
 
-        # 거래 비용: 명시적 파라미터 우선, 없으면 KIWOOM_MODE에 맞는 env 키에서 로드
-        try:
-            mode = os.getenv('KIWOOM_MODE', os.getenv('KIW_MODE', 'mock')).strip().lower()
-        except Exception:
-            mode = 'mock'
-
-        is_real_mode = mode == 'real'
-        default_commission_rate = self.DEFAULT_COMMISSION_RATE_REAL if is_real_mode else self.DEFAULT_COMMISSION_RATE_MOCK
-        default_tax_rate = self.DEFAULT_TAX_RATE_REAL if is_real_mode else self.DEFAULT_TAX_RATE_MOCK
+        # 거래 비용: 백테스트는 항상 실전(real) 비용 체계를 사용한다.
+        # 명시적 파라미터 > TRADING_*_REAL env > 실전 기본값
+        default_commission_rate = self.DEFAULT_COMMISSION_RATE_REAL
+        default_tax_rate = self.DEFAULT_TAX_RATE_REAL
 
         def _parse_percent_env(val):
             """퍼센트 표기(0.35 → 0.0035) 변환"""
@@ -133,29 +128,16 @@ class BacktestEngine:
             except Exception:
                 return None
 
-        def _parse_rate_env(name):
-            """소수 또는 퍼센트 표기 자동 감지 변환"""
-            val = os.getenv(name)
-            if val is None:
-                return None
-            try:
-                f = float(val)
-                return f / 100.0 if f > 0.01 else f
-            except Exception:
-                return None
-
         if commission_rate is not None:
             self.commission_rate = float(commission_rate)
         else:
-            parsed = _parse_percent_env(os.getenv(f'TRADING_FEE_PERCENT_{mode.upper()}')) \
-                     or _parse_rate_env('COMMISSION_RATE')
+            parsed = _parse_percent_env(os.getenv('TRADING_FEE_PERCENT_REAL'))
             self.commission_rate = parsed if parsed is not None else default_commission_rate
 
         if tax_rate is not None:
             self.tax_rate = float(tax_rate)
         else:
-            parsed = _parse_percent_env(os.getenv(f'TRADING_TAX_PERCENT_{mode.upper()}')) \
-                     or _parse_rate_env('TAX_RATE')
+            parsed = _parse_percent_env(os.getenv('TRADING_TAX_PERCENT_REAL'))
             self.tax_rate = parsed if parsed is not None else default_tax_rate
 
         self.buy_fee_rate  = 1 + self.commission_rate
