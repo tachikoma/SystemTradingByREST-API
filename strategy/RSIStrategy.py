@@ -12,6 +12,7 @@ import threading
 import gc
 from util.logging_config import get_logger
 from util.rsi_calc import compute_rsi
+from util import trade_logger
 
 logger = get_logger(__name__)
 
@@ -135,6 +136,8 @@ class RSIStrategy(threading.Thread):
         self.full_cache_done_today = False
         # 오후 매수 윈도우 실행 여부 추적 (fallback 처리용)
         self.buy_window_done_today = False
+        # 최근 매도 사유 (check_sell_signal → order_sell 간 전달용)
+        self._last_sell_reason = ""
         # 가격 데이터 준비 상태 추적
         self.price_data_ready = False
         self.last_price_data_date = None
@@ -1744,6 +1747,7 @@ class RSIStrategy(threading.Thread):
                             "시간 손절 발생: %s (보유일=%d일, 기준=%d일, 매입가=%d원)",
                             display, holding_days, self.TIME_STOP_LOSS_DAYS, purchase_price
                         )
+                        self._last_sell_reason = "TIME_STOP_LOSS"
                         return True
                 except Exception as e:
                     logger.warning("매수일 파싱 오류 (%s): %s", code, e)
@@ -1792,6 +1796,7 @@ class RSIStrategy(threading.Thread):
                 estimated_profit_rate = ((close - breakeven_price) / purchase_price) * 100
                 logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d, breakeven=%d, 예상수익률=%.2f%%)", 
                            display, rsi, close, purchase_price, breakeven_price, estimated_profit_rate)
+                self._last_sell_reason = "RSI_SIGNAL"
                 return True
             else:
                 return False
@@ -1847,6 +1852,23 @@ class RSIStrategy(threading.Thread):
                     display, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee, estimated_profit_rate)
                 logger.info(message)
                 send_message(message)
+
+                # 매매 이력 CSV 기록
+                trade_logger.log_trade(
+                    mode='mock' if self.kiwoom.mock else 'real',
+                    action='SELL',
+                    code=code,
+                    name=name or code,
+                    price=ask,
+                    quantity=quantity,
+                    fee=total_fee,
+                    net_amount=estimated_proceeds,
+                    purchase_price=purchase_price,
+                    profit=estimated_profit,
+                    profit_rate=estimated_profit_rate,
+                    sell_reason=self._last_sell_reason,
+                    order_no=str(order_result.get('order_no', '')),
+                )
             else:
                 error_code = order_result.get('error_code', 'UNKNOWN')
                 error_message = order_result.get('error_message', '알 수 없는 오류')
@@ -2074,6 +2096,19 @@ class RSIStrategy(threading.Thread):
                     display, order_result.get('order_no', 'N/A'), quantity, bid, total_cost, self.deposit)
                 logger.info(message)
                 send_message(message)
+
+                # 매매 이력 CSV 기록
+                trade_logger.log_trade(
+                    mode='mock' if self.kiwoom.mock else 'real',
+                    action='BUY',
+                    code=code,
+                    name=name or code,
+                    price=bid,
+                    quantity=quantity,
+                    fee=total_cost,
+                    net_amount=estimated_cost,
+                    order_no=str(order_result.get('order_no', '')),
+                )
             else:
                 error_code = order_result.get('error_code', 'UNKNOWN')
                 error_message = order_result.get('error_message', '알 수 없는 오류')
