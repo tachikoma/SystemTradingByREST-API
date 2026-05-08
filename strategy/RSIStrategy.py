@@ -1380,12 +1380,15 @@ class RSIStrategy(threading.Thread):
                             if info:
                                 cur_prc = abs(int(float(info.get('cur_prc', 0) or 0)))
                                 trde_qty = abs(int(float(info.get('trde_qty', 0) or 0)))
-                                # WebSocket 포맷과 동일한 키로 저장 (기존 코드 변경 불필요)
-                                self.kiwoom.universe_realtime_transaction_info[code] = {
+                                # WebSocket 포맷과 동일한 키를 유지해 주문/계산 로직이 동일하게 동작하도록 맞춥니다.
+                                rt_info = self.kiwoom.universe_realtime_transaction_info.setdefault(code, {})
+                                rt_info.update({
                                     '현재가': cur_prc,
+                                    '(최우선)매도호가': cur_prc,
+                                    '(최우선)매수호가': cur_prc,
                                     '누적거래량': trde_qty,
                                     '_from_polling': True,  # 폴링 출처 식별용
-                                }
+                                })
                         except Exception as e:
                             logger.debug("폴링 실패 (%s): %s", code, e)
 
@@ -1823,12 +1826,18 @@ class RSIStrategy(threading.Thread):
                 logger.warning("보유 수량이 0 이하입니다 (%s): %d", code, quantity)
                 return
 
-            # 최우선 매도 호가 확인 (에러 핸들링 추가)
-            if code not in self.kiwoom.universe_realtime_transaction_info:
-                logger.error("실시간 체결정보가 없습니다: %s", code)
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
+
+            ask = self._get_order_price(
+                code,
+                display,
+                primary_key='(최우선)매도호가',
+                price_label='매도호가',
+                fallback_keys=('현재가', '(최우선)매수호가'),
+            )
+            if ask is None:
                 return
-            
-            ask = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매도호가']
 
             order_result = self.kiwoom.send_order('send_sell_order', '1001', 1, code, quantity, ask, '00')
 
@@ -1845,9 +1854,7 @@ class RSIStrategy(threading.Thread):
                 
                 # send_order()에서 이미 self.kiwoom.order[code]를 설정함
                 # 웹소켓 응답이 오면 자동으로 업데이트되고, 체결 완료 시 자동 삭제됨
-                
-                name = self.resolve_stock_name(code)
-                display = f"{name}({code})" if name else code
+
                 message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)\n예상수익률: {:.2f}%".format(
                     display, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee, estimated_profit_rate)
                 logger.info(message)
@@ -1885,6 +1892,31 @@ class RSIStrategy(threading.Thread):
         except Exception as e:
             code_name = self.resolve_stock_name(code)
             logger.error("매도 주문 처리 중 예상치 못한 오류 %s(%s): %s", code_name, code, e)
+
+    def _get_order_price(self, code, display, primary_key, price_label, fallback_keys=()):
+        """주문 가격 조회 시 실시간 호가가 없으면 현재가로 제한적으로 폴백합니다."""
+        rt_info = self.kiwoom.universe_realtime_transaction_info.get(code)
+        if not isinstance(rt_info, dict):
+            logger.error("실시간 체결정보가 없습니다: %s", display)
+            return None
+
+        for key in (primary_key, *fallback_keys):
+            value = rt_info.get(key)
+            try:
+                price = int(value)
+            except (TypeError, ValueError):
+                continue
+
+            if price <= 0:
+                continue
+
+            if key != primary_key:
+                source_label = '폴링 현재가' if key == '현재가' and rt_info.get('_from_polling') else key
+                logger.warning("%s가 없어 %s로 대체합니다: %s (%d원)", price_label, source_label, display, price)
+            return price
+
+        logger.error("%s 정보를 가져올 수 없습니다: %s", price_label, display)
+        return None
 
     @notify_on_exception(fallback_return=None)
     def check_buy_signal_and_order(self, code):
@@ -2055,11 +2087,14 @@ class RSIStrategy(threading.Thread):
             investable_deposit = self.deposit * (1 - self.CASH_RESERVE_RATIO)
             budget = investable_deposit / (self.MAX_HOLDINGS - (self.get_balance_count() + self.get_buy_order_count()))
 
-            # 최우선 매수호가 확인 (에러 핸들링 추가)
-            try:
-                bid = self.kiwoom.universe_realtime_transaction_info[code]['(최우선)매수호가']
-            except KeyError:
-                logger.error("매수호가 정보를 가져올 수 없습니다: %s", display)
+            bid = self._get_order_price(
+                code,
+                display,
+                primary_key='(최우선)매수호가',
+                price_label='매수호가',
+                fallback_keys=('현재가', '(최우선)매도호가'),
+            )
+            if bid is None:
                 return
 
             # (6)주문 수량 계산(소수점은 제거하기 위해 버림)

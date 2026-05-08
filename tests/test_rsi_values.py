@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import pytest
+import importlib
 from types import SimpleNamespace
 
 from strategy.RSIStrategy import RSIStrategy
@@ -139,3 +140,62 @@ def test_rsi_matches_reference(prices):
         expected = cutler_rsi_reference(full_prices, period)
 
     np.testing.assert_allclose(actual, expected, equal_nan=True, rtol=0, atol=1e-8)
+
+
+def test_check_buy_signal_and_order_uses_current_price_when_bid_missing(monkeypatch):
+    rsi_module = importlib.import_module('strategy.RSIStrategy')
+
+    code = '032820'
+    strategy = RSIStrategy.__new__(RSIStrategy)
+    strategy.kiwoom = SimpleNamespace(
+        mock=False,
+        balance={},
+        order={},
+        universe_realtime_transaction_info={
+            code: {
+                '현재가': 1000,
+                '누적거래량': 12345,
+                '_from_polling': True,
+            }
+        },
+    )
+    strategy.universe = {
+        code: {
+            'ma_latest': {'ma20': 101.0, 'ma60': 100.0, 'ma200': 90.0},
+            'close_count': 200,
+        }
+    }
+    strategy.deposit = 1_000_000
+    strategy.BUY_FEE_RATE = 1.0
+    strategy.mock_trade_blacklist = set()
+    strategy.buy_window_done_today = False
+    strategy._rt_snapshot = None
+
+    sent_orders = []
+
+    def fake_send_order(*args):
+        sent_orders.append(args)
+        return {'success': True, 'order_no': 'TEST-1'}
+
+    strategy.kiwoom.send_order = fake_send_order
+    strategy.resolve_stock_name = lambda value: '우리기술' if value == code else value
+    strategy.get_balance_count = lambda: 0
+    strategy.get_buy_order_count = lambda: 0
+
+    df = pd.DataFrame(
+        {
+            'close': [110.0, 105.0, 100.0],
+            f'RSI({strategy.RSI_PERIOD})': [50.0, 10.0, 2.0],
+        }
+    )
+    strategy.calculate_rsi = lambda value: (df, 100.0)
+
+    monkeypatch.setattr('util.time_helper.is_buy_window_open', lambda: True)
+    monkeypatch.setattr('util.time_helper.is_morning_buy_fallback_window', lambda: False)
+    monkeypatch.setattr(rsi_module, 'send_message', lambda message: None)
+    monkeypatch.setattr(rsi_module, 'trade_logger', SimpleNamespace(log_trade=lambda **kwargs: None))
+
+    strategy.check_buy_signal_and_order(code)
+
+    assert sent_orders, '현재가 폴백으로 매수 주문이 접수되어야 합니다.'
+    assert sent_orders[0][5] == 1000
