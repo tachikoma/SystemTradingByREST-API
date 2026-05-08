@@ -22,6 +22,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
+import re
 
 # 프로젝트 루트를 경로에 추가
 project_root = Path(__file__).parent.parent
@@ -348,6 +349,39 @@ def export_trades_to_csv(engine: BacktestEngine, filepath: str):
     logger.info(f"거래 내역 저장: {filepath} ({len(trades_df)} 건)")
 
 
+def sanitize_tag(value: str) -> str:
+    """파일명에 안전한 시나리오 태그로 정규화한다."""
+    if not value:
+        return ''
+    normalized = re.sub(r'[^A-Za-z0-9._-]+', '_', str(value).strip())
+    return normalized.strip('_')
+
+
+def export_summary_to_csv(results: dict, filepath: str, metadata: dict | None = None):
+    """백테스트 결과 요약을 단일 행 CSV로 저장한다."""
+    summary = {
+        'generated_at': datetime.now().strftime('%Y%m%d_%H%M%S'),
+        'initial_capital': results.get('initial_capital'),
+        'final_value': results.get('final_value'),
+        'total_return': results.get('total_return'),
+        'annual_return': results.get('annual_return'),
+        'sharpe_ratio': results.get('sharpe_ratio'),
+        'mdd': results.get('mdd'),
+        'total_trades': results.get('total_trades'),
+        'buy_trades': results.get('buy_trades'),
+        'sell_trades': results.get('sell_trades'),
+        'win_rate': results.get('win_rate'),
+        'avg_profit_rate': results.get('avg_profit_rate'),
+        'total_profit': results.get('total_profit'),
+        'profit_target_percent': results.get('profit_target_percent'),
+        'stop_loss_count': results.get('stop_loss_count', 0),
+    }
+    if metadata:
+        summary.update(metadata)
+    pd.DataFrame([summary]).to_csv(filepath, index=False, encoding='utf-8-sig')
+    logger.info(f"요약 저장: {filepath}")
+
+
 def parse_arguments():
     """커맨드라인 인자 파싱"""
     parser = argparse.ArgumentParser(
@@ -391,6 +425,13 @@ def parse_arguments():
             'universe_snapshots/universe_availability 테이블이 필요합니다 '
             '(fetch_historical_data.py 실행 시 자동 생성).'
         )
+    )
+
+    parser.add_argument(
+        '--tag',
+        type=str,
+        default='',
+        help='출력 파일명에 사용할 시나리오 태그'
     )
     
     return parser.parse_args()
@@ -468,14 +509,32 @@ def main():
     # 5) 결과 시각화
     output_dir = project_root / 'backtest' / 'output'
     output_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    tag = sanitize_tag(args.tag)
+    suffix = f'_{tag}_{timestamp}' if tag else f'_{timestamp}'
     
-    plot_path = output_dir / f'backtest_result_{datetime.now().strftime("%Y%m%d_%H%M%S")}.png'
+    plot_path = output_dir / f'backtest_result{suffix}.png'
     plot_results(results, save_path=str(plot_path))
     
     # 6) 거래 내역 저장 (워크포워드 모드에서는 외부 engine에 거래가 없으므로 스킵)
     if not args.walk_forward:
-        trades_path = output_dir / f'trades_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
+        trades_path = output_dir / f'trades{suffix}.csv'
         export_trades_to_csv(engine, str(trades_path))
+
+    summary_path = output_dir / f'backtest_summary{suffix}.csv'
+    export_summary_to_csv(
+        results,
+        str(summary_path),
+        metadata={
+            'db': args.db,
+            'tag': tag,
+            'start_date': start_date,
+            'end_date': end_date,
+            'walk_forward': args.walk_forward,
+            'plot_path': str(plot_path),
+            'trades_path': str(trades_path) if not args.walk_forward else '',
+        },
+    )
     
     logger.info("백테스트 완료!")
 

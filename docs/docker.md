@@ -42,6 +42,23 @@ docker compose -f docker-compose.yml up --build -d systemtrading-prod
 **환경변수 (.env)**
 - 반드시 `.env`를 통해 민감 정보(API 키 등)를 주입하세요. `.env`는 절대 깃에 커밋하지 마세요.
 
+**ETF 유니버스 정책 (.env)**
+- 유니버스 생성 시 ETF 포함 방식을 환경변수로 제어할 수 있습니다.
+
+```env
+# ETF 정책: all | exclude | only | auto
+UNIVERSE_ETF_MODE=auto
+
+# auto 모드에서 유지할 ETF 코드(콤마 구분)
+UNIVERSE_ETF_WHITELIST_CODES=229200,381180
+
+# auto 모드에서 유지할 ETF 이름(선택)
+UNIVERSE_ETF_WHITELIST_NAMES=
+```
+
+- 권장: `UNIVERSE_ETF_MODE=auto`
+- 권장 화이트리스트(2026-05 백테스트 기준): `229200,381180`
+
 **권장 추가 설정 / 다음 단계**
 - CI: GitHub Actions에서 `docker build` 후 multi-arch 이미지로 푸시 (`docker/build-push-action`).
 - 멀티 아키텍처: `docker buildx`로 `linux/amd64,linux/arm64` 이미지를 생성하세요.

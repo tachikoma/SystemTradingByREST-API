@@ -11,6 +11,7 @@ API 한번에 최대 600개(약 3년치) 데이터를 받아올 수 있으므로
 import os
 import sys
 import time
+import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 import pandas as pd
@@ -36,7 +37,15 @@ MAX_LOOPS = 5  # 최대 API 호출 횟수 (5번 * 600개 = 3000개, 약 12년치
 class HistoricalDataFetcher:
     """과거 데이터 수집 클래스"""
     
-    def __init__(self, kiwoom: Kiwoom, db_name: str = DB_NAME):
+    def __init__(
+        self,
+        kiwoom: Kiwoom,
+        db_name: str = DB_NAME,
+        universe_output_file: str | None = None,
+        universe_etf_mode: str | None = None,
+        universe_etf_whitelist_codes: str = '',
+        universe_etf_whitelist_names: str = '',
+    ):
         """
         Args:
             kiwoom: Kiwoom API 인스턴스
@@ -45,6 +54,12 @@ class HistoricalDataFetcher:
         self.kiwoom = kiwoom
         self.db_name = db_name
         self.universe = {}
+        self.universe_output_file = universe_output_file or f'universe_{db_name}.parquet'
+        self.etf_policy_overrides = {
+            'mode': universe_etf_mode,
+            'whitelist_codes': universe_etf_whitelist_codes,
+            'whitelist_names': universe_etf_whitelist_names,
+        }
         
     def setup_universe(self):
         """유니버스 설정 - 기존 자동매매 프로그램의 종목 리스트 사용"""
@@ -53,8 +68,20 @@ class HistoricalDataFetcher:
         # 유니버스 리스트 가져오기 (MONTHLY_UNIVERSE_SIZE 환경변수 기준, 기본 250)
         # kiwoom_client 전달: 장 종료 후면 API로 당일 최신 데이터 갱신, 장 중이면 크롤링
         universe_max = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '250'))
-        universe_list = get_universe(kiwoom_client=self.kiwoom, max_codes=universe_max)
+        universe_list = get_universe(
+            kiwoom_client=self.kiwoom,
+            max_codes=universe_max,
+            universe_output_file=self.universe_output_file,
+            etf_policy_overrides=self.etf_policy_overrides,
+        )
         logger.info(f"유니버스 종목 수: {len(universe_list)} (max_codes={universe_max})")
+        logger.info(
+            "백테스트 유니버스 정책: db=%s, output=%s, etf_mode=%s, whitelist_codes=%s",
+            self.db_name,
+            self.universe_output_file,
+            self.etf_policy_overrides.get('mode') or '(env default)',
+            self.etf_policy_overrides.get('whitelist_codes') or '(none)',
+        )
         logger.debug(f"유니버스 종목명 샘플 (처음 10개): {universe_list[:10]}")
         
         # KOSPI와 KOSDAQ 종목 코드 가져오기
@@ -352,8 +379,29 @@ class HistoricalDataFetcher:
             self.save_universe_snapshots(price_data_range)
 
 
+def build_parser():
+    parser = argparse.ArgumentParser(description='백테스트용 과거 데이터 수집')
+    parser.add_argument('--db-name', default=DB_NAME, help='백테스트 DB 이름 (확장자 제외)')
+    parser.add_argument(
+        '--universe-output-file',
+        default=None,
+        help='백테스트 유니버스 parquet 파일명 또는 절대경로 (기본: universe_<db-name>.parquet)',
+    )
+    parser.add_argument(
+        '--universe-etf-mode',
+        choices=['all', 'exclude', 'only', 'auto'],
+        default=None,
+        help='백테스트 유니버스 ETF 정책 override',
+    )
+    parser.add_argument('--universe-etf-whitelist-codes', default='', help='백테스트 ETF whitelist 코드 CSV')
+    parser.add_argument('--universe-etf-whitelist-names', default='', help='백테스트 ETF whitelist 이름 CSV')
+    return parser
+
+
 def main():
     """메인 실행 함수"""
+    args = build_parser().parse_args()
+
     # 환경 변수 로드
     env_path = Path(__file__).parent.parent / '.env'
     load_dotenv(dotenv_path=env_path)
@@ -383,14 +431,22 @@ def main():
     logger.info("Kiwoom API 초기화 완료")
     
     # 데이터 수집기 생성
-    fetcher = HistoricalDataFetcher(kiwoom, db_name=DB_NAME)
+    fetcher = HistoricalDataFetcher(
+        kiwoom,
+        db_name=args.db_name,
+        universe_output_file=args.universe_output_file,
+        universe_etf_mode=args.universe_etf_mode,
+        universe_etf_whitelist_codes=args.universe_etf_whitelist_codes,
+        universe_etf_whitelist_names=args.universe_etf_whitelist_names,
+    )
     
     # 유니버스 설정
     fetcher.setup_universe()
     
     # 사용자 확인
     print(f"\n총 {len(fetcher.universe)}개 종목의 약 {TARGET_YEARS}년치 데이터를 수집합니다.")
-    print(f"DB 파일: {DB_NAME}.db")
+    print(f"DB 파일: {fetcher.db_name}.db")
+    print(f"유니버스 파일: {fetcher.universe_output_file}")
     print(f"예상 소요 시간: 약 {len(fetcher.universe) * MAX_LOOPS * 0.5 / 60:.1f}분")
     
     # 전체 데이터 수집 시작

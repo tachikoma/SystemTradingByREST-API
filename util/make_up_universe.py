@@ -5,6 +5,8 @@ from datetime import datetime, time as datetime_time
 from zoneinfo import ZoneInfo
 import os
 import gc
+import time
+from typing import Optional
 from util.time_helper import check_transaction_closed
 from util.logging_config import get_logger
 from pathlib import Path
@@ -27,6 +29,132 @@ MOCK_TRADE_BLACKLIST_CODES = [
 ]
 
 logger = get_logger(__name__)
+
+
+ETF_NAME_PREFIXES = (
+    'KODEX',
+    'TIGER',
+    'ARIRANG',
+    'KOSEF',
+    'KBSTAR',
+    'HANARO',
+    'SOL',
+    'ACE',
+    'TIMEFOLIO',
+    'PLUS',
+    'RISE',
+    'TREX',
+    'FOCUS',
+    'KIWOOM',
+)
+
+
+def _parse_env_csv_set(value):
+    if not value:
+        return set()
+    return {item.strip() for item in str(value).split(',') if item and item.strip()}
+
+
+def _is_etf_name(name):
+    if not isinstance(name, str):
+        return False
+    s = name.strip().upper()
+    return s.startswith(ETF_NAME_PREFIXES) or (' ETF' in s) or s.endswith('ETF')
+
+
+def _log_etf_mix(df, label=''):
+    """유니버스 데이터의 ETF/비ETF 구성 비중을 로그로 남긴다."""
+    if '종목명' not in df.columns:
+        return
+
+    total = len(df)
+    if total == 0:
+        logger.info("Universe ETF 구성[%s]: total=0", label)
+        return
+
+    etf_mask = df['종목명'].astype(str).map(_is_etf_name)
+    etf_count = int(etf_mask.sum())
+    non_etf_count = int(total - etf_count)
+    etf_ratio = (etf_count / total) * 100.0
+    logger.info(
+        "Universe ETF 구성[%s]: total=%d, etf=%d(%.2f%%), non_etf=%d",
+        label,
+        total,
+        etf_count,
+        etf_ratio,
+        non_etf_count,
+    )
+
+
+def _apply_etf_policy(df, policy_overrides=None):
+    """
+    환경변수 기반 ETF 정책을 적용한다.
+
+    - UNIVERSE_ETF_MODE: all | exclude | only | auto (기본 all)
+    - UNIVERSE_ETF_WHITELIST_CODES: auto 모드에서 유지할 ETF 코드 CSV
+    - UNIVERSE_ETF_WHITELIST_NAMES: auto 모드에서 유지할 ETF 종목명 CSV
+
+    auto 모드: ETF는 기본 제외하고 whitelist ETF만 유지.
+    """
+    policy_overrides = policy_overrides or {}
+
+    mode = str(policy_overrides.get('mode', os.getenv('UNIVERSE_ETF_MODE', 'all'))).strip().lower()
+    if mode not in {'all', 'exclude', 'only', 'auto'}:
+        logger.warning("알 수 없는 UNIVERSE_ETF_MODE=%s, all로 처리합니다.", mode)
+        mode = 'all'
+
+    if '종목명' not in df.columns:
+        logger.warning("ETF 정책 적용 건너뜀: 종목명 컬럼이 없습니다.")
+        return df
+
+    out = df.copy()
+    etf_mask = out['종목명'].astype(str).map(_is_etf_name)
+
+    if mode == 'all':
+        logger.info("ETF 정책(all): ETF 포함 유지 (ETF %d개)", int(etf_mask.sum()))
+        _log_etf_mix(out, label='all')
+        return out
+
+    if mode == 'exclude':
+        filtered = out.loc[~etf_mask].copy()
+        logger.info("ETF 정책(exclude): ETF %d개 제외, 결과 %d개", int(etf_mask.sum()), len(filtered))
+        _log_etf_mix(filtered, label='exclude')
+        return filtered
+
+    if mode == 'only':
+        filtered = out.loc[etf_mask].copy()
+        logger.info("ETF 정책(only): ETF %d개만 유지", len(filtered))
+        _log_etf_mix(filtered, label='only')
+        return filtered
+
+    # mode == auto
+    whitelist_codes = _parse_env_csv_set(
+        policy_overrides.get('whitelist_codes', os.getenv('UNIVERSE_ETF_WHITELIST_CODES', ''))
+    )
+    whitelist_names = _parse_env_csv_set(
+        policy_overrides.get('whitelist_names', os.getenv('UNIVERSE_ETF_WHITELIST_NAMES', ''))
+    )
+
+    code_keep_mask = np.zeros(len(out), dtype=bool)
+    if whitelist_codes and '종목코드' in out.columns:
+        code_keep_mask = out['종목코드'].astype(str).isin(whitelist_codes).to_numpy()
+
+    name_keep_mask = np.zeros(len(out), dtype=bool)
+    if whitelist_names:
+        name_keep_mask = out['종목명'].astype(str).isin(whitelist_names).to_numpy()
+
+    keep_whitelist_mask = code_keep_mask | name_keep_mask
+    final_keep = (~etf_mask.to_numpy()) | keep_whitelist_mask
+    filtered = out.loc[final_keep].copy()
+    kept_etf = int((etf_mask.to_numpy() & final_keep).sum())
+    logger.info(
+        "ETF 정책(auto): ETF %d개 중 whitelist %d개 유지, 결과 %d개",
+        int(etf_mask.sum()),
+        kept_etf,
+        len(filtered),
+    )
+    _log_etf_mix(filtered, label='auto')
+    return filtered
 
 
 def universe_cache_exists(db_dir=None, max_age_days=None, strategy_name=None):
@@ -390,7 +518,13 @@ def crawler(code, page, fields):
     return df
 
 
-def get_universe(kiwoom_client=None, use_kiwoom_api=False, max_codes=200):
+def get_universe(
+    kiwoom_client=None,
+    use_kiwoom_api=False,
+    max_codes=200,
+    universe_output_file: Optional[str] = 'universe.parquet',
+    etf_policy_overrides: Optional[dict] = None,
+):
     """
     유니버스를 생성하는 함수 (스마트 캐싱 전략)
     
@@ -414,7 +548,12 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False, max_codes=200):
         try:
             df = fetch_all_stocks_from_kiwoom(kiwoom_client)
             logger.info(f"✅ 키움 API로 {len(df)}개 종목 정보 획득 및 캐싱 완료")
-            universe = _filter_and_create_universe(df, max_codes=max_codes)
+            universe = _filter_and_create_universe(
+                df,
+                max_codes=max_codes,
+                universe_output_file=universe_output_file,
+                etf_policy_overrides=etf_policy_overrides,
+            )
             try:
                 del df
                 gc.collect()
@@ -430,7 +569,12 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False, max_codes=200):
                 cached_df = _try_load_cache()
                 if cached_df is not None:
                     logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
-                    universe = _filter_and_create_universe(cached_df, max_codes=max_codes)
+                    universe = _filter_and_create_universe(
+                        cached_df,
+                        max_codes=max_codes,
+                        universe_output_file=universe_output_file,
+                        etf_policy_overrides=etf_policy_overrides,
+                    )
                     try:
                         del cached_df
                         gc.collect()
@@ -495,7 +639,12 @@ def get_universe(kiwoom_client=None, use_kiwoom_api=False, max_codes=200):
                 logger.error(f"크롤링 실패이고 사용 가능한 캐시도 없습니다.")
                 raise Exception(f"크롤링 실패이고 사용 가능한 캐시도 없습니다: {e}")
 
-    universe = _filter_and_create_universe(df, max_codes=max_codes)
+    universe = _filter_and_create_universe(
+        df,
+        max_codes=max_codes,
+        universe_output_file=universe_output_file,
+        etf_policy_overrides=etf_policy_overrides,
+    )
     try:
         del df
         gc.collect()
@@ -548,7 +697,13 @@ def _try_load_cache():
     return None
 
 
-def _filter_and_create_universe(df, kiwoom_client=None, max_codes=200):
+def _filter_and_create_universe(
+    df,
+    kiwoom_client=None,
+    max_codes=200,
+    universe_output_file: Optional[str] = 'universe.parquet',
+    etf_policy_overrides: Optional[dict] = None,
+):
     """
     DataFrame을 받아서 필터링하고 유니버스를 생성하는 내부 함수
     네이버 크롤링과 키움 API 모두에서 공통으로 사용
@@ -607,6 +762,9 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=200):
         (~df.종목명.str.contains("KOFR금리", na=False)) &    # KOFR금리 제외
         (~df.종목명.str.contains("머니마켓", na=False))    # 머니마켓 제외
     ]
+
+    # ETF 정책 적용 (all/exclude/only/auto)
+    df = _apply_etf_policy(df, policy_overrides=etf_policy_overrides)
 
     # 우선주 필터링: 종목명에 단순히 '우'가 포함된다고 제거하면
     # '우진', '우리금융지주' 등 일반 종목이 잘못 제외될 수 있음.
@@ -760,18 +918,23 @@ def _filter_and_create_universe(df, kiwoom_client=None, max_codes=200):
     except Exception as e:
         logger.warning(f"보유/주문 병합 중 경고 발생: {e}")
 
-    try:
-        out_universe = os.path.join(DB_DIR, 'universe.parquet')
+    if universe_output_file:
         try:
-            df.to_parquet(out_universe, index=True)
+            out_universe = (
+                universe_output_file
+                if os.path.isabs(universe_output_file)
+                else os.path.join(DB_DIR, universe_output_file)
+            )
             try:
-                logger.info(f"Universe 저장: {Path(out_universe).resolve()}")
-            except Exception:
-                logger.info(f"Universe 저장: {out_universe}")
+                df.to_parquet(out_universe, index=True)
+                try:
+                    logger.info(f"Universe 저장: {Path(out_universe).resolve()}")
+                except Exception:
+                    logger.info(f"Universe 저장: {out_universe}")
+            except Exception as e:
+                logger.error(f"Universe Parquet 저장 실패: {e}")
         except Exception as e:
-            logger.error(f"Universe Parquet 저장 실패: {e}")
-    except Exception as e:
-        logger.warning(f"universe 저장 실패: {e}")
+            logger.warning(f"universe 저장 실패: {e}")
 
     # 임시로 생성된 대용량 컬럼들을 삭제하여 메모리 사용을 줄입니다.
     try:
