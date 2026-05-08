@@ -140,13 +140,72 @@ def _apply_etf_policy(df, policy_overrides=None):
         code_keep_mask = out['종목코드'].astype(str).isin(whitelist_codes).to_numpy()
 
     name_keep_mask = np.zeros(len(out), dtype=bool)
-    if whitelist_names:
+    if whitelist_names and '종목명' in out.columns:
         name_keep_mask = out['종목명'].astype(str).isin(whitelist_names).to_numpy()
 
     keep_whitelist_mask = code_keep_mask | name_keep_mask
     final_keep = (~etf_mask.to_numpy()) | keep_whitelist_mask
     filtered = out.loc[final_keep].copy()
-    kept_etf = int((etf_mask.to_numpy() & final_keep).sum())
+
+    # Mark whitelist rows present in the filtered set
+    try:
+        if '종목코드' in filtered.columns:
+            filtered['_is_whitelist'] = filtered['종목코드'].astype(str).isin(whitelist_codes)
+        else:
+            filtered['_is_whitelist'] = False
+        if whitelist_names and '종목명' in filtered.columns:
+            filtered['_is_whitelist'] = filtered['_is_whitelist'] | filtered['종목명'].astype(str).isin(whitelist_names)
+    except Exception:
+        filtered['_is_whitelist'] = False
+
+    # If some whitelist codes/names were removed by prior filters, try to fetch them from cache and append
+    missing_codes = set()
+    missing_names = set()
+    if whitelist_codes and '종목코드' in filtered.columns:
+        missing_codes = set(whitelist_codes) - set(filtered['종목코드'].astype(str))
+    if whitelist_names and '종목명' in filtered.columns:
+        missing_names = set(whitelist_names) - set(filtered['종목명'].astype(str))
+
+    if missing_codes or missing_names:
+        try:
+            cache_df = _try_load_cache()
+            appended = None
+            if cache_df is not None:
+                parts = []
+                if missing_codes and '종목코드' in cache_df.columns:
+                    part = cache_df[cache_df['종목코드'].astype(str).isin(missing_codes)].copy()
+                    if not part.empty:
+                        parts.append(part)
+                if missing_names and '종목명' in cache_df.columns:
+                    part = cache_df[cache_df['종목명'].astype(str).isin(missing_names)].copy()
+                    if not part.empty:
+                        parts.append(part)
+                if parts:
+                    appended = pd.concat(parts, ignore_index=True, sort=False)
+                    # ensure columns align with filtered
+                    for col in filtered.columns:
+                        if col not in appended.columns:
+                            appended[col] = ''
+                    appended = appended[filtered.columns]
+                    appended['_is_whitelist'] = True
+                    filtered = pd.concat([filtered, appended], ignore_index=True, sort=False)
+                    # dedupe by code if present
+                    if '종목코드' in filtered.columns:
+                        filtered = filtered.drop_duplicates(subset=['종목코드'], keep='first').reset_index(drop=True)
+        except Exception as e:
+            logger.warning(f"auto whitelist 병합 중 오류 발생: {e}")
+
+    kept_etf = 0
+    try:
+        # recompute kept_etf based on ETF mask and final filtered set
+        if '종목코드' in filtered.columns:
+            etf_mask_filtered = filtered['종목명'].astype(str).map(_is_etf_name)
+            kept_etf = int(etf_mask_filtered.sum())
+        else:
+            kept_etf = 0
+    except Exception:
+        kept_etf = 0
+
     logger.info(
         "ETF 정책(auto): ETF %d개 중 whitelist %d개 유지, 결과 %d개",
         int(etf_mask.sum()),
@@ -772,7 +831,12 @@ def _filter_and_create_universe(
     # 종목코드가 있으면 코드 끝자리가 '0'인 종목만 남기고, 없으면 그대로 유지
     try:
         if '종목코드' in df.columns:
-            df = df[df['종목코드'].astype(str).str.endswith('0')]
+            # 우선주 필터: 기본은 코드 끝자리 '0'인 종목만 유지
+            # 단, 화이트리스트(_is_whitelist)가 있을 경우에는 해당 종목은 보호
+            if '_is_whitelist' in df.columns:
+                df = df[df['종목코드'].astype(str).str.endswith('0') | df['_is_whitelist'].astype(bool)]
+            else:
+                df = df[df['종목코드'].astype(str).str.endswith('0')]
         else:
             pass  # 종목코드가 없으면 그대로 유지
     except Exception:
@@ -883,8 +947,15 @@ def _filter_and_create_universe(
                     vol_col = c
                     break
 
-            # mark held/order rows
-            df['_is_held_or_order'] = df['종목코드'].astype(str).isin(held_codes | order_codes) if '종목코드' in df.columns else False
+            # mark held/order rows and protect whitelist rows as well
+            if '종목코드' in df.columns:
+                protected_codes = held_codes | order_codes
+                if '_is_whitelist' in df.columns:
+                    df['_is_held_or_order'] = df['종목코드'].astype(str).isin(protected_codes) | df['_is_whitelist'].astype(bool)
+                else:
+                    df['_is_held_or_order'] = df['종목코드'].astype(str).isin(protected_codes)
+            else:
+                df['_is_held_or_order'] = False
 
             # 만약 후보수가 초과하면 제거 수행
             if len(df) > max_codes:
@@ -911,9 +982,11 @@ def _filter_and_create_universe(
             # 최종적으로 max_codes까지 자름(안전망)
             df = df.head(max_codes)
 
-            # cleanup
+            # cleanup: drop protection/marker columns before saving
             if '_is_held_or_order' in df.columns:
                 df = df.drop(columns=['_is_held_or_order'])
+            if '_is_whitelist' in df.columns:
+                df = df.drop(columns=['_is_whitelist'])
 
     except Exception as e:
         logger.warning(f"보유/주문 병합 중 경고 발생: {e}")
@@ -938,7 +1011,7 @@ def _filter_and_create_universe(
 
     # 임시로 생성된 대용량 컬럼들을 삭제하여 메모리 사용을 줄입니다.
     try:
-        tmp_cols = ['_vol_numeric']
+        tmp_cols = ['_vol_numeric', '_is_whitelist']
         for c in tmp_cols:
             if c in df.columns:
                 try:
