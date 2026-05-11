@@ -159,6 +159,8 @@ class RSIStrategy(threading.Thread):
             self.ma200_skip_date = None
         self.ma200_skip_counts = {}
         self.ma200_skip_reported_date = None
+        # 이 실행 인스턴스에서 장중을 관찰했는지 플래그
+        self._saw_market_open = False
         try:
             self.MA200_SKIP_REPORT_TOP_N = int(os.getenv('MA200_SKIP_REPORT_TOP_N', '10'))
             if self.MA200_SKIP_REPORT_TOP_N < 1:
@@ -677,16 +679,50 @@ class RSIStrategy(threading.Thread):
                 now = get_korea_time()
             report_date = now.strftime('%Y%m%d')
 
+            # 이미 메모리에서 오늘 전송된 상태면 중단
             if self.ma200_skip_reported_date == report_date:
                 return
 
-            # 장 종료 후(매수 윈도우 종료 이후) 하루 1회 리포트 전송
+            # 주말(토/일) 전송 금지
+            try:
+                if now.weekday() >= 5:
+                    return
+            except Exception:
+                pass
+
+            # 이전 실행에서 파일로 기록된 리포트가 있으면 중단(프로그램 재시작 후 중복 방지)
+            try:
+                db_dir = os.getenv('DB_DIR', './data')
+                csv_path = os.path.join(db_dir, 'ma200_skip_daily_report.csv')
+                if os.path.exists(csv_path):
+                    import csv as _csv
+                    with open(csv_path, 'r', encoding='utf-8') as _f:
+                        reader = _csv.reader(_f)
+                        for row in reader:
+                            if len(row) > 0 and row[0] == report_date:
+                                self.ma200_skip_reported_date = report_date
+                                logger.info("MA200 리포트 이미 기록됨(파일 발견): %s", csv_path)
+                                return
+            except Exception:
+                pass
+
+            # 장 종료 후(매수 윈도우 종료 이후)만 전송
             if now.hour < 15 or (now.hour == 15 and now.minute < 21):
+                return
+
+            # 이 인스턴스가 오늘 장중을 관찰하지 않았다면(프로그램이 장 종료 후에 시작된 경우) 전송 금지
+            if not getattr(self, '_saw_market_open', False):
+                logger.info("이 인스턴스는 오늘 장중 관찰이 없어 MA200 리포트 전송을 생략합니다: %s", report_date)
                 return
 
             counts = dict(self.ma200_skip_counts) if self.ma200_skip_date == report_date else {}
             total_count = int(sum(counts.values()))
             unique_count = len(counts)
+
+            # 건수 0인 경우 전송하지 않음
+            if total_count == 0:
+                logger.info("MA200 스킵 항목 없음으로 리포트 전송 생략: date=%s", report_date)
+                return
 
             top_n = int(self.MA200_SKIP_REPORT_TOP_N)
             ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
@@ -710,6 +746,7 @@ class RSIStrategy(threading.Thread):
             logger.info("MA200 스킵 일일 리포트 전송 완료: date=%s total=%d unique=%d", report_date, total_count, unique_count)
 
             reported_at = now.strftime('%Y-%m-%d %H:%M:%S')
+            # 전송 후에만 기록
             self._write_ma200_skip_report_csv(report_date, counts, reported_at, total_count)
             self.ma200_skip_reported_date = report_date
         except Exception as e:
@@ -1013,6 +1050,13 @@ class RSIStrategy(threading.Thread):
                 now = get_korea_time()
                 logger.info("Korea time: %s", now)
 
+                # 프로그램이 장중을 한 번이라도 관찰했는지 기록
+                try:
+                    if check_transaction_open():
+                        self._saw_market_open = True
+                except Exception:
+                    pass
+
                 # 날짜 롤오버 감지: 날짜가 바뀌면 하루치 가격 데이터 갱신을 시도
                 try:
                     current_date = now.date()
@@ -1020,6 +1064,11 @@ class RSIStrategy(threading.Thread):
                         self._last_rollover_date = current_date
                     if current_date != self._last_rollover_date:
                         self._last_rollover_date = current_date
+                        # 새로운 날짜로 넘어가면 장중 관찰 플래그 리셋
+                        try:
+                            self._saw_market_open = False
+                        except Exception:
+                            pass
                         logger.info("날짜 변경 감지: 일일 가격 데이터 갱신 시도")
                         ok = self.check_and_get_price_data()
                         if ok:
