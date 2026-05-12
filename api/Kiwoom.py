@@ -741,12 +741,148 @@ class Kiwoom:
             if cont_yn == "Y":
                 time.sleep(0.2)
         # 기존 balance에서 매수일 정보 보존 (API 조회로 초기화되지 않도록)
-        existing_dates = {code: info.get('매수일') for code, info in self.balance.items()}
+        # 종목코드 포맷 불일치(A 접두사 등)를 방지하기 위해 키를 정규화(lstrip 'A')하여 보존한다.
+        existing_dates = {code.lstrip('A'): info.get('매수일') for code, info in self.balance.items()}
         self.balance = {code: info for code, info in all_holdings}
         for code in self.balance:
             preserved = existing_dates.get(code)
             self.balance[code]['매수일'] = preserved if preserved else None
         return self.balance
+
+    def get_executions_for_code(self, code, ord_dt=None, qry_tp='4', stk_bond_tp='1', sell_tp='0', dmst_stex_tp='%',
+                                max_loops=200, max_retries=3, retry_delay=0.5):
+        """
+        계좌별 주문/체결 이력(kt00007)을 조회하여 표준화된 체결 항목 리스트를 반환합니다.
+
+        반환 형식: list of dict, 각 dict 예시:
+            {
+                '주문번호': '0001234',
+                '종목코드': '005930',
+                '종목명': '삼성전자',
+                '주문구분': '매수' or '매도',
+                '주문수량': 100,
+                '체결수량': 100,
+                '체결단가': 12345,
+                '주문시간': '093015',
+                '체결시간': '093045',
+                '체결일자': '20260512'  # 가능하면 YYYYMMDD
+            }
+
+        주의: 응답 필드 이름은 API 버전에 따라 다를 수 있으므로 가능한 여러 키를 시도하여 추출합니다.
+        """
+        path = "/api/dostk/acnt"
+        api_id = "kt00007"
+
+        params = {
+            'qry_tp': qry_tp,
+            'stk_bond_tp': stk_bond_tp,
+            'sell_tp': sell_tp,
+            'stk_cd': code,
+            'fr_ord_no': '',
+            'dmst_stex_tp': dmst_stex_tp
+        }
+        if ord_dt:
+            params['ord_dt'] = ord_dt
+
+        results = []
+        next_key = ""
+        cont_yn = 'N'
+        first = True
+        loop_count = 0
+
+        def _to_int(v):
+            try:
+                return int(str(v).replace('+', '').replace('-', '').strip())
+            except Exception:
+                return 0
+
+        while True:
+            extra_headers = {}
+            if next_key:
+                extra_headers['next-key'] = next_key
+
+            page_res = None
+            page_headers = None
+            for attempt in range(max_retries):
+                page_res, page_headers = self._request(path=path, api_id=api_id, params=params, method="POST", extra_headers=extra_headers)
+                if page_res and isinstance(page_res, dict) and "acnt_ord_cntr_prps_dtl" in page_res:
+                    break
+
+                # rate-limit 응답일 경우에만 재시도
+                if (
+                    page_res is not None and
+                    isinstance(page_res, dict) and
+                    "return_code" in page_res and
+                    page_res.get("return_code") == 5 and
+                    RATE_LIMIT_MSG in page_res.get("return_msg", "")
+                ):
+                    logger.warning(f"API rate limit exceeded for kt00007 (attempt {attempt+1}/{max_retries}), retrying after {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    continue
+
+                logger.error(f"Failed page request for kt00007 (attempt {attempt+1}): {page_res}")
+                page_res = None
+                break
+
+            if not page_res or not isinstance(page_res, dict) or "acnt_ord_cntr_prps_dtl" not in page_res:
+                logger.warning("Stopping retrieval of executions due to page request failure or empty response.")
+                break
+
+            for item in page_res.get("acnt_ord_cntr_prps_dtl", []):
+                # 가능한 여러 필드명을 시도하여 값 추출
+                ord_no = item.get('ord_no', '') or item.get('ordNo', '')
+                stk_cd = (item.get('stk_cd', '') or item.get('stkCd', '')).lstrip('A').rstrip()
+                stk_nm = item.get('stk_nm', '') or item.get('stkNm', '')
+                io_raw = (item.get('io_tp_nm') or item.get('ioTpNm') or item.get('trde_tp') or '').strip()
+                # '현금매수', '시장가매도' 등 다양한 표현이 오므로 포함 검사로 정규화
+                if '매수' in io_raw:
+                    io_tp = '매수'
+                elif '매도' in io_raw:
+                    io_tp = '매도'
+                else:
+                    io_tp = io_raw
+                ord_qty = _to_int(item.get('ord_qty', '') or item.get('ordQty', '0'))
+                cntr_qty = _to_int(item.get('cntr_qty', '') or item.get('cntrQty', '0'))
+                cntr_uv = _to_int(item.get('cntr_uv', '') or item.get('cntrUv', '0'))
+                ord_tm = item.get('ord_tm', '') or item.get('ordTm', '')
+                cntr_tm = item.get('cntr_tm', '') or item.get('cntrTm', '')
+                # 날짜 필드: ord_dt 또는 cntr_dt 등 가능
+                # 날짜 정보는 응답에 없을 수 있으므로 여러 필드를 시도
+                dt = item.get('ord_dt') or item.get('ordDt') or item.get('cntr_dt') or item.get('cntrDt') or None
+                if isinstance(dt, str) and len(dt) >= 8:
+                    dt_norm = dt[:8]
+                else:
+                    # 요청 파라미터로 ord_dt를 전달했다면 그 값을 체결일자로 사용
+                    dt_norm = params.get('ord_dt') if params.get('ord_dt') else None
+
+                results.append({
+                    '주문번호': ord_no.strip() if isinstance(ord_no, str) else ord_no,
+                    '종목코드': stk_cd,
+                    '종목명': stk_nm.strip() if isinstance(stk_nm, str) else stk_nm,
+                    '구분': io_tp,
+                    '주문수량': ord_qty,
+                    '체결수량': cntr_qty,
+                    '체결단가': cntr_uv,
+                    '주문시간': ord_tm,
+                    '체결시간': cntr_tm,
+                    '체결일자': dt_norm
+                })
+
+            # 페이징 헤더 업데이트
+            if page_headers:
+                cont_yn = page_headers.get('cont-yn', cont_yn)
+                next_key = page_headers.get('next-key', '')
+            if not first and cont_yn != 'Y':
+                break
+            loop_count += 1
+            if loop_count >= max_loops:
+                logger.info(f"Loop limit ({max_loops}) reached for kt00007, breaking")
+                break
+            first = False
+            if cont_yn == 'Y':
+                time.sleep(0.2)
+
+        return results
 
     def set_real_reg(self, str_code_list, str_opt_type='0'):
         """
@@ -849,7 +985,10 @@ class Kiwoom:
         
         try:
             order_no = real_data.get('9203', '').strip()
+            # 종목코드 정규화: REST/API 응답에서 'A' 접두사가 붙을 수 있으므로 제거
             code = real_data.get('9001', '').strip()
+            if code:
+                code = code.lstrip('A').strip()
             order_status = real_data.get('913', '').strip()  # 접수/확인/체결
             order_qty = safe_int(real_data.get('900', '0'))
             exec_qty = safe_int(real_data.get('911', '0'))  # 체결량
@@ -914,6 +1053,7 @@ class Kiwoom:
                             '매매가능수량': exec_qty,
                             '매수일': today_str
                         }
+                        # DB에 저장할 때도 정규화된 코드를 사용
                         upsert_purchase_date(code, today_str)
                         logger.info(f"신규 매수 체결로 balance 추가: {code} 수량 {exec_qty}, 가격 {current_price}")
                 
@@ -925,6 +1065,7 @@ class Kiwoom:
                         if new_qty <= 0:
                             # 전량 매도
                             del self.balance[code]
+                            # DB 기록 삭제 시에도 정규화된 코드를 사용
                             delete_purchase_date(code)
                             logger.info(f"전량 매도 체결로 balance에서 제거: {code}")
                         else:

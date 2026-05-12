@@ -299,14 +299,16 @@ class RSIStrategy(threading.Thread):
             # DB에서 매수일 복원: 프로그램 재시작 후에도 시간 손절이 올바르게 동작하도록 함
             try:
                 saved_dates = load_all_purchase_dates()
-                for code, purchase_date in saved_dates.items():
+                # DB에 저장된 키는 API/주문 소스에 따라 'A' 접두사가 있을 수 있으므로 정규화하여 비교
+                normalized_saved = {k.lstrip('A').strip(): v for k, v in saved_dates.items()}
+                for code, purchase_date in normalized_saved.items():
                     if code in self.kiwoom.balance:
                         if not self.kiwoom.balance[code].get('매수일'):
                             self.kiwoom.balance[code]['매수일'] = purchase_date
                             logger.info("DB에서 매수일 복원: %s -> %s", code, purchase_date)
                 # DB에 있지만 이미 청산된 종목은 DB에서 삭제
                 current_holdings = set(self.kiwoom.balance.keys())
-                for code in list(saved_dates.keys()):
+                for code in list(normalized_saved.keys()):
                     if code not in current_holdings:
                         delete_purchase_date(code)
                         logger.info("청산 확인으로 매수일 DB 정리: %s", code)
