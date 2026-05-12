@@ -408,6 +408,13 @@ def main():
     
     # 로깅 설정 - fetch_historical_data.log 파일에 기록
     configure_logging(file_name='fetch_historical_data.log')
+    # 실행 환경에서 로드된 ETF 관련 환경변수 확인용 로그
+    logger.info(
+        "환경변수 확인: UNIVERSE_ETF_MODE=%s, UNIVERSE_ETF_WHITELIST_CODES=%s, UNIVERSE_ETF_WHITELIST_NAMES=%s",
+        os.getenv('UNIVERSE_ETF_MODE'),
+        os.getenv('UNIVERSE_ETF_WHITELIST_CODES'),
+        os.getenv('UNIVERSE_ETF_WHITELIST_NAMES'),
+    )
     
     logger.info("=" * 60)
     logger.info("백테스트용 과거 데이터 수집 프로그램 시작")

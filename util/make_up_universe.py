@@ -200,6 +200,24 @@ def _apply_etf_policy(df, policy_overrides=None):
     out = df.copy()
     etf_mask = _compute_etf_mask(out)
 
+    # 디버그: 호출시 전달된 모드/파라미터와 DataFrame 샘플 정보 로깅
+    try:
+        sample_codes = out['종목코드'].astype(str).head(10).tolist() if '종목코드' in out.columns else None
+    except Exception:
+        sample_codes = None
+    try:
+        logger.info(
+            "DEBUG _apply_etf_policy 호출: mode=%s, policy_overrides=%s, df_rows=%d, df_cols=%d, sample_codes=%s",
+            mode,
+            policy_overrides,
+            len(out),
+            len(out.columns),
+            sample_codes,
+        )
+    except Exception:
+        # 로깅 실패 시 무시
+        pass
+
     if mode == 'all':
         logger.info("ETF 정책(all): ETF 포함 유지 (ETF %d개)", int(etf_mask.sum()))
         _log_etf_mix(out, label='all')
@@ -233,36 +251,132 @@ def _apply_etf_policy(df, policy_overrides=None):
     else:
         whitelist_names = _parse_env_csv_set(override_names)
 
+    # 코드 비교는 형식(선행 0 포함/미포함) 차이로 매칭 실패가 나는 것을 방지하기 위해
+    # 숫자 기반으로 정규화하여 비교합니다. (예: '001200' vs '1200' 일치)
     code_keep_mask = np.zeros(len(out), dtype=bool)
-    if whitelist_codes and '종목코드' in out.columns:
-        code_keep_mask = out['종목코드'].astype(str).isin(whitelist_codes).to_numpy()
+    whitelist_codes_int = set()
+    if whitelist_codes:
+        for c in whitelist_codes:
+            digits = ''.join(ch for ch in str(c) if ch.isdigit())
+            try:
+                if digits:
+                    whitelist_codes_int.add(int(digits))
+            except Exception:
+                continue
+
+    # 디버그: 화이트리스트 파싱 결과와 캐시 내 매칭 개수 확인
+    try:
+        logger.info(
+            "DEBUG whitelist parsed: raw=%s, normalized_int=%s, names=%s",
+            whitelist_codes,
+            sorted(list(whitelist_codes_int)) if whitelist_codes_int else [],
+            whitelist_names,
+        )
+    except Exception:
+        pass
+    try:
+        matches_int = 0
+        matches_str = 0
+        if '종목코드' in out.columns and whitelist_codes_int:
+            out_code_digits = out['종목코드'].astype(str).str.replace(r'\D+', '', regex=True)
+            out_code_ints = pd.to_numeric(out_code_digits, errors='coerce').fillna(-1).astype(int)
+            matches_int = int(out_code_ints.isin(list(whitelist_codes_int)).sum())
+        if '종목코드' in out.columns and whitelist_codes:
+            matches_str = int(out['종목코드'].astype(str).isin(whitelist_codes).sum())
+        logger.info("DEBUG whitelist match counts: by_int=%d, by_str=%d", matches_int, matches_str)
+    except Exception:
+        pass
+
+    if whitelist_codes_int and '종목코드' in out.columns:
+        # df의 종목코드를 숫자형으로 정규화
+        try:
+            out_code_digits = out['종목코드'].astype(str).str.replace(r'\D+', '', regex=True)
+            out_code_ints = pd.to_numeric(out_code_digits, errors='coerce').fillna(-1).astype(int)
+            code_keep_mask = out_code_ints.isin(list(whitelist_codes_int)).to_numpy()
+        except Exception:
+            # 폴백: 기존 문자열 매칭 사용
+            code_keep_mask = out['종목코드'].astype(str).isin(whitelist_codes).to_numpy()
 
     name_keep_mask = np.zeros(len(out), dtype=bool)
     if whitelist_names and '종목명' in out.columns:
         name_keep_mask = out['종목명'].astype(str).isin(whitelist_names).to_numpy()
 
+    # upstream에서 전달된 보호 표식을 반영할 수 있도록 준비합니다.
+    pre_keep_mask = None
+    pre_keep_series = None
+    if '_pre_whitelist' in out.columns:
+        try:
+            pre_keep_series = out['_pre_whitelist'].astype(bool)
+            pre_keep_mask = pre_keep_series.to_numpy()
+            try:
+                logger.info("DEBUG _apply_etf_policy: detected _pre_whitelist, preserve_count=%d", int(pre_keep_series.sum()))
+            except Exception:
+                pass
+        except Exception:
+            pre_keep_mask = None
+
     keep_whitelist_mask = code_keep_mask | name_keep_mask
+    if pre_keep_mask is not None:
+        try:
+            keep_whitelist_mask = keep_whitelist_mask | pre_keep_mask
+        except Exception:
+            try:
+                keep_whitelist_mask = (keep_whitelist_mask.astype(bool)) | (np.array(pre_keep_mask, dtype=bool))
+            except Exception:
+                pass
+
     final_keep = (~etf_mask.to_numpy()) | keep_whitelist_mask
     filtered = out.loc[final_keep].copy()
 
     # Mark whitelist rows present in the filtered set
     try:
+        # _is_whitelist 표시는 숫자 정규화 기반으로 처리
         if '종목코드' in filtered.columns:
-            filtered['_is_whitelist'] = filtered['종목코드'].astype(str).isin(whitelist_codes)
+            try:
+                filt_code_digits = filtered['종목코드'].astype(str).str.replace(r'\D+', '', regex=True)
+                filt_code_ints = pd.to_numeric(filt_code_digits, errors='coerce').fillna(-1).astype(int)
+                filtered['_is_whitelist'] = filt_code_ints.isin(list(whitelist_codes_int))
+            except Exception:
+                filtered['_is_whitelist'] = filtered['종목코드'].astype(str).isin(whitelist_codes)
         else:
             filtered['_is_whitelist'] = False
         if whitelist_names and '종목명' in filtered.columns:
             filtered['_is_whitelist'] = filtered['_is_whitelist'] | filtered['종목명'].astype(str).isin(whitelist_names)
+
+        # upstream에서 보호 표식이 있으면 _is_whitelist에 합칩니다.
+        if pre_keep_series is not None:
+            try:
+                pre_filtered = pre_keep_series.loc[filtered.index].astype(bool)
+                filtered['_is_whitelist'] = filtered['_is_whitelist'].astype(bool) | pre_filtered.values
+            except Exception:
+                try:
+                    filtered['_is_whitelist'] = filtered['_is_whitelist'].astype(bool) | pre_keep_mask
+                except Exception:
+                    pass
     except Exception:
         filtered['_is_whitelist'] = False
 
-    # If some whitelist codes/names were removed by prior filters, try to fetch them from cache and append
+    # If some whitelist codes/names were removed by prior filters, try to fetch them from cache and append.
+    # Compute missing sets in both string and normalized-int forms for robust matching.
     missing_codes = set()
+    missing_codes_int = set()
     missing_names = set()
     if whitelist_codes and '종목코드' in filtered.columns:
-        missing_codes = set(whitelist_codes) - set(filtered['종목코드'].astype(str))
+        try:
+            filt_code_digits = filtered['종목코드'].astype(str).str.replace(r'\D+', '', regex=True)
+            filt_code_ints = pd.to_numeric(filt_code_digits, errors='coerce').dropna().astype(int).tolist()
+            missing_codes_int = set(whitelist_codes_int) - set(filt_code_ints)
+        except Exception:
+            missing_codes_int = set()
+        try:
+            missing_codes = set(whitelist_codes) - set(filtered['종목코드'].astype(str))
+        except Exception:
+            missing_codes = set(whitelist_codes)
     if whitelist_names and '종목명' in filtered.columns:
-        missing_names = set(whitelist_names) - set(filtered['종목명'].astype(str))
+        try:
+            missing_names = set(whitelist_names) - set(filtered['종목명'].astype(str))
+        except Exception:
+            missing_names = set(whitelist_names)
 
     if missing_codes or missing_names:
         try:
@@ -270,10 +384,25 @@ def _apply_etf_policy(df, policy_overrides=None):
             appended = None
             if cache_df is not None:
                 parts = []
-                if missing_codes and '종목코드' in cache_df.columns:
-                    part = cache_df[cache_df['종목코드'].astype(str).isin(missing_codes)].copy()
-                    if not part.empty:
-                        parts.append(part)
+                if (missing_codes_int or missing_codes) and '종목코드' in cache_df.columns:
+                    # cache의 종목코드도 정규화하여 비교 (숫자 우선, 실패 시 문자열 매칭)
+                    try:
+                        cache_code_digits = cache_df['종목코드'].astype(str).str.replace(r'\D+', '', regex=True)
+                        cache_code_ints = pd.to_numeric(cache_code_digits, errors='coerce').fillna(-1).astype(int)
+                        part = None
+                        if missing_codes_int:
+                            part = cache_df[cache_code_ints.isin(list(missing_codes_int))].copy()
+                        if (part is None or part.empty) and missing_codes:
+                            part = cache_df[cache_df['종목코드'].astype(str).isin(missing_codes)].copy()
+                        if part is not None and not part.empty:
+                            parts.append(part)
+                    except Exception:
+                        try:
+                            part = cache_df[cache_df['종목코드'].astype(str).isin(missing_codes)].copy()
+                            if not part.empty:
+                                parts.append(part)
+                        except Exception:
+                            pass
                 if missing_names and '종목명' in cache_df.columns:
                     part = cache_df[cache_df['종목명'].astype(str).isin(missing_names)].copy()
                     if not part.empty:
@@ -927,17 +1056,90 @@ def _filter_and_create_universe(
     # ===== RSI(2) 전략에 최적화된 Universe 구성 =====
     # 1. 기본 필터링: 유동성 + 적절한 시가총액 범위
     # 거래대금/시가총액 단위: 백만원
-    
+
+    # 선행 필터 적용 전, 환경변수 기반 화이트리스트를 계산하여 보호 마스크를 만듭니다.
+    # etf_policy_overrides가 전달된 경우 우선 사용, 그렇지 않으면 .env에서 읽습니다.
+    try:
+        overrides = etf_policy_overrides or {}
+        override_codes = overrides.get('whitelist_codes', None)
+        if override_codes is None or (isinstance(override_codes, str) and override_codes.strip() == ''):
+            env_codes = os.getenv('UNIVERSE_ETF_WHITELIST_CODES', '')
+            whitelist_codes = _parse_env_csv_set(env_codes)
+        else:
+            whitelist_codes = _parse_env_csv_set(override_codes)
+
+        override_names = overrides.get('whitelist_names', None)
+        if override_names is None or (isinstance(override_names, str) and override_names.strip() == ''):
+            env_names = os.getenv('UNIVERSE_ETF_WHITELIST_NAMES', '')
+            whitelist_names = _parse_env_csv_set(env_names)
+        else:
+            whitelist_names = _parse_env_csv_set(override_names)
+    except Exception:
+        whitelist_codes = set()
+        whitelist_names = set()
+
+    whitelist_codes_int = set()
+    if whitelist_codes:
+        for c in whitelist_codes:
+            digits = ''.join(ch for ch in str(c) if ch.isdigit())
+            try:
+                if digits:
+                    whitelist_codes_int.add(int(digits))
+            except Exception:
+                continue
+
+    # 기본적으로 보호 마스크는 False로 초기화
+    code_protect_mask = np.zeros(len(df), dtype=bool)
+    name_protect_mask = np.zeros(len(df), dtype=bool)
+
+    if '종목코드' in df.columns and (whitelist_codes_int or whitelist_codes):
+        try:
+            code_digits = df['종목코드'].astype(str).str.replace(r'\D+', '', regex=True)
+            code_ints = pd.to_numeric(code_digits, errors='coerce').fillna(-1).astype(int)
+            if whitelist_codes_int:
+                code_protect_mask = code_ints.isin(list(whitelist_codes_int)).to_numpy()
+            else:
+                code_protect_mask = df['종목코드'].astype(str).isin(whitelist_codes).to_numpy()
+        except Exception:
+            try:
+                code_protect_mask = df['종목코드'].astype(str).isin(whitelist_codes).to_numpy()
+            except Exception:
+                code_protect_mask = np.zeros(len(df), dtype=bool)
+
+    if whitelist_names and '종목명' in df.columns:
+        try:
+            name_protect_mask = df['종목명'].astype(str).isin(whitelist_names).to_numpy()
+        except Exception:
+            name_protect_mask = np.zeros(len(df), dtype=bool)
+
+    whitelist_protect_mask = code_protect_mask | name_protect_mask
+    try:
+        preserved_by_whitelist = int(np.sum(whitelist_protect_mask))
+        logger.info("DEBUG pre-filter whitelist protect: preserved=%d", preserved_by_whitelist)
+    except Exception:
+        pass
+
+    # _apply_etf_policy 호출 시 upstream에서 보호한 항목을 인식할 수 있도록
+    # 표식 컬럼을 남겨둡니다. (이 컬럼은 이후 안전하게 삭제됩니다)
+    try:
+        df['_pre_whitelist'] = whitelist_protect_mask
+    except Exception:
+        try:
+            df.loc[:, '_pre_whitelist'] = whitelist_protect_mask
+        except Exception:
+            pass
+
     # 크롤링 시 저장된 시장구분 정보 활용 (종목코드 기반 추측보다 정확)
     kosdaq_mask = df['시장구분'] == '코스닥'
-    
+
     # 시장별 차등 시가총액 필터 (코스피: 500억, 코스닥: 200억)
     market_cap_filter = (
         (~kosdaq_mask & (df['시가총액'] > 50000)) |  # 코스피: 500억 이상
         (kosdaq_mask & (df['시가총액'] > 20000))      # 코스닥: 200억 이상
     )
-    
-    df = df[
+
+    # 기존 필터들을 하나의 마스크로 결합한 뒤 화이트리스트 보호 마스크를 OR 연산으로 합칩니다.
+    mask_combined = (
         market_cap_filter &                        # 시장별 차등 시가총액 조건
         (df['거래대금'] > 3000) &                  # 30억 이상 (유동성 확보)
         (df['시가총액'] < 5000000) &               # 5조 미만 (대형 우량주 제외)
@@ -950,10 +1152,29 @@ def _filter_and_create_universe(
         (~df.종목명.str.contains("CD금리", na=False)) &    # CD금리 제외
         (~df.종목명.str.contains("KOFR금리", na=False)) &    # KOFR금리 제외
         (~df.종목명.str.contains("머니마켓", na=False))    # 머니마켓 제외
-    ]
+    )
+
+    final_mask = mask_combined | whitelist_protect_mask
+    df = df.loc[final_mask]
+    try:
+        # 디버그: pre-filter 단계에서 화이트리스트 보존 여부 확인
+        if '종목코드' in df.columns:
+            logger.info(
+                "DEBUG post-prefilter: rows=%d, whitelist_preserved=%d",
+                len(df),
+                int(df['종목코드'].astype(str).isin(list(whitelist_codes_int) if whitelist_codes_int else list(whitelist_codes)).sum()),
+            )
+    except Exception:
+        pass
 
     # ETF 정책 적용 (all/exclude/only/auto)
     df = _apply_etf_policy(df, policy_overrides=etf_policy_overrides)
+    try:
+        if '종목코드' in df.columns:
+            logger.info("DEBUG post-apply_etf_policy: rows=%d, whitelist_preserved=%d", len(df), int(df['종목코드'].astype(str).isin(list(whitelist_codes_int) if whitelist_codes_int else list(whitelist_codes)).sum()))
+    except Exception:
+        pass
+    # (디버그) 콘솔 출력 제거: logger로 대체됨
 
     # 우선주 필터링: 종목명에 단순히 '우'가 포함된다고 제거하면
     # '우진', '우리금융지주' 등 일반 종목이 잘못 제외될 수 있음.
@@ -972,6 +1193,11 @@ def _filter_and_create_universe(
     except Exception:
         # 필터 적용 중 예외가 발생하면 원래 데이터프레임을 유지
         logger.warning("우선주 필터 적용 중 오류 발생: 종목코드 기반 필터링을 건너뜁니다.")
+    try:
+        if '종목코드' in df.columns:
+            logger.info("DEBUG post-priority-share: rows=%d, whitelist_preserved=%d", len(df), int(df['종목코드'].astype(str).isin(list(whitelist_codes_int) if whitelist_codes_int else list(whitelist_codes)).sum()))
+    except Exception:
+        pass
 
     # 2. 거래대금(1순위) + 시가총액(2순위) 기준 정렬
     # 당일 등락률은 일일 이벤트에 민감하게 반응하므로 제외.
@@ -984,6 +1210,12 @@ def _filter_and_create_universe(
     # 안전한 DataFrame 조작을 위해 복사본 사용
     df = df.copy()
 
+    try:
+        if '종목코드' in df.columns:
+            logger.info("DEBUG after-sort-before-top: rows=%d, whitelist_preserved=%d", len(df), int(df['종목코드'].astype(str).isin(list(whitelist_codes_int) if whitelist_codes_int else list(whitelist_codes)).sum()))
+    except Exception:
+        pass
+
     # 캐시에서 읽을 때 Parquet를 index_col=0으로 읽는 케이스를 지원
     # index에 종목코드가 들어있다면 이를 명시적 컬럼으로 복원
     if '종목코드' not in df.columns:
@@ -993,8 +1225,59 @@ def _filter_and_create_universe(
         if first_col != '종목코드':
             df = df.rename(columns={first_col: '종목코드'})
 
-    # 상위 max_codes개만 추출
-    df = df.loc[:max_codes - 1]
+    # 상위 max_codes개만 추출 (화이트리스트 보호 적용)
+    try:
+        df_top = df.loc[: max_codes - 1].copy()
+        # 보호 대상(화이트리스트 표식 또는 etf whitelist 명시)을 수집
+        protected_norm = set()
+        def _norm_code(s):
+            try:
+                return ''.join(ch for ch in str(s) if ch.isdigit())
+            except Exception:
+                return str(s)
+
+        if '종목코드' in df.columns:
+            if '_is_whitelist' in df.columns:
+                protected_norm.update(df.loc[df['_is_whitelist'].astype(bool), '종목코드'].astype(str).map(_norm_code).tolist())
+            if '_pre_whitelist' in df.columns:
+                try:
+                    protected_norm.update(df.loc[df['_pre_whitelist'].astype(bool), '종목코드'].astype(str).map(_norm_code).tolist())
+                except Exception:
+                    pass
+
+        # 환경변수/오버라이드로 지정된 화이트리스트 코드도 보호 대상으로 포함
+        try:
+            for c in whitelist_codes:
+                protected_norm.add(_norm_code(c))
+        except Exception:
+            pass
+        try:
+            for c in whitelist_codes_int:
+                protected_norm.add(str(int(c)))
+        except Exception:
+            pass
+
+        # 현재 top에 없는 보호종목이 있으면 df에서 찾아 append (최종 크기는 max_codes를 초과할 수 있음)
+        if protected_norm and '종목코드' in df.columns:
+            top_norm = set(df_top['종목코드'].astype(str).map(_norm_code).tolist())
+            missing_norm = protected_norm - top_norm
+            if missing_norm:
+                missing_rows = df.loc[df['종목코드'].astype(str).str.replace(r'\D+', '', regex=True).isin(list(missing_norm))].copy()
+                if not missing_rows.empty:
+                    # append and dedupe by 코드
+                    combined = pd.concat([df_top, missing_rows], ignore_index=True, sort=False)
+                    if '종목코드' in combined.columns:
+                        combined = combined.drop_duplicates(subset=['종목코드'], keep='first').reset_index(drop=True)
+                    df = combined
+                else:
+                    df = df_top
+            else:
+                df = df_top
+        else:
+            df = df_top
+    except Exception:
+        # 실패 시 기존 행동(슬라이싱)으로 폴백
+        df = df.loc[: max_codes - 1]
     
     # Universe 최소 개수 검증 (비정상 데이터 방지)
     MIN_UNIVERSE_SIZE = 10
