@@ -250,6 +250,19 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
 
+        # 단일 종목 최대 비중 비율 (예: 0.05 또는 5)
+        try:
+            v = os.getenv('MAX_POSITION_RATIO')
+            if v is not None:
+                tmp = float(v)
+                if tmp > 1:
+                    tmp = tmp / 100.0
+                self.MAX_POSITION_RATIO = float(tmp)
+            else:
+                self.MAX_POSITION_RATIO = 0.05
+        except Exception:
+            self.MAX_POSITION_RATIO = 0.05
+
         logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s",
                     self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS)
 
@@ -2149,7 +2162,18 @@ class RSIStrategy(threading.Thread):
                 return
 
             # (6)주문 수량 계산(소수점은 제거하기 위해 버림)
-            quantity = math.floor(budget / bid)
+            # 단일 종목 비중 캡(MAX_POSITION_RATIO)을 적용하여 주문 수량을 제한
+            try:
+                base_qty = math.floor(budget / bid)
+                cap_qty = math.floor((self.deposit * self.MAX_POSITION_RATIO) / bid)
+                # cap_qty가 0이면 캡으로 인해 매수 불가
+                if cap_qty < 1:
+                    logger.info("단일 종목 비중 캡으로 매수 보류: cap_qty=0, cap_ratio=%.4f", self.MAX_POSITION_RATIO)
+                    return
+                quantity = min(base_qty, cap_qty)
+            except Exception as _cap_err:
+                logger.warning("단일 종목 비중 캡 적용 중 오류: %s — 캡 미적용으로 기본 수량 사용", _cap_err)
+                quantity = math.floor(budget / bid)
 
             # (7)주문 주식 수량이 1 미만이라면 매수 불가하므로 체크
             if quantity < 1:

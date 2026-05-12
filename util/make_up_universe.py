@@ -32,23 +32,33 @@ logger = get_logger(__name__)
 
 
 ETF_NAME_PREFIXES = (
+    '1Q',
     'KODEX',
+    'KoAct'
     'TIGER',
     'ARIRANG',
     'KOSEF',
     'KBSTAR',
+    'HK',
     'HANARO',
     'SOL',
     'ACE',
-    'TIMEFOLIO',
+    'TIME',
     'PLUS',
     'RISE',
     'TREX',
     'FOCUS',
     'KIWOOM',
+    'WON',
 )
+_FDR_ETF_SYMBOLS = None
 
-
+def _normalize_code(code):
+    """종목코드 정규화: 숫자만 추출하여 선행 0까지 포함한 문자열 반환"""
+    try:
+        return ''.join(ch for ch in str(code) if ch.isdigit())
+    except Exception:
+        return str(code)
 def _parse_env_csv_set(value):
     if not value:
         return set()
@@ -56,10 +66,79 @@ def _parse_env_csv_set(value):
 
 
 def _is_etf_name(name):
+    """이름 기반 ETF 판별(기존 로직 유지)"""
     if not isinstance(name, str):
         return False
     s = name.strip().upper()
     return s.startswith(ETF_NAME_PREFIXES) or (' ETF' in s) or s.endswith('ETF')
+
+
+def _load_fdr_etf_symbols():
+    """FinanceDataReader로 ETF 종목 코드 집합을 로드(캐시). 실패하면 None 반환."""
+    global _FDR_ETF_SYMBOLS
+    if _FDR_ETF_SYMBOLS is not None:
+        return _FDR_ETF_SYMBOLS
+    try:
+        import FinanceDataReader as fdr
+    except Exception as e:
+        logger.debug("FinanceDataReader import 실패: %s", e)
+        _FDR_ETF_SYMBOLS = None
+        return None
+    try:
+        # FinanceDataReader 예시: fdr.StockListing('ETF/KR')
+        df_etf = fdr.StockListing('ETF/KR')
+        if df_etf is None or df_etf.empty:
+            _FDR_ETF_SYMBOLS = set()
+            return _FDR_ETF_SYMBOLS
+        # 컬럼명은 환경에 따라 다를 수 있으므로 'Symbol' 또는 'Code' 등을 탐색
+        sym_col = next((c for c in df_etf.columns if c.lower() in ('symbol', 'code')), df_etf.columns[0])
+        syms = set(_normalize_code(s) for s in df_etf[sym_col].astype(str).values if s)
+        _FDR_ETF_SYMBOLS = syms
+        logger.info("FinanceDataReader ETF 목록 로드: %d개", len(syms))
+        return _FDR_ETF_SYMBOLS
+    except Exception as e:
+        logger.warning("FinanceDataReader ETF 목록 로드 실패: %s", e)
+        _FDR_ETF_SYMBOLS = None
+        return None
+
+
+def _compute_etf_mask(df):
+    """
+    DataFrame에서 ETF 여부 마스크를 생성한다.
+    우선순위:
+    1) 'instt_tp_nm' 컬럼 존재 시 해당 컬럼에 'ETF' 포함 여부 사용 (KRX API)
+    2) '종목코드' 존재 시 FinanceDataReader로 ETF 코드 여부 확인
+    3) 위 모두 실패하면 이름 기반 판별(_is_etf_name)으로 폴백
+    """
+    if 'instt_tp_nm' in df.columns:
+        try:
+            return df['instt_tp_nm'].astype(str).str.upper().str.contains('ETF').fillna(False)
+        except Exception:
+            pass
+
+    # 코드 기반 판별 시도
+    if '종목코드' in df.columns:
+        try:
+            codes_norm = df['종목코드'].astype(str).map(_normalize_code)
+            fdr_syms = _load_fdr_etf_symbols()
+            if fdr_syms:
+                mask_code = codes_norm.isin(fdr_syms)
+                # 이름 기반과 병합: 코드 판별에 실패한 항목은 이름 판별로 보완
+                if '종목명' in df.columns:
+                    mask_name = df['종목명'].astype(str).map(_is_etf_name)
+                    return (mask_code | mask_name).fillna(False)
+                return mask_code.fillna(False)
+        except Exception:
+            pass
+
+    # 마지막 폴백: 이름 기반 판별
+    if '종목명' in df.columns:
+        try:
+            return df['종목명'].astype(str).map(_is_etf_name).fillna(False)
+        except Exception:
+            pass
+
+    return pd.Series([False] * len(df), index=df.index)
 
 
 def _log_etf_mix(df, label=''):
@@ -72,7 +151,7 @@ def _log_etf_mix(df, label=''):
         logger.info("Universe ETF 구성[%s]: total=0", label)
         return
 
-    etf_mask = df['종목명'].astype(str).map(_is_etf_name)
+    etf_mask = _compute_etf_mask(df)
     etf_count = int(etf_mask.sum())
     non_etf_count = int(total - etf_count)
     etf_ratio = (etf_count / total) * 100.0
@@ -98,7 +177,18 @@ def _apply_etf_policy(df, policy_overrides=None):
     """
     policy_overrides = policy_overrides or {}
 
-    mode = str(policy_overrides.get('mode', os.getenv('UNIVERSE_ETF_MODE', 'all'))).strip().lower()
+    # 정책 오버라이드 'mode'가 명시적으로 None일 수 있으므로
+    # None 또는 빈 문자열일 경우 환경변수로 폴백하도록 처리합니다.
+    override_mode = policy_overrides.get('mode', None)
+    if override_mode is None or (isinstance(override_mode, str) and override_mode.strip() == ''):
+        env_mode = os.getenv('UNIVERSE_ETF_MODE', 'all')
+        mode = str(env_mode).strip().lower() if env_mode is not None else 'all'
+    else:
+        mode = str(override_mode).strip().lower()
+
+    if not mode:
+        mode = 'all'
+
     if mode not in {'all', 'exclude', 'only', 'auto'}:
         logger.warning("알 수 없는 UNIVERSE_ETF_MODE=%s, all로 처리합니다.", mode)
         mode = 'all'
@@ -108,7 +198,7 @@ def _apply_etf_policy(df, policy_overrides=None):
         return df
 
     out = df.copy()
-    etf_mask = out['종목명'].astype(str).map(_is_etf_name)
+    etf_mask = _compute_etf_mask(out)
 
     if mode == 'all':
         logger.info("ETF 정책(all): ETF 포함 유지 (ETF %d개)", int(etf_mask.sum()))
@@ -128,12 +218,20 @@ def _apply_etf_policy(df, policy_overrides=None):
         return filtered
 
     # mode == auto
-    whitelist_codes = _parse_env_csv_set(
-        policy_overrides.get('whitelist_codes', os.getenv('UNIVERSE_ETF_WHITELIST_CODES', ''))
-    )
-    whitelist_names = _parse_env_csv_set(
-        policy_overrides.get('whitelist_names', os.getenv('UNIVERSE_ETF_WHITELIST_NAMES', ''))
-    )
+    # whitelist override가 None 또는 빈 문자열이면 .env 값으로 폴백
+    override_codes = policy_overrides.get('whitelist_codes', None)
+    if override_codes is None or (isinstance(override_codes, str) and override_codes.strip() == ''):
+        env_codes = os.getenv('UNIVERSE_ETF_WHITELIST_CODES', '')
+        whitelist_codes = _parse_env_csv_set(env_codes)
+    else:
+        whitelist_codes = _parse_env_csv_set(override_codes)
+
+    override_names = policy_overrides.get('whitelist_names', None)
+    if override_names is None or (isinstance(override_names, str) and override_names.strip() == ''):
+        env_names = os.getenv('UNIVERSE_ETF_WHITELIST_NAMES', '')
+        whitelist_names = _parse_env_csv_set(env_names)
+    else:
+        whitelist_names = _parse_env_csv_set(override_names)
 
     code_keep_mask = np.zeros(len(out), dtype=bool)
     if whitelist_codes and '종목코드' in out.columns:
@@ -199,7 +297,7 @@ def _apply_etf_policy(df, policy_overrides=None):
     try:
         # recompute kept_etf based on ETF mask and final filtered set
         if '종목코드' in filtered.columns:
-            etf_mask_filtered = filtered['종목명'].astype(str).map(_is_etf_name)
+            etf_mask_filtered = _compute_etf_mask(filtered)
             kept_etf = int(etf_mask_filtered.sum())
         else:
             kept_etf = 0
@@ -793,6 +891,38 @@ def _filter_and_create_universe(
         removed = before_count - len(df)
         if removed > 0:
             logger.info(f"모의투자 제한 종목 {removed}개 제외")
+
+    # 수동 제외 리스트 적용 (환경변수 기반)
+    # - UNIVERSE_EXCLUDE_NAMES: 종목명 부분매치로 제외할 문자열 CSV
+    # - UNIVERSE_EXCLUDE_CODES: 정확히 제외할 종목코드 CSV
+    try:
+        exclude_names = _parse_env_csv_set(os.getenv('UNIVERSE_EXCLUDE_NAMES', ''))
+        exclude_codes = _parse_env_csv_set(os.getenv('UNIVERSE_EXCLUDE_CODES', ''))
+    except Exception:
+        exclude_names = set()
+        exclude_codes = set()
+
+    if exclude_names or exclude_codes:
+        before_exclude = len(df)
+        if exclude_codes and '종목코드' in df.columns:
+            df = df.loc[~df['종목코드'].astype(str).isin(exclude_codes)]
+        if exclude_names and '종목명' in df.columns:
+            # 부분일치(대소문자 무관)로 제외
+            try:
+                name_series = df['종목명'].astype(str).str.lower()
+                mask = pd.Series([False] * len(df), index=df.index)
+                for ex in exclude_names:
+                    ex_low = ex.lower()
+                    mask = mask | name_series.str.contains(ex_low, na=False)
+                df = df.loc[~mask]
+            except Exception as e:
+                logger.warning(f"유니버스 제외 이름 필터 적용 실패: {e}")
+
+        removed_excl = before_exclude - len(df)
+        if removed_excl > 0:
+            logger.info(
+                f"환경변수 기반 유니버스 제외 적용: {removed_excl}개 종목 제외 (names={len(exclude_names)}, codes={len(exclude_codes)})"
+            )
 
     # ===== RSI(2) 전략에 최적화된 Universe 구성 =====
     # 1. 기본 필터링: 유동성 + 적절한 시가총액 범위

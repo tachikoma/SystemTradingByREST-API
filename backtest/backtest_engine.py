@@ -106,6 +106,17 @@ class BacktestEngine:
             else:
                 self.cash_reserve_ratio = self.DEFAULT_CASH_RESERVE_RATIO
 
+        # 단일 종목 최대 비중 비율 (예: 0.05 또는 5 -> 0.05)
+        v = os.getenv('MAX_POSITION_RATIO')
+        try:
+            if v is not None:
+                tmp = float(v)
+                self.max_position_ratio = tmp / 100.0 if tmp > 1 else tmp
+            else:
+                self.max_position_ratio = 0.05
+        except Exception:
+            self.max_position_ratio = 0.05
+
         # RSI 계산 방식
         _rsi_method = rsi_method if rsi_method is not None else os.getenv('RSI_METHOD', self.DEFAULT_RSI_METHOD)
         _rsi_method = _rsi_method.strip().lower() if isinstance(_rsi_method, str) else self.DEFAULT_RSI_METHOD
@@ -691,8 +702,18 @@ class BacktestEngine:
                 # 남은 슬롯으로 나누어 종목당 예산 계산
                 if buy_candidates:
                     investable_cash = self.cash * (1 - self.cash_reserve_ratio)
+                    # 현재 포트폴리오 가치 기준으로 단일 종목 최대 비중을 계산하여
+                    # 종목당 예산을 상한으로 설정
+                    try:
+                        portfolio_value_current = self.calculate_portfolio_value(date, processed_data)
+                        cap_amount = portfolio_value_current * self.max_position_ratio
+                    except Exception:
+                        cap_amount = self.initial_capital * self.max_position_ratio
+
                     budget_per_stock = investable_cash / available_slots
-                    
+                    if cap_amount is not None:
+                        budget_per_stock = min(budget_per_stock, cap_amount)
+
                     for code, price in buy_candidates:
                         self.execute_buy(code, price, date, budget_per_stock)
             

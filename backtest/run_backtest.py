@@ -259,7 +259,8 @@ def print_results(results: dict):
         logger.info("손절 설정:")
         if results.get('stop_loss_enabled', False):
             logger.info(f"  가격 손절:        {results.get('price_stop_loss_pct', 0):>15.1f} %")
-        if results.get('stop_loss_enabled', False) or results.get('time_stop_loss_enabled', False):
+        # 시간 손절은 독립 플래그(`time_stop_loss_enabled`)가 True일 때만 출력
+        if results.get('time_stop_loss_enabled', False):
             logger.info(f"  시간 손절:        {results.get('time_stop_loss_days', 0):>15} 일")
         logger.info(f"  손절 횟수:        {results.get('stop_loss_count', 0):>15} 회")
         stop_loss_ratio = (results.get('stop_loss_count', 0) / results['sell_trades'] * 100) if results['sell_trades'] > 0 else 0

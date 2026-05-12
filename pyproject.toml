@@ -15,7 +15,8 @@ dependencies = [
     "lxml>=6.0.2,<7.0.0",
     "fastparquet (>=2022.12.0)",
     "websockets>=15.0.1,<16.0.0",
-    "python-dotenv>=1.0.0,<2.0.0"
+    "python-dotenv>=1.0.0,<2.0.0",
+    "finance-datareader>=0.9.30,<1.0.0"
 ]
 
 [tool.poetry]
