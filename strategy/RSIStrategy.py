@@ -1999,7 +1999,7 @@ class RSIStrategy(threading.Thread):
             return False
 
         # 오전 fallback 전용: 갭 확인
-        # 전일 종가 대비 금일 시가(또는 현재가)가 +3% 이상 갭업이면 신호 소멸로 매수 보류
+        # 전일 종가 대비 금일 시가(또는 현재가)가 +3% 이상 갭업이면 신호 소멸로 매수 신호 검사 보류
         # 갭다운이면 신호 강화로 진행 (로그만 기록)
         if in_morning_fallback:
             try:
@@ -2016,10 +2016,10 @@ class RSIStrategy(threading.Thread):
                     _name = self.resolve_stock_name(code)
                     _display = f"{_name}({code})" if _name else code
                     if gap_pct >= self.MORNING_FALLBACK_GAP_UP_THRESHOLD:
-                        # 갭업: 당일 이미 반등 -> 매수 시점 소멸
-                        logger.info("오전 fallback 갭업으로 매수 보류 %s: gap=%.2f%% (기준=%.1f%%)", _display, gap_pct, self.MORNING_FALLBACK_GAP_UP_THRESHOLD)
+                        # 갭업: 당일 이미 반등 -> 매수 시그널(검사) 소멸
+                        logger.info("오전 fallback 갭업으로 매수 신호 검사 보류 %s: gap=%.2f%% (기준=%.1f%%)", _display, gap_pct, self.MORNING_FALLBACK_GAP_UP_THRESHOLD)
                         return False
-                    logger.info("오전 fallback 갭 확인 통과 %s: gap=%.2f%% -> 매수 진행", _display, gap_pct)
+                    logger.info("오전 fallback 갭 확인 통과 %s: gap=%.2f%% -> 매수 신호 검사 진행", _display, gap_pct)
             except Exception as _gap_err:
                 logger.warning("오전 fallback 갭 확인 중 오류 (%s): %s — 갭 확인 건너뜀", code, _gap_err)
         
