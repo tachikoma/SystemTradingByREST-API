@@ -280,6 +280,8 @@ poetry run python -m backtest.run_backtest
  - 민감한 정보는 `.env`에 두고 절대 커밋하지 마세요.
  - 운영 환경에서 로그 디렉터리 권한 및 디스크 용량을 모니터링하세요 (로그 회전 설정이 있어도 장기간 미관리 시 디스크를 채울 수 있음).
 
+- 유니버스 캐시 및 강제 갱신 관련 상세 문서는 [docs/UNIVERSE_CACHE.md](docs/UNIVERSE_CACHE.md) 참고
+
 ## 기여
  - 버그 리포트 및 PR 환영합니다. 변경 시 간단한 설명과 재현 방법을 적어주시면 빠르게 리뷰하겠습니다.
 

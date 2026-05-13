@@ -67,8 +67,9 @@ if __name__ == '__main__':
     # Kiwoom 클라이언트 생성
     kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=is_mock)
 
-    # 전략 스레드를 시작합니다
-    rsi_strategy = RSIStrategy(kiwoom)
+    # 전략 스레드를 시작합니다 (기본 모드: env UNIVERSE_CACHE_MODE, default: 'eod')
+    universe_cache_mode = os.environ.get('UNIVERSE_CACHE_MODE', 'eod').strip().lower()
+    rsi_strategy = RSIStrategy(kiwoom, universe_cache_mode=universe_cache_mode)
     rsi_strategy.start()
 
     # 종료 시 수행할 정리 작업들을 등록합니다 (텔레그램 알림 포함)

@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='실시간 유니버스 즉시 강제 갱신')
     parser.add_argument('-y', '--yes', action='store_true', help='실전투자 확인 프롬프트 없이 실행 (위험)')
+    parser.add_argument('--force-api', action='store_true', help='키움 API로 강제 전체 갱신(장중에도)')
     args = parser.parse_args()
 
     # 1) .env 로드
@@ -59,6 +60,20 @@ if __name__ == '__main__':
 
     try:
         kiwoom = Kiwoom(appkey=appkey, secretkey=secretkey, mock=is_mock)
+
+        # --force-api 옵션이 주어지면 장중이라도 키움 API로 전체 종목을 강제 갱신합니다.
+        if args.force_api:
+            from util.make_up_universe import fetch_all_stocks_from_kiwoom
+            logger.info('강제 API 갱신 요청: 키움 API로 전체 종목 수집 시작 (force-api)')
+            print('키움 API 강제 전체 갱신 시작... (시간이 소요될 수 있습니다)')
+            try:
+                df = fetch_all_stocks_from_kiwoom(kiwoom, use_cache=False, save_cache=True)
+                logger.info('강제 API 갱신 완료: %d개 종목 수집 및 캐시/Canonical 저장', len(df))
+                print(f'완료: {len(df)}개 종목 수집 및 캐시/Canonical 저장')
+            except Exception as e:
+                logger.exception('강제 API 전체 수집 실패: %s', e)
+                print(f'강제 API 실패: {e}')
+
         # on_demand 모드로 초기화 후 강제 갱신 메서드 실행
         strategy = RSIStrategy(kiwoom, universe_cache_mode='on_demand')
 

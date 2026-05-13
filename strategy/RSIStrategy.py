@@ -275,6 +275,11 @@ class RSIStrategy(threading.Thread):
         # 루프 직전 실시간 데이터 스냅샷 — 루프 중 변경 방지
         self._rt_snapshot: dict = {}
 
+        # 새벽(0~7시)에 발생하는 알림을 모아 아침 08시에 한 번에 전송하기 위한 큐
+        self._delayed_messages = []
+        self._delayed_messages_lock = threading.Lock()
+        self._last_delayed_flush_date = None
+
         self.init_strategy()
 
     def init_strategy(self):
@@ -347,9 +352,65 @@ class RSIStrategy(threading.Thread):
             except Exception:
                 # 실패 시 최소한의 알림 전송
                 try:
-                    send_message("⚠️ 전략 초기화 실패 (트레이스백 전송 실패, 상세 로그는 서버에서 확인하세요.)")
+                    self._queue_or_send("⚠️ 전략 초기화 실패 (트레이스백 전송 실패, 상세 로그는 서버에서 확인하세요.)")
                 except Exception:
                     pass
+
+    def _queue_or_send(self, text, parse_mode=None):
+        """새벽 시간(0~7시)에는 메시지를 큐에 모으고, 그 외 시간에는 즉시 전송합니다."""
+        try:
+            now = get_korea_time()
+        except Exception:
+            now = None
+
+        if now and 0 <= now.hour < 8:
+            try:
+                with self._delayed_messages_lock:
+                    self._delayed_messages.append((text, parse_mode))
+            except Exception:
+                # 큐에 적재 실패 시 즉시 전송 시도
+                try:
+                    send_message(text, parse_mode=parse_mode)
+                except Exception:
+                    pass
+        else:
+            try:
+                send_message(text, parse_mode=parse_mode)
+            except Exception:
+                pass
+
+    def _flush_delayed_messages(self, now=None):
+        """모아둔 새벽 메시지를 아침에 모아 전송합니다."""
+        try:
+            if now is None:
+                now = get_korea_time()
+        except Exception:
+            now = None
+
+        if now is None:
+            return
+
+        today = now.date()
+        # 하루에 한 번만 플러시
+        if getattr(self, '_last_delayed_flush_date', None) == today:
+            return
+
+        try:
+            with self._delayed_messages_lock:
+                if not self._delayed_messages:
+                    self._last_delayed_flush_date = today
+                    return
+
+                header = f"📝 새벽 알림 모음 ({now.strftime('%Y-%m-%d')})\n\n"
+                body = "\n\n".join([m[0] for m in self._delayed_messages if m and m[0]])
+                try:
+                    send_message(header + body)
+                except Exception:
+                    pass
+                self._delayed_messages = []
+                self._last_delayed_flush_date = today
+        except Exception:
+            pass
 
     @notify_on_exception(fallback_return=None)
     def check_and_cache_if_needed(self):
@@ -375,7 +436,7 @@ class RSIStrategy(threading.Thread):
         if str(disable_initial).lower() in ('1', 'true', 'yes'):
             logger.warning("전체 종목 캐싱이 환경변수로 비활성화되었습니다 (DISABLE_INITIAL_CACHE=%s)", disable_initial)
             try:
-                send_message("⚠️ 전체 종목 캐싱 비활성화: DISABLE_INITIAL_CACHE set")
+                self._queue_or_send("⚠️ 전체 종목 캐싱 비활성화: DISABLE_INITIAL_CACHE set")
             except Exception:
                 pass
             return
@@ -410,7 +471,7 @@ class RSIStrategy(threading.Thread):
         
         # 캐시가 없거나 오래된 경우 → 즉시 전체 캐싱
         logger.info("💾 전체 종목 캐싱 시작...")
-        send_message(f"💾 전체 종목 캐싱 시작\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
+        self._queue_or_send(f"💾 전체 종목 캐싱 시작\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
         
         try:
             from util.make_up_universe import cache_daily_data
@@ -418,10 +479,10 @@ class RSIStrategy(threading.Thread):
             
             self.last_full_cache_time = now
             logger.info("✅ 전체 종목 캐싱 완료")
-            send_message("✅ 전체 종목 캐싱 완료")
+            self._queue_or_send("✅ 전체 종목 캐싱 완료")
         except Exception as cache_error:
             logger.error("❌ 전체 종목 캐싱 실패: %s", cache_error)
-            send_message(f"❌ 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
+            self._queue_or_send(f"❌ 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
     
     @notify_on_exception(fallback_return=None)
     def load_mock_blacklist(self):
@@ -559,7 +620,7 @@ class RSIStrategy(threading.Thread):
             logger.warning("모의투자 블랙리스트 추가: %s (%s) - %s", code, code_name, reason)
             name = self.resolve_stock_name(code)
             display = f"{name}({code})" if name else code
-            send_message(f"🚫 <b>모의투자 블랙리스트 추가</b>\n종목: {display}\n사유: {reason}")
+            self._queue_or_send(f"🚫 <b>모의투자 블랙리스트 추가</b>\n종목: {display}\n사유: {reason}")
             
             # universe에서 제거
             if code in self.universe:
@@ -770,7 +831,7 @@ class RSIStrategy(threading.Thread):
                     display = f"{name}({code})" if name else code
                     lines.append(f"- {display}: {int(cnt)}회")
 
-            send_message("\n".join(lines))
+            self._queue_or_send("\n".join(lines))
             logger.info("MA200 스킵 일일 리포트 전송 완료: date=%s total=%d unique=%d", report_date, total_count, unique_count)
 
             reported_at = now.strftime('%Y-%m-%d %H:%M:%S')
@@ -809,12 +870,12 @@ class RSIStrategy(threading.Thread):
             except Exception as e:
                 error_msg = f"Universe 생성 실패: {e}"
                 logger.error(error_msg)
-                send_message(f"❌ Universe 생성 실패\n{html.escape(str(e))}")
+                self._queue_or_send(f"❌ Universe 생성 실패\n{html.escape(str(e))}")
                 
                 # 기존 universe 테이블이 있으면 로드하여 계속 사용
                 if table_exists:
                     logger.warning("기존 Universe를 계속 사용합니다.")
-                    send_message("⚠️ 기존 Universe를 계속 사용합니다.")
+                    self._queue_or_send("⚠️ 기존 Universe를 계속 사용합니다.")
                     # 기존 universe 로드 (아래 else 블록 로직 사용)
                     sql = "select * from universe"
                     cur = execute_sql(self.strategy_name, sql)
@@ -849,7 +910,7 @@ class RSIStrategy(threading.Thread):
                 else:
                     # 기존 universe도 없으면 치명적 오류
                     logger.critical("Universe 생성 실패이고 기존 universe도 없습니다.")
-                    send_message(f"🚨 치명적 오류: Universe 없음\n{e}", parse_mode=None)
+                    self._queue_or_send(f"🚨 치명적 오류: Universe 없음\n{e}", parse_mode=None)
                     raise Exception(f"Universe 생성 실패이고 기존 데이터도 없습니다: {e}")
             
             temp_universe = {}
@@ -1092,11 +1153,25 @@ class RSIStrategy(threading.Thread):
                         self._last_rollover_date = current_date
                     if current_date != self._last_rollover_date:
                         self._last_rollover_date = current_date
-                        # 새로운 날짜로 넘어가면 장중 관찰 플래그 리셋
+                        # 새로운 날짜로 넘어가면 장중 관찰 플래그 및 일일 플래그 리셋
                         try:
                             self._saw_market_open = False
                         except Exception:
                             pass
+                        try:
+                            # 일일 리셋 플래그: universe/캐시/매수 윈도우
+                            self.universe_updated_today = False
+                            self.full_cache_done_today = False
+                            self.buy_window_done_today = False
+                            # MA200 집계 날짜 초기화
+                            today = get_korea_time().strftime('%Y%m%d')
+                            if self.ma200_skip_date != today:
+                                self.ma200_skip_date = today
+                                self.ma200_skip_counts = {}
+                                self.ma200_skip_reported_date = None
+                        except Exception:
+                            pass
+
                         logger.info("날짜 변경 감지: 일일 가격 데이터 갱신 시도")
                         ok = self.check_and_get_price_data()
                         if ok:
@@ -1112,7 +1187,7 @@ class RSIStrategy(threading.Thread):
                             self._price_data_retry_count = 0
                             logger.warning("일일 가격 데이터 갱신 실패: 장 시작 전 재시도 예정")
                             try:
-                                send_message("⚠️ 일일 가격 데이터 갱신 실패: 장 시작 전 재시도 예정")
+                                self._queue_or_send("⚠️ 일일 가격 데이터 갱신 실패: 장 시작 전 재시도 예정")
                             except Exception:
                                 pass
                 except Exception:
@@ -1120,10 +1195,24 @@ class RSIStrategy(threading.Thread):
 
                 # 메모리 정리: 큰 반복/캐시 작업 직후 호출 (순환참조 회수 목적)
                 gc.collect()
+                # 새벽에 모아둔 알림을 아침 08시(08:00~08:05)에 플러시
+                try:
+                    if now.hour == 8 and now.minute < 5 and getattr(self, '_last_delayed_flush_date', None) != now.date():
+                        self._flush_delayed_messages(now)
+                except Exception:
+                    pass
                 
-                # 전체 종목 데이터 캐싱 (15:40 ~ 17:00 사이, 30일 주기)
+                # 전체 종목 데이터 캐싱 (새벽 01:00, 30일 주기)
                 # EOD 자동 캐시는 모드가 'eod'인 경우에만 수행
-                if self.universe_cache_mode == 'eod' and not is_market_closed_day() and now.hour == 15 and 40 <= now.minute < 17 and not self.full_cache_done_today:                
+                # 실행 창: 01:00 ~ 01:10 (중복 호출 방지용 짧은 윈도우)
+                start = now.replace(hour=1, minute=0, second=0, microsecond=0)
+                end = now.replace(hour=1, minute=10, second=0, microsecond=0)
+                # 평일(월~금) 다음날 새벽(화~토)에만 실행하도록 이전 영업일 체크
+                from datetime import timedelta
+                from util.time_helper import MARKET_HOLIDAYS_2026
+                prev_day = now.date() - timedelta(days=1)
+                if (self.universe_cache_mode == 'eod' and prev_day.weekday() < 5 and prev_day not in MARKET_HOLIDAYS_2026
+                    and start <= now < end and not self.full_cache_done_today):
                     days_since_cache = self.UNIVERSE_UPDATE_DAYS + 1 # 최초 실행 시 무조건 캐싱
                     if self.last_full_cache_time:
                         days_since_cache = (now.date() - self.last_full_cache_time.date()).days
@@ -1132,7 +1221,7 @@ class RSIStrategy(threading.Thread):
                     if days_since_cache >= self.UNIVERSE_UPDATE_DAYS:
                         logger.info("💾 장 종료 전체 종목 캐싱 시작 (마지막 캐싱: %s)", 
                                    self.last_full_cache_time.date() if self.last_full_cache_time else '최초')
-                        send_message(f"💾 장 종료 전체 종목 캐싱 시작\n마지막 캐싱: {days_since_cache}일 전\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
+                        self._queue_or_send(f"💾 장 종료 전체 종목 캐싱 시작\n마지막 캐싱: {days_since_cache}일 전\n소요 예상: {'약 66분 (모의투자)' if self.kiwoom.mock else '약 10분 (실전투자)'}")
                         
                         self.full_cache_in_progress = True
                         try:
@@ -1145,19 +1234,23 @@ class RSIStrategy(threading.Thread):
                             self.full_cache_in_progress = False
                             
                             logger.info("✅ 장 종료 전체 종목 캐싱 완료")
-                            send_message("✅ 장 종료 전체 종목 캐싱 완료")
+                            self._queue_or_send("✅ 장 종료 전체 종목 캐싱 완료")
                         except Exception as cache_error:
                             self.full_cache_in_progress = False
                             logger.error("❌ 장 종료 전체 종목 캐싱 실패: %s", cache_error)
-                            send_message(f"❌ 장 종료 전체 종목 캐싱 실패\n{cache_error}", parse_mode=None)
+                            self._queue_or_send(f"❌ 장 종료 전체 종목 캐싱 실패\n{cache_error}", parse_mode=None)
                 
-                # Universe 재구성 체크 (매일 00:00 ~ 00:05 사이)
-                if now.hour == 0 and now.minute < 5 and not self.universe_updated_today:
+                # Universe 재구성 체크 (매일 03:00 ~ 03:10 사이)
+                # Universe 재구성: 이전 영업일이 존재하는 경우(화~토 새벽)에만 실행
+                from datetime import timedelta as _td
+                from util.time_helper import MARKET_HOLIDAYS_2026 as _MH
+                prev_day = now.date() - _td(days=1)
+                if now.hour == 3 and now.minute < 10 and not self.universe_updated_today and prev_day.weekday() < 5 and prev_day not in _MH:
                     days_since_update = (now.date() - self.last_universe_update.date()).days
                     
                     if days_since_update >= self.UNIVERSE_UPDATE_DAYS:
                         logger.info("🔄 Universe 재구성 시작 (마지막 업데이트: %d일 전)", days_since_update)
-                        send_message(f"🔄 Universe 재구성 시작\n마지막 업데이트: {days_since_update}일 전")
+                        self._queue_or_send(f"🔄 Universe 재구성 시작\n마지막 업데이트: {days_since_update}일 전")
                         
                         try:
                             self.update_universe_with_holdings()
@@ -1165,25 +1258,14 @@ class RSIStrategy(threading.Thread):
                             self.universe_updated_today = True
                             
                             logger.info("✅ Universe 재구성 완료 (종목 수: %d)", len(self.universe))
-                            send_message(f"✅ Universe 재구성 완료\n종목 수: {len(self.universe)}")
+                            self._queue_or_send(f"✅ Universe 재구성 완료\n종목 수: {len(self.universe)}")
                         except Exception as update_error:
                             logger.error("Universe 재구성 실패: %s", update_error)
-                            send_message(f"❌ Universe 재구성 실패\n{update_error}", parse_mode=None)
+                            self._queue_or_send(f"❌ Universe 재구성 실패\n{update_error}", parse_mode=None)
                 
-                # 다음 날로 넘어가면 플래그 리셋
-                if now.hour == 1:
-                    self.universe_updated_today = False
-                    self.full_cache_done_today = False
-                    self.buy_window_done_today = False
-                    # 날짜 변경 시 집계/리포트 상태 초기화
-                    try:
-                        today = get_korea_time().strftime('%Y%m%d')
-                        if self.ma200_skip_date != today:
-                            self.ma200_skip_date = today
-                            self.ma200_skip_counts = {}
-                            self.ma200_skip_reported_date = None
-                    except Exception:
-                        pass
+                # 날짜 롤오버(현재 날짜 변화)로 일일 플래그를 초기화합니다.
+                # (날짜 변경 감지 블록(current_date != self._last_rollover_date)에서 이미 처리되므로
+                #  시간 기반 리셋(now.hour == 1)은 제거하여 중복/경합을 방지합니다.)
                 
                 # (0)장중인지 확인
                 if not check_transaction_open():
@@ -1276,7 +1358,7 @@ class RSIStrategy(threading.Thread):
                     send_telegram_traceback(traceback.format_exc())
                 except Exception:
                     try:
-                        send_message("⚠️ 전략 실행 중 오류 (트레이스백 전송 실패, 상세 로그는 서버에서 확인하세요.)")
+                        self._queue_or_send("⚠️ 전략 실행 중 오류 (트레이스백 전송 실패, 상세 로그는 서버에서 확인하세요.)")
                     except Exception:
                         pass
 
@@ -1308,7 +1390,7 @@ class RSIStrategy(threading.Thread):
         
         if codes_to_liquidate:
             logger.info("🔴 Universe에서 제외된 보유 종목 %d개 청산 시작", len(codes_to_liquidate))
-            send_message(f"🔴 Universe 재구성\nUniverse에서 제외된 보유 종목 {len(codes_to_liquidate)}개 청산 시작")
+            self._queue_or_send(f"🔴 Universe 재구성\nUniverse에서 제외된 보유 종목 {len(codes_to_liquidate)}개 청산 시작")
             
             # 제외된 종목들을 시장가 매도
             for code in codes_to_liquidate:
@@ -1340,7 +1422,7 @@ class RSIStrategy(threading.Thread):
 
                         name = self.resolve_stock_name(code)
                         display = f"{name}({code})" if name else code
-                        send_message(
+                        self._queue_or_send(
                             "✅ 청산 주문 접수\n"
                             f"종목: {display}\n"
                             f"수량: {quantity}주\n"
@@ -1354,7 +1436,7 @@ class RSIStrategy(threading.Thread):
                         logger.error("❌ 청산 주문 실패: %s(%s) - %s", code_name, code, error_msg)
                         name = self.resolve_stock_name(code)
                         display = f"{name}({code})" if name else code
-                        send_message(f"❌ 청산 주문 실패\n종목: {display}\n오류: {error_msg}", parse_mode=None)
+                        self._queue_or_send(f"❌ 청산 주문 실패\n종목: {display}\n오류: {error_msg}", parse_mode=None)
                         # 실패해도 universe에 추가하여 다음에 다시 시도
                         self.universe[code] = holding_info[code]
                     
@@ -1935,7 +2017,7 @@ class RSIStrategy(threading.Thread):
                 message = "📉 <b>매도 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)\n예상수익률: {:.2f}%".format(
                     display, order_result.get('order_no', 'N/A'), quantity, ask, estimated_proceeds, total_fee, estimated_profit_rate)
                 logger.info(message)
-                send_message(message)
+                self._queue_or_send(message)
 
                 # 매매 이력 CSV 기록
                 trade_logger.log_trade(
@@ -1961,7 +2043,7 @@ class RSIStrategy(threading.Thread):
                 error_msg = "❌ <b>매도 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
                     display, quantity, ask, error_code, html.escape(error_message))
                 logger.error("매도 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
-                send_message(error_msg)
+                self._queue_or_send(error_msg)
             
         except KeyError as e:
             code_name = self.resolve_stock_name(code)
@@ -2218,7 +2300,7 @@ class RSIStrategy(threading.Thread):
                 message = "📈 <b>매수 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\n예상비용(수수료+세금): {:,}원\n예수금: {:,}원".format(
                     display, order_result.get('order_no', 'N/A'), quantity, bid, total_cost, self.deposit)
                 logger.info(message)
-                send_message(message)
+                self._queue_or_send(message)
 
                 # 매매 이력 CSV 기록
                 trade_logger.log_trade(
@@ -2240,7 +2322,7 @@ class RSIStrategy(threading.Thread):
                 error_msg = "❌ <b>매수 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n오류코드: {}\n오류메시지: {}".format(
                     display, quantity, bid, error_code, html.escape(error_message))
                 logger.error("매수 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
-                send_message(error_msg)
+                self._queue_or_send(error_msg)
                 
                 # 모의투자 매매제한 종목(RC4007) 감지 및 블랙리스트 추가
                 if self.kiwoom.mock and 'RC4007' in error_message:

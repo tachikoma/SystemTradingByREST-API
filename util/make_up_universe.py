@@ -192,15 +192,77 @@ def _normalize_units(df, source_hint: Optional[str] = None, save_canonical: bool
         except Exception:
             median_cap = float('nan')
 
-        if not np.isnan(median_cap):
-            # 억원 단위로 보일 경우
-            if median_cap < 10000:
-                cap = cap * 100
-            # 원 단위로 보일 경우
-            elif median_cap > 1_000_000:
-                cap = cap / 1_000_000
+        # 단위 추정 및 보정
+        try:
+            if not np.isnan(median_cap):
+                # 가격 * 상장주식수와 비교하여 '천원' 단위로 저장된 경우를 검사
+                if '현재가' in df_norm.columns and '상장주식수' in df_norm.columns:
+                    price = pd.to_numeric(df_norm.get('현재가', pd.Series([0] * len(df_norm))), errors='coerce').fillna(0).astype(float)
+                    shares = pd.to_numeric(df_norm.get('상장주식수', pd.Series([0] * len(df_norm))), errors='coerce').fillna(0).astype(float)
+                    # 계산된 시가총액(원 단위)의 중앙값
+                    calc_cap_won_median = (price * shares).replace(0, float('nan')).median(skipna=True)
+
+                    if not pd.isna(calc_cap_won_median) and calc_cap_won_median > 0 and median_cap > 0:
+                        approx_ratio = calc_cap_won_median / median_cap
+                        # approx_ratio ~1000인 경우: raw cap이 '천원' 단위로 저장되어 있음
+                        if 100 < approx_ratio < 10000:
+                            # '천원' -> '백만원'으로 변환: raw(천원) * 1_000(원) / 1_000_000(백만원) = raw / 1_000
+                            cap = cap / 1000.0
+                        else:
+                            # 기존 휴리스틱 적용
+                            if median_cap < 10000:
+                                cap = cap * 100
+                            elif median_cap > 1_000_000:
+                                cap = cap / 1_000_000
+                    else:
+                        # price/상장주식수 정보 없거나 계산 불가 시 기존 휴리스틱 사용
+                        if median_cap < 10000:
+                            cap = cap * 100
+                        elif median_cap > 1_000_000:
+                            cap = cap / 1_000_000
+                else:
+                    # 가격 또는 상장주식수 정보가 없으면 기존 규칙 적용
+                    if median_cap < 10000:
+                        cap = cap * 100
+                    elif median_cap > 1_000_000:
+                        cap = cap / 1_000_000
+        except Exception:
+            # 보정 실패 시 원본 유지
+            pass
 
         df_norm['시가총액'] = cap
+
+        # --- 상장주식수 단위 자동 보정 ---
+        # 일부 ETN/선물/인버스 등에서는 상장주식수 단위가 원래 기대값보다 1/1000으로 들어오는 경우가 관찰됩니다.
+        # 가격 * 상장주식수로 계산한 시가총액(원) / 컬럼 시가총액(원) 비율이 약 0.001 근처인 경우 상장주식수에 *1000 보정을 적용합니다.
+        try:
+            if '상장주식수' in df_norm.columns and '현재가' in df_norm.columns:
+                if '상장주식수_raw' not in df_norm.columns:
+                    try:
+                        df_norm['상장주식수_raw'] = df_norm['상장주식수']
+                    except Exception:
+                        pass
+
+                price_n = pd.to_numeric(df_norm['현재가'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                shares_n = pd.to_numeric(df_norm['상장주식수'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                cap_won = pd.to_numeric(df_norm['시가총액'].astype(float), errors='coerce').fillna(0) * 1_000_000
+
+                # 안전하게 비율 계산 (분모 0 방지)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    ratio = (price_n * shares_n) / cap_won.replace({0: np.nan})
+
+                # 비율이 0.0005~0.002 범위면 상장주식수 단위를 보정
+                mask = ratio.between(0.0005, 0.002)
+                if mask.any():
+                    try:
+                        shares_n.loc[mask] = shares_n.loc[mask] * 1000.0
+                        df_norm['상장주식수'] = shares_n
+                        logger.info("상장주식수 단위 보정 적용: %d개 행에 대해 *1000", int(mask.sum()))
+                    except Exception:
+                        logger.debug("상장주식수 보정 시도 중 오류 발생")
+        except Exception:
+            # 보정 로직 실패 시 무시
+            pass
 
     # --- 거래대금 정규화(백만원 기준) ---
     if '거래대금' in df_norm.columns:
@@ -1045,6 +1107,13 @@ def get_universe(
                 for rc in required_cols:
                     if rc not in df.columns:
                         df[rc] = np.nan
+                # 네이버 캐시로부터 읽은 데이터는 정규화 후(옵션) canonical로 저장할 수 있습니다.
+                try:
+                    save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
+                    if '_units_normalized' not in df.columns:
+                        df = _normalize_units(df, source_hint='naver', save_canonical=save_canonical)
+                except Exception as e:
+                    logger.warning(f"네이버 캐시 정규화 실패: {e}")
             except Exception as e:
                 logger.error(f"Parquet 파일 읽기 실패: {e}. 크롤링을 시도합니다.")
                 file_is_today = False  # 파일 읽기 실패하면 크롤링 시도
@@ -1070,6 +1139,13 @@ def get_universe(
         
         try:
             df = execute_crawler(all_stock_cache_file)
+            # 크롤링으로 수집한 결과는 정규화(및 SAVE_CANONICAL 옵션에 따라 canonical 저장)를 수행합니다.
+            try:
+                save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
+                if '_units_normalized' not in df.columns:
+                    df = _normalize_units(df, source_hint='naver', save_canonical=save_canonical)
+            except Exception as e:
+                logger.warning(f"네이버 크롤링 정규화 실패: {e}")
         except Exception as e:
             # 캐시 파일 사용 (네이버 + 키움 API 캐시 모두 시도)
             logger.warning(f"크롤링 실패: {e}. 캐시 파일을 확인합니다...")
