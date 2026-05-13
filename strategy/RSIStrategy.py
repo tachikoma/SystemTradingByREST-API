@@ -364,6 +364,8 @@ class RSIStrategy(threading.Thread):
             os.makedirs(db_dir, exist_ok=True)
         except Exception:
             pass
+        # 우선순위: canonical 파일 (정규화된 백만원 단위) -> 키움 원본 캐시
+        canonical_file = os.path.join(db_dir, 'all_stocks_canonical.parquet')
         cache_file = os.path.join(db_dir, 'all_stocks_kiwoom.parquet')
         now = get_korea_time()
 
@@ -378,14 +380,25 @@ class RSIStrategy(threading.Thread):
                 pass
             return
         
-        # 캐시 파일이 있는지 확인
+        # canonical 파일이 우선 존재하는지 확인
+        if os.path.exists(canonical_file):
+            file_mod_time = datetime.fromtimestamp(os.path.getmtime(canonical_file), tz=ZoneInfo("Asia/Seoul"))
+            days_old = (now.date() - file_mod_time.date()).days
+            logger.info(f"Canonical 캐시 발견: {canonical_file}, {days_old}일 전 데이터")
+            # UNIVERSE_UPDATE_DAYS 이내면 canonical 사용
+            if days_old < self.UNIVERSE_UPDATE_DAYS:
+                logger.info(f"✅ Canonical 파일 사용 가능 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 이내)")
+                self.last_full_cache_time = file_mod_time
+                return
+            else:
+                logger.warning(f"⚠️ Canonical 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
+
+        # canonical이 없거나 오래되었으면 기존 키움 캐시를 확인
         if os.path.exists(cache_file):
             file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
             days_old = (now.date() - file_mod_time.date()).days
-            
             logger.info(f"캐시 파일 발견: {cache_file}, {days_old}일 전 데이터")
-            
-            # 30일 이내 캐시는 사용 가능
+            # UNIVERSE_UPDATE_DAYS 이내 캐시는 사용 가능
             if days_old < self.UNIVERSE_UPDATE_DAYS:
                 logger.info(f"✅ 캐시 파일 사용 가능 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 이내)")
                 self.last_full_cache_time = file_mod_time

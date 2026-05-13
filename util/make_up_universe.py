@@ -141,6 +141,125 @@ def _compute_etf_mask(df):
     return pd.Series([False] * len(df), index=df.index)
 
 
+def _normalize_units(df, source_hint: Optional[str] = None, save_canonical: bool = False):
+    """
+    입력 DataFrame의 주요 수치 컬럼을 표준 단위(백만원)로 정규화합니다.
+
+    - 보존: 원본 컬럼은 '<col>_raw'로 보존합니다.
+    - heuristics:
+      * 시가총액 중앙값 < 10000 -> '억원' 단위로 간주하여 ×100
+      * 시가총액 중앙값 > 1_000_000 -> '원' 단위로 간주하여 /1_000_000
+      * 거래대금에 대해서도 유사 규칙을 적용
+
+    반환값: 정규화된 DataFrame (원본을 변경하지 않음)
+    """
+    try:
+        df_norm = df.copy()
+    except Exception:
+        df_norm = df
+
+    def _parse_numeric_series(srs):
+        if srs is None:
+            return pd.Series(dtype=float)
+        s = srs.astype(str).str.replace(',', '', regex=False).str.strip()
+        s = s.str.replace('%', '', regex=False)
+        # 숫자 외 문자는 제거하여 숫자로 변환 시도
+        s_clean = s.str.replace(r'[^0-9\.\-]', '', regex=True)
+        return pd.to_numeric(s_clean, errors='coerce')
+
+    numeric_cols = ['시가총액', '거래대금', '거래량', '등락률', '외국인비율']
+    for col in numeric_cols:
+        if col in df_norm.columns and f'{col}_raw' not in df_norm.columns:
+            try:
+                df_norm[f'{col}_raw'] = df_norm[col]
+            except Exception:
+                pass
+
+    # --- 시가총액 정규화(백만원 기준) ---
+    if '시가총액' in df_norm.columns:
+        cap_raw_str = df_norm['시가총액'].astype(str)
+        cap = _parse_numeric_series(df_norm['시가총액'])
+        # 명시적 '억' 표기가 있으면 해당 행만 ×100
+        try:
+            has_eok = cap_raw_str.str.contains('억', na=False)
+            if has_eok.any():
+                cap.loc[has_eok] = cap.loc[has_eok] * 100
+        except Exception:
+            pass
+
+        try:
+            median_cap = float(cap.dropna().median()) if not cap.dropna().empty else float('nan')
+        except Exception:
+            median_cap = float('nan')
+
+        if not np.isnan(median_cap):
+            # 억원 단위로 보일 경우
+            if median_cap < 10000:
+                cap = cap * 100
+            # 원 단위로 보일 경우
+            elif median_cap > 1_000_000:
+                cap = cap / 1_000_000
+
+        df_norm['시가총액'] = cap
+
+    # --- 거래대금 정규화(백만원 기준) ---
+    if '거래대금' in df_norm.columns:
+        amt_raw_str = df_norm['거래대금'].astype(str)
+        amt = _parse_numeric_series(df_norm['거래대금'])
+        try:
+            has_eok_amt = amt_raw_str.str.contains('억', na=False)
+            if has_eok_amt.any():
+                amt.loc[has_eok_amt] = amt.loc[has_eok_amt] * 100
+        except Exception:
+            pass
+
+        try:
+            median_amt = float(amt.dropna().median()) if not amt.dropna().empty else float('nan')
+        except Exception:
+            median_amt = float('nan')
+
+        if not np.isnan(median_amt):
+            if median_amt > 1_000_000:
+                amt = amt / 1_000_000
+            elif median_amt < 1:
+                # 아주 작은 값은 억 단위로 간주(드문 경우)
+                amt = amt * 100
+
+        df_norm['거래대금'] = amt
+
+    # 기타 숫자 컬럼 정리
+    if '거래량' in df_norm.columns:
+        try:
+            df_norm['거래량'] = pd.to_numeric(df_norm['거래량'].astype(str).str.replace(',', '', regex=False), errors='coerce').fillna(0)
+        except Exception:
+            pass
+    if '등락률' in df_norm.columns:
+        try:
+            df_norm['등락률'] = pd.to_numeric(df_norm['등락률'].astype(str).str.replace('%', '', regex=False).str.replace('+', '', regex=False), errors='coerce')
+        except Exception:
+            pass
+    if '외국인비율' in df_norm.columns:
+        try:
+            df_norm['외국인비율'] = pd.to_numeric(df_norm['외국인비율'].astype(str).str.replace('%', '', regex=False).str.replace('+', '', regex=False), errors='coerce')
+        except Exception:
+            pass
+
+    try:
+        df_norm['_units_normalized'] = True
+    except Exception:
+        pass
+
+    if save_canonical:
+        try:
+            canonical_path = os.path.join(DB_DIR, 'all_stocks_canonical.parquet')
+            df_norm.to_parquet(canonical_path, index=True)
+            logger.info(f"Canonical Parquet saved: {Path(canonical_path).resolve()}")
+        except Exception as e:
+            logger.warning(f"Canonical save failed: {e}")
+
+    return df_norm
+
+
 def _log_etf_mix(df, label=''):
     """유니버스 데이터의 ETF/비ETF 구성 비중을 로그로 남긴다."""
     if '종목명' not in df.columns:
@@ -638,6 +757,16 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
             logger.info(f"캐시 파일 저장: {Path(cache_path).resolve()}")
         except Exception as e:
             logger.error(f"캐시 Parquet 저장 실패: {e}")
+        # canonical 저장 옵션 활성화 시 정규화된 canonical 파일도 저장
+        try:
+            save_canonical_env = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
+            if save_canonical_env:
+                try:
+                    _normalize_units(df, save_canonical=True)
+                except Exception as e:
+                    logger.warning(f"캐논컬 저장 시도 중 오류: {e}")
+        except Exception:
+            pass
     
     return df
 
@@ -975,6 +1104,12 @@ def _try_load_cache():
                     for rc in required_cols:
                         if rc not in df.columns:
                             df[rc] = np.nan
+                    # 캐시에서 읽은 데이터는 단위 정규화 옵션에 따라 canonical로 저장될 수 있음
+                    try:
+                        save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
+                        df = _normalize_units(df, save_canonical=save_canonical)
+                    except Exception as e:
+                        logger.warning(f"캐시 정규화 실패: {e}")
                     return df
             except Exception as e:
                 logger.warning(f"{cache_path} 읽기 실패: {e}")
@@ -997,6 +1132,12 @@ def _filter_and_create_universe(
     # 데이터 정제
     mapping = {',': '', 'N/A': '0', '%': ''}
     df.replace(mapping, regex=True, inplace=True)
+
+    # 단위 정규화: 서로 다른 소스(네이버/키움)에서 온 수치 단위를 백만원 기준으로 통일
+    try:
+        df = _normalize_units(df)
+    except Exception as e:
+        logger.warning(f"단위 정규화 실패: {e}. 기존 데이터로 계속 진행합니다.")
 
     # 사용할 column들 설정 (RSI 전략에 최적화)
     cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율']
