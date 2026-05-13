@@ -249,6 +249,33 @@ def _normalize_units(df, source_hint: Optional[str] = None, save_canonical: bool
     except Exception:
         pass
 
+    # 거래대금 표준화 계산: 기본값은 소스 제공값을 사용하되
+    # 환경변수 `UNIVERSE_TRADE_VALUE_METHOD`로 재계산 여부를 제어합니다.
+    # 지원값:
+    # - 'reported' (기본): 수집된 `거래대금` 값을 그대로 사용
+    # - 'volume_price' 또는 'calc': `거래량 * 현재가 / 1_000_000`으로 계산
+    try:
+        method = str(os.getenv('UNIVERSE_TRADE_VALUE_METHOD', 'reported')).strip().lower()
+    except Exception:
+        method = 'reported'
+    try:
+        if '거래대금' in df_norm.columns and method in ('volume_price', 'calc', 'volume*price'):
+            price = pd.to_numeric(df_norm.get('현재가', pd.Series([0] * len(df_norm))), errors='coerce').fillna(0)
+            vol = pd.to_numeric(df_norm.get('거래량', pd.Series([0] * len(df_norm))), errors='coerce').fillna(0)
+            # 가격(원) * 거래량 -> 백만원 단위로 변환
+            df_norm['거래대금_standard'] = (vol * price) / 1_000_000.0
+        else:
+            # reported(또는 컬럼 없음)인 경우 원본 정규화값을 그대로 사용
+            if '거래대금' in df_norm.columns:
+                df_norm['거래대금_standard'] = df_norm['거래대금']
+            else:
+                df_norm['거래대금_standard'] = pd.Series([0] * len(df_norm))
+    except Exception:
+        try:
+            df_norm['거래대금_standard'] = df_norm['거래대금'] if '거래대금' in df_norm.columns else pd.Series([0] * len(df_norm))
+        except Exception:
+            pass
+
     if save_canonical:
         try:
             canonical_path = os.path.join(DB_DIR, 'all_stocks_canonical.parquet')
@@ -1279,10 +1306,13 @@ def _filter_and_create_universe(
         (kosdaq_mask & (df['시가총액'] > 20000))      # 코스닥: 200억 이상
     )
 
+    # 거래대금 필드 우선순위: 재계산된 표준 컬럼이 있으면 우선 사용
+    trade_col = '거래대금_standard' if '거래대금_standard' in df.columns else '거래대금'
+
     # 기존 필터들을 하나의 마스크로 결합한 뒤 화이트리스트 보호 마스크를 OR 연산으로 합칩니다.
     mask_combined = (
         market_cap_filter &                        # 시장별 차등 시가총액 조건
-        (df['거래대금'] > 3000) &                  # 30억 이상 (유동성 확보)
+        (df[trade_col] > 3000) &                   # 30억 이상 (유동성 확보) - 표준 컬럼 우선
         (df['시가총액'] < 5000000) &               # 5조 미만 (대형 우량주 제외)
         (df['거래량'] > 0) &                       # 거래량 있는 종목
         (~df.종목명.str.contains("지주", na=False)) &    # 지주회사 제외
@@ -1343,7 +1373,8 @@ def _filter_and_create_universe(
     # 2. 거래대금(1순위) + 시가총액(2순위) 기준 정렬
     # 당일 등락률은 일일 이벤트에 민감하게 반응하므로 제외.
     # 거래대금과 시가총액은 단기 변동이 적어 유니버스 안정성이 높아짐.
-    df = df.sort_values(by=['거래대금', '시가총액'], ascending=[False, False])
+    # 거래대금(우선 표준 컬럼) + 시가총액 기준 정렬
+    df = df.sort_values(by=[trade_col, '시가총액'], ascending=[False, False])
 
     # 필터링한 데이터프레임의 index 번호를 새로 매김
     df = df.reset_index(drop=True)
