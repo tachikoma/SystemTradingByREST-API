@@ -412,6 +412,147 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
 
+    def apply_env_updates(self, changed: dict):
+        """런타임에서 안전하게 환경변수 변경을 적용합니다.
+
+        - 민감하거나 리포지터리 불변 규칙에 해당하는 키는 무시합니다.
+        - 적용 가능한 값은 해당 인스턴스 속성으로 즉시 반영하고 필요시 백그라운드 작업을 트리거합니다.
+        """
+        # 보호된(자동 적용 금지) 환경변수: 엔트리/포지션/리스크 관련 핵심 파라미터
+        # 두 가지 표기 변형(밑줄 포함/미포함)을 허용하되 중복 항목은 제거합니다.
+        protected = {"RSI_BUY_THRESHOLD", "PRICE_DROP_THRESHOLD", "CASH_RESERVE_RATIO", "ENABLE_STOP_LOSS"}
+        # 참고: `RSI_SELL_THRESHOLD`는 현재 런타임에서 조정 가능하도록 허용되어 있습니다.
+        # 이유: 매도(종결) 기준을 조정하면 기존 포지션의 진입 조건이 바뀌지 않아
+        # 포지션 규모(진입 빈도)에 미치는 영향이 상대적으로 작다고 판단했기 때문입니다.
+        # 다만 매도 기준 변경도 손익/리스크에 영향을 줄 수 있으므로 알림/감사 로깅은 권장합니다.
+        applied = []
+        ignored = []
+        try:
+            for k, (old, new) in changed.items():
+                ku = k.upper()
+                if ku in protected:
+                    ignored.append(ku)
+                    continue
+                try:
+                    if ku == 'ALLOW_KIWOOM_CALLS':
+                        self.allow_kiwoom_calls = str(new).lower() in ('1', 'true', 'yes')
+                        applied.append(ku)
+                    elif ku == 'RSI_METHOD':
+                        rm = str(new).strip().lower()
+                        if rm in ('cutler', 'wilder'):
+                            self.RSI_METHOD = rm
+                            applied.append(ku)
+                    elif ku == 'RSI_SELL_THRESHOLD':
+                        self.RSI_SELL_THRESHOLD = float(new)
+                        applied.append(ku)
+                    elif ku == 'PROFIT_TARGET_PERCENT':
+                        self.PROFIT_TARGET_PERCENT = float(new)
+                        applied.append(ku)
+                    elif ku == 'TIME_STOP_LOSS_DAYS':
+                        self.TIME_STOP_LOSS_DAYS = int(new)
+                        applied.append(ku)
+                    elif ku == 'MORNING_FALLBACK_GAP_UP_THRESHOLD':
+                        self.MORNING_FALLBACK_GAP_UP_THRESHOLD = float(new)
+                        applied.append(ku)
+                    elif ku == 'PRICE_DATA_MAX_RETRIES':
+                        self.PRICE_DATA_MAX_RETRIES = int(new)
+                        applied.append(ku)
+                    elif ku == 'MA200_SKIP_REPORT_TOP_N':
+                        self.MA200_SKIP_REPORT_TOP_N = int(new)
+                        applied.append(ku)
+                    elif ku in ('TRADING_FEE_PERCENT_MOCK', 'TRADING_TAX_PERCENT_MOCK', 'TRADING_FEE_PERCENT_REAL', 'TRADING_TAX_PERCENT_REAL'):
+                        try:
+                            if self.kiwoom.mock:
+                                fee_percent = float(os.getenv('TRADING_FEE_PERCENT_MOCK', '0.35'))
+                                tax_percent = float(os.getenv('TRADING_TAX_PERCENT_MOCK', '0.0'))
+                            else:
+                                fee_percent = float(os.getenv('TRADING_FEE_PERCENT_REAL', '0.015'))
+                                tax_percent = float(os.getenv('TRADING_TAX_PERCENT_REAL', '0.20'))
+                            self.BUY_FEE_RATE = 1 + (fee_percent / 100)
+                            self.SELL_FEE_RATE = 1 + ((fee_percent + tax_percent) / 100)
+                            applied.append(ku)
+                        except Exception:
+                            logger.exception("Failed to update fee rates for %s", ku)
+                    elif ku == 'MAX_POSITION_RATIO':
+                        tmp = float(new)
+                        if tmp > 1:
+                            tmp = tmp / 100.0
+                        self.MAX_POSITION_RATIO = tmp
+                        applied.append(ku)
+                    elif ku == 'UNIVERSE_CACHE_MODE':
+                        self.universe_cache_mode = str(new).strip().lower()
+                        applied.append(ku)
+                        if self.universe_cache_mode == 'startup':
+                            try:
+                                threading.Thread(target=self.check_and_cache_if_needed, daemon=True).start()
+                            except Exception:
+                                pass
+                    else:
+                        # 알 수 없는 키는 전략 내부에 적용할 수 없으므로 무시
+                        pass
+                except Exception:
+                    logger.exception("Failed to apply env key %s", k)
+
+            if applied:
+                logger.info("Applied env updates: %s", applied)
+                try:
+                    self._queue_or_send("환경변수 자동 적용: " + ", ".join(applied))
+                except Exception:
+                    pass
+            if ignored:
+                logger.warning("Ignored protected env changes: %s", ignored)
+                try:
+                    self._queue_or_send("보호된 환경변수 변경 무시됨(수동 승인 필요): " + ", ".join(ignored))
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("apply_env_updates failed")
+
+    def apply_sensitive_updates(self, changed: dict):
+        """민감 환경변수 변경을 승인받아 적용합니다.
+
+        보호된 키들(RSI 매수 기준, 손절/리스크 관련)은 이 함수로만 적용됩니다.
+        이 함수는 승인이 난 후 `EnvApprover`가 호출합니다.
+        """
+        applied = []
+        try:
+            for k, (_old, new) in changed.items():
+                ku = k.upper()
+                try:
+                    if ku == 'RSI_BUY_THRESHOLD':
+                        self.RSI_BUY_THRESHOLD = float(new)
+                        applied.append(ku)
+                    elif ku == 'PRICE_DROP_THRESHOLD':
+                        self.PRICE_DROP_THRESHOLD = float(new)
+                        applied.append(ku)
+                    elif ku == 'CASH_RESERVE_RATIO':
+                        tmp = float(new)
+                        if tmp > 1:
+                            tmp = tmp / 100.0
+                        self.CASH_RESERVE_RATIO = tmp
+                        applied.append(ku)
+                    elif ku == 'ENABLE_STOP_LOSS':
+                        val = str(new).lower() in ('1', 'true', 'yes', 'on')
+                        try:
+                            setattr(self, 'enable_stop_loss', val)
+                        except Exception:
+                            pass
+                        applied.append(ku)
+                    else:
+                        # 해당 키는 전략에서 직접 적용할 수 없음
+                        logger.debug("apply_sensitive_updates: unknown sensitive key %s", ku)
+                except Exception:
+                    logger.exception("Failed to apply sensitive key %s", k)
+
+            if applied:
+                logger.info("Applied sensitive env updates: %s", applied)
+                try:
+                    self._queue_or_send("민감 설정 승인 적용: " + ", ".join(applied))
+                except Exception:
+                    pass
+        except Exception:
+            logger.exception("apply_sensitive_updates failed")
+
     @notify_on_exception(fallback_return=None)
     def check_and_cache_if_needed(self):
         """캐시 상태 체크 및 필요 시 전체 캐싱"""

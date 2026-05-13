@@ -72,6 +72,90 @@ if __name__ == '__main__':
     rsi_strategy = RSIStrategy(kiwoom, universe_cache_mode=universe_cache_mode)
     rsi_strategy.start()
 
+    # .env 동적 재로딩 설정
+    # - 민감한 키(API 키, KIWOOM_MODE 등)는 자동 적용하지 않고 알림만 보냄
+    # - 그 외 일반 옵션은 전략/런타임에 즉시 반영
+    try:
+        from util.env_reloader import EnvWatcher
+        from util.notifier import send_message
+        from util.logging_config import get_logger
+
+        logger = get_logger(__name__)
+
+        dotenv_path = env_path
+        reload_interval = float(os.environ.get('ENV_RELOAD_INTERVAL', '5'))
+        env_watcher = EnvWatcher(str(dotenv_path), interval=reload_interval)
+
+        def _on_env_non_sensitive(changed: dict):
+            logger.info("Non-sensitive env change detected: %s", list(changed.keys()))
+            try:
+                if rsi_strategy and hasattr(rsi_strategy, 'apply_env_updates'):
+                    rsi_strategy.apply_env_updates(changed)
+                # 로깅 레벨 즉시 반영
+                if 'KIW_LOG_LEVEL' in changed:
+                    try:
+                        configure_logging()
+                        logger.info("Logging reconfigured due to KIW_LOG_LEVEL change")
+                    except Exception:
+                        logger.exception("Failed to reconfigure logging")
+                try:
+                    send_message(f"환경변수 자동 적용: {', '.join(changed.keys())}")
+                except Exception:
+                    pass
+            except Exception:
+                logger.exception("Failed to apply non-sensitive env changes")
+
+        # 민감 변경: 자동 적용 대신 승인 요청을 생성하고 텔레그램으로 승인/거부를 받습니다.
+        try:
+            from util.env_approver import EnvApprover
+            approver = EnvApprover(apply_callback=getattr(rsi_strategy, 'apply_sensitive_updates', None))
+            approver.start()
+            shutdown.register_cleanup(lambda: approver.stop())
+        except Exception:
+            approver = None
+
+        def _on_sensitive(changed: dict):
+            logger.warning("Sensitive env change detected (awaiting approval): %s", list(changed.keys()))
+            try:
+                if approver:
+                    rid = approver.create_request(changed)
+                    send_message(f"민감한 환경변수 변경 요청 생성: {rid} (승인 필요, 텔레그램에서 /approve {rid} 또는 /reject {rid})")
+                else:
+                    msg = "민감한 .env 변경이 감지되었습니다. approver 미구성 - 수동 확인 또는 프로세스 재시작이 필요합니다:\n" + ", ".join([f"{k}" for k in changed.keys()])
+                    try:
+                        send_message(msg)
+                    except Exception:
+                        print(msg)
+            except Exception:
+                logger.exception("Failed to create approval request for sensitive changes")
+
+        env_watcher.add_callback(_on_env_non_sensitive)
+        env_watcher.set_sensitive_callback(_on_sensitive)
+        env_watcher.start()
+        shutdown.register_cleanup(lambda: env_watcher.stop())
+
+        # SIGHUP 수신 시 즉시 재로드 (유닉스)
+        try:
+            import signal
+
+            def _sighup(signum, frame):
+                logger.info('SIGHUP received: triggering .env reload')
+                try:
+                    env_watcher.reload_now()
+                except Exception:
+                    logger.exception('Env reload on SIGHUP failed')
+
+            signal.signal(signal.SIGHUP, _sighup)
+        except Exception:
+            # 플랫폼에 따라 SIGHUP이 없을 수 있음
+            pass
+    except Exception:
+        # 실패 시 무시(감시는 부가 기능)
+        try:
+            print('Warning: env watcher initialization failed')
+        except Exception:
+            pass
+
     # 종료 시 수행할 정리 작업들을 등록합니다 (텔레그램 알림 포함)
     from util import shutdown
 
