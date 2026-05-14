@@ -21,6 +21,8 @@ if __name__ == '__main__':
     # .env 로드 후 로깅을 초기화하여 KIW_LOG_LEVEL 등 로깅 관련 환경변수가 반영되도록 합니다.
     from util.logging_config import configure_logging
     configure_logging()
+    # shutdown을 미리 import하여 env watcher/approver 등록 시 NameError를 방지합니다.
+    from util import shutdown
 
     # 이제 import 시점에 로거를 얻는 모듈들을 임포트합니다
     from api.Kiwoom import Kiwoom
@@ -98,10 +100,8 @@ if __name__ == '__main__':
                         logger.info("Logging reconfigured due to KIW_LOG_LEVEL change")
                     except Exception:
                         logger.exception("Failed to reconfigure logging")
-                try:
-                    send_message(f"환경변수 자동 적용: {', '.join(changed.keys())}")
-                except Exception:
-                    pass
+                # 전략 내부에서 적용 결과(적용된 키/무시된 키)를 별도로 알림합니다.
+                # 중복 텔레그램 전송을 피하기 위해 여기서는 메시지 전송을 하지 않습니다.
             except Exception:
                 logger.exception("Failed to apply non-sensitive env changes")
 
@@ -119,7 +119,7 @@ if __name__ == '__main__':
             try:
                 if approver:
                     rid = approver.create_request(changed)
-                    send_message(f"민감한 환경변수 변경 요청 생성: {rid} (승인 필요, 텔레그램에서 /approve {rid} 또는 /reject {rid})")
+                    logger.info(f"민감한 환경변수 변경 요청 생성: {rid} (승인 필요)")
                 else:
                     msg = "민감한 .env 변경이 감지되었습니다. approver 미구성 - 수동 확인 또는 프로세스 재시작이 필요합니다:\n" + ", ".join([f"{k}" for k in changed.keys()])
                     try:

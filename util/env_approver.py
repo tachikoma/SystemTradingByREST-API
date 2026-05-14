@@ -109,8 +109,29 @@ class EnvApprover(threading.Thread):
         params = {}
         if self._last_update_id is not None:
             params['offset'] = self._last_update_id + 1
+        # Use Telegram long-polling to reduce frequent TLS handshakes and
+        # add retries/backoff for transient network errors.
         try:
-            r = requests.get(url, params=params, timeout=10)
+            try:
+                lp_timeout = min(60, max(5, int(self.poll_interval)))
+            except Exception:
+                lp_timeout = 30
+            params['timeout'] = lp_timeout
+
+            # session with retry/backoff for idempotent GETs
+            session = requests.Session()
+            try:
+                from requests.adapters import HTTPAdapter
+                from urllib3.util.retry import Retry
+                retries = Retry(total=3, backoff_factor=1, status_forcelist=(429, 500, 502, 503, 504))
+                session.mount('https://', HTTPAdapter(max_retries=retries))
+            except Exception:
+                # best-effort: if Retry not available, continue without mounting
+                pass
+
+            # Use a tuple timeout (connect_timeout, read_timeout). Read timeout
+            # should be slightly larger than lp_timeout to allow server to hold.
+            r = session.get(url, params=params, timeout=(5, lp_timeout + 10))
             r.raise_for_status()
             j = r.json()
             if not j.get('ok'):
@@ -123,6 +144,11 @@ class EnvApprover(threading.Thread):
                 except Exception:
                     pass
             return res
+        except requests.exceptions.RequestException as e:
+            # Network/timeouts are common transient issues; log as warning to
+            # avoid noisy tracebacks while keeping the service resilient.
+            logger.warning('Failed to fetch telegram updates: %s', e)
+            return []
         except Exception:
             logger.exception('Failed to fetch telegram updates')
             return []

@@ -151,3 +151,5 @@ backtest/output
 # Local SQLite data directory
 data/
 run
+
+.env_approvals/

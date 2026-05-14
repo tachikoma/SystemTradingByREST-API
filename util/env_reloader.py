@@ -33,6 +33,16 @@ def _is_sensitive_key(key: str) -> bool:
     # 명시적 민감 키
     if k == 'KIWOOM_MODE':
         return True
+    # 전략에서 보호하는 런타임 파라미터는 자동 적용 금지(수동 승인 필요)
+    # RSIStrategy.apply_env_updates에서 보호(protected)로 정의된 키들과 일치시킨다.
+    protected_strategy_keys = (
+        'RSI_BUY_THRESHOLD',
+        'PRICE_DROP_THRESHOLD',
+        'CASH_RESERVE_RATIO',
+        'ENABLE_STOP_LOSS',
+    )
+    if k in protected_strategy_keys:
+        return True
     # APPKEY / SECRET / SECRETKEY / PASSWORD 등은 민감하다고 판단
     sensitive_tokens = ('APPKEY', 'SECRET', 'SECRETKEY', 'PASSWORD', 'PRIVATE_KEY', 'TOKEN')
     for t in sensitive_tokens:
