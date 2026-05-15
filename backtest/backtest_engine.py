@@ -38,6 +38,7 @@ class BacktestEngine:
     DEFAULT_TIME_STOP_LOSS_DAYS = 90
     DEFAULT_SLIPPAGE_BUY = 0.002   # 0.2% 매수 슬리피지 (체결 불리)
     DEFAULT_SLIPPAGE_SELL = 0.002  # 0.2% 매도 슬리피지 (체결 불리)
+    DEFAULT_REBOUND_MODE = 'rsi_not_down_0_5'  # RSI가 0.5 이상 하락하지 않아야 반등으로 인정 (엄격한 상승보다 약간 완화된 조건)
     
     def __init__(
         self,
@@ -65,6 +66,8 @@ class BacktestEngine:
         time_stop_loss_days: Optional[int] = None,  # env: TIME_STOP_LOSS_DAYS, 기본값: DEFAULT_TIME_STOP_LOSS_DAYS
         slippage_buy: float = None,              # env: SLIPPAGE_BUY, 기본값: DEFAULT_SLIPPAGE_BUY
         slippage_sell: float = None,             # env: SLIPPAGE_SELL, 기본값: DEFAULT_SLIPPAGE_SELL
+        require_rsi_rebound: bool = False,
+        rebound_mode: Optional[str] = None,
         symbol_names: Dict[str, str] = None,
     ):
         self.max_holdings = max_holdings
@@ -163,6 +166,17 @@ class BacktestEngine:
         # 슬리피지 설정 (매수 시 불리하게 적용: 가격 상승, 매도 시 불리하게 적용: 가격 하락)
         self.slippage_buy  = _resolve_float(slippage_buy,  'SLIPPAGE_BUY',  self.DEFAULT_SLIPPAGE_BUY)
         self.slippage_sell = _resolve_float(slippage_sell, 'SLIPPAGE_SELL', self.DEFAULT_SLIPPAGE_SELL)
+        self.require_rsi_rebound = bool(require_rsi_rebound)
+        resolved_rebound_mode = rebound_mode if rebound_mode is not None else self.DEFAULT_REBOUND_MODE
+        resolved_rebound_mode = str(resolved_rebound_mode).strip().lower()
+        if resolved_rebound_mode not in ('none', 'strict_rsi_up', 'rsi_flat_or_up', 'rsi_not_down_0_5', 'close_up'):
+            logger.warning("Invalid rebound_mode '%s', using '%s'", resolved_rebound_mode, self.DEFAULT_REBOUND_MODE)
+            resolved_rebound_mode = self.DEFAULT_REBOUND_MODE
+
+        # 기존 bool 플래그와의 호환성 유지
+        if self.require_rsi_rebound and rebound_mode is None:
+            resolved_rebound_mode = 'strict_rsi_up'
+        self.rebound_mode = resolved_rebound_mode
 
         # 포트폴리오 상태
         self.cash = self.initial_capital
@@ -251,18 +265,30 @@ class BacktestEngine:
             
             # 현재 데이터
             current = df.iloc[idx]
+            previous = df.iloc[idx - 1]
             close = current['close']
             rsi = current['rsi']
+            prev_rsi = previous['rsi']
             ma20 = current['ma20']
             ma60 = current['ma60']
             ma200 = current['ma200']
 
             # display (name(code)) for logging
             display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
-            logger.debug("check_buy_signal %s date=%s rsi=%.2f ma20=%.2f ma60=%.2f ma200=%.2f", display, date, rsi, ma20, ma60, ma200)
+            logger.debug(
+                "check_buy_signal %s date=%s prev_rsi=%.2f rsi=%.2f ma20=%.2f ma60=%.2f ma200=%.2f",
+                display,
+                date,
+                prev_rsi,
+                rsi,
+                ma20,
+                ma60,
+                ma200,
+            )
             
             # 2거래일 전 종가
             close_2days_ago = df.iloc[idx - 2]['close']
+            prev_close = previous['close']
             
             # 값 유효성 체크
             if np.isnan(ma200) and (idx + 1) < self.ma_trend:
@@ -275,18 +301,38 @@ class BacktestEngine:
                 )
                 return False, None
 
-            if np.isnan(rsi) or np.isnan(ma20) or np.isnan(ma60) or np.isnan(ma200) or close_2days_ago == 0:
+            if (
+                np.isnan(rsi)
+                or np.isnan(prev_rsi)
+                or np.isnan(ma20)
+                or np.isnan(ma60)
+                or np.isnan(ma200)
+                or close_2days_ago == 0
+            ):
                 return False, None
             
             # 가격 변동률 계산
             price_diff = (close - close_2days_ago) / close_2days_ago * 100
             
+            rebound_ok = self._check_rebound_condition(
+                current_rsi=rsi,
+                prev_rsi=prev_rsi,
+                close=close,
+                prev_close=prev_close,
+            )
+
             # 매수 조건 확인
             # 1) ma20 > ma60 (단기 이평 > 장기 이평)
             # 2) close > ma200 (장기 추세 상승)
             # 3) RSI < rsi_buy_threshold (과매도)
             # 4) 2일 전 대비 price_drop_threshold 이상 하락
-            if ma20 > ma60 and close > ma200 and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
+            if (
+                ma20 > ma60
+                and close > ma200
+                and rsi < self.rsi_buy_threshold
+                and price_diff < self.price_drop_threshold
+                and rebound_ok
+            ):
                 return True, close
             
             return False, None
@@ -294,6 +340,29 @@ class BacktestEngine:
         except (KeyError, IndexError) as e:
             logger.warning(f"매수 신호 확인 중 오류 ({code}, {date}): {e}")
             return False, None
+
+    def _check_rebound_condition(
+        self,
+        current_rsi: float,
+        prev_rsi: float,
+        close: float,
+        prev_close: float,
+    ) -> bool:
+        """반등 확인 조건을 평가합니다."""
+        mode = getattr(self, 'rebound_mode', self.DEFAULT_REBOUND_MODE)
+
+        if mode == 'none':
+            return True
+        if mode == 'strict_rsi_up':
+            return current_rsi > prev_rsi
+        if mode == 'rsi_flat_or_up':
+            return current_rsi >= prev_rsi
+        if mode == 'rsi_not_down_0_5':
+            return (current_rsi - prev_rsi) >= -0.5
+        if mode == 'close_up':
+            return close > prev_close
+
+        return True
     
     def check_sell_signal(
         self, 
@@ -789,6 +858,8 @@ class BacktestEngine:
             'time_stop_loss_days': self.time_stop_loss_days,  # 시간 손절 기준
             'slippage_buy': self.slippage_buy,    # 매수 슬리피지 비율
             'slippage_sell': self.slippage_sell,  # 매도 슬리피지 비율
+            'require_rsi_rebound': self.require_rsi_rebound,  # RSI 저점 반등 확인 여부
+            'rebound_mode': self.rebound_mode,  # 반등 확인 방식
             'open_positions': dict(self.holdings),  # 미청산 포지션
             'open_positions_value': final_value - self.cash,  # 미청산 포지션 평가금액
             'daily_values': df
