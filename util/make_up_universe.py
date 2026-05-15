@@ -1697,7 +1697,7 @@ if __name__ == "__main__":
     # 권장 실행 방식 안내: 패키지 모드로 실행하는 것이 import 경로 문제를 방지합니다.
     if not (__package__):
         sys.stderr.write(
-            "권장: 패키지 모드로 실행하세요 — `python -m util.make_up_universe`\n"
+            "권장: 패키지 모드로 실행하세요 — `poetry run python -m util.make_up_universe`\n"
             "직접 실행 중입니다. 일부 상대/절대 import가 실패할 수 있습니다.\n"
         )
         # 자동 재실행 시도 (옵션: --no-reexec 또는 환경변수 SKIP_REEXEC로 건너뜀)

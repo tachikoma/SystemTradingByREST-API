@@ -14,7 +14,7 @@ import websockets
 import threading
 from util.logging_config import get_logger
 from util.notifier import notify_on_exception
-from util.db_helper import upsert_purchase_date, delete_purchase_date
+from util.db_helper import upsert_purchase_date, delete_purchase_date, get_purchase_date
 
 # Kiwoom API 응답에서 사용되는 요청 한도 초과 메시지 키워드
 RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
@@ -995,7 +995,7 @@ class Kiwoom:
             unexec_qty = safe_int(real_data.get('902', '0'))  # 미체결수량
             order_type = real_data.get('905', '').strip()  # +매수/-매도; 매도정정, 매수정정, 매수취소, 매도취소
             current_price = safe_int(real_data.get('10', '0'))
-            
+
             # 주문구분 정규화
             if '+매수' in order_type:
                 order_type_normalized = '매수'
@@ -1003,10 +1003,105 @@ class Kiwoom:
                 order_type_normalized = '매도'
             else:
                 order_type_normalized = order_type
-            
+
             logger.info(f"주문체결: [{code}] {order_type_normalized} {order_status} - 주문:{order_qty}, 체결:{exec_qty}, 미체결:{unexec_qty}")
-            
-            # order 딕셔너리 업데이트
+
+            # 1) 체결 우선 처리(잔고/DB 반영)
+            if exec_qty > 0:
+                # 매수 체결 처리
+                if order_type_normalized == '매수':
+                    today_str = get_korea_time().strftime('%Y%m%d')
+                    if code in self.balance:
+                        # 기존 보유 종목에 추가 매수
+                        try:
+                            old_qty = int(self.balance[code].get('보유수량', 0))
+                        except Exception:
+                            old_qty = 0
+                        try:
+                            old_price = int(self.balance[code].get('매입가', 0))
+                        except Exception:
+                            old_price = 0
+                        new_qty = old_qty + exec_qty
+                        # 평균 매입가 계산
+                        try:
+                            new_avg_price = ((old_qty * old_price) + (exec_qty * current_price)) // new_qty
+                        except Exception:
+                            new_avg_price = current_price
+                        self.balance[code]['보유수량'] = new_qty
+                        self.balance[code]['매입가'] = new_avg_price
+                        self.balance[code]['현재가'] = current_price
+                        logger.info(f"매수 체결로 balance 업데이트: {code} 수량 {old_qty}->{new_qty}, 평균가 {new_avg_price}")
+
+                        # 매수일 보정: 메모리/DB에 없으면 오늘로 기록
+                        try:
+                            existing_pd = self.balance[code].get('매수일')
+                        except Exception:
+                            existing_pd = None
+
+                        if not existing_pd:
+                            try:
+                                db_pd = get_purchase_date(code)
+                            except Exception:
+                                db_pd = None
+
+                            if db_pd:
+                                self.balance[code]['매수일'] = db_pd
+                            else:
+                                # DB에 없으면 체결 시점(한국시간)의 날짜로 기록
+                                self.balance[code]['매수일'] = today_str
+                                try:
+                                    upsert_purchase_date(code, today_str)
+                                except Exception:
+                                    logger.exception("upsert_purchase_date 실패 (부분체결 신규 날짜 기록): %s", code)
+
+                    else:
+                        # 신규 매수
+                        today_str = get_korea_time().strftime('%Y%m%d')
+                        self.balance[code] = {
+                            '종목명': real_data.get('302', '').strip(),
+                            '보유수량': exec_qty,
+                            '매입가': current_price,
+                            '수익률': 0.0,
+                            '현재가': current_price,
+                            '매입금액': exec_qty * current_price,
+                            '매매가능수량': exec_qty,
+                            '매수일': today_str
+                        }
+                        # DB에 저장
+                        try:
+                            upsert_purchase_date(code, today_str)
+                        except Exception:
+                            logger.exception("upsert_purchase_date 실패 (신규): %s", code)
+                        logger.info(f"신규 매수 체결로 balance 추가: {code} 수량 {exec_qty}, 가격 {current_price}")
+
+                # 매도 체결 처리
+                elif order_type_normalized == '매도':
+                    if code in self.balance:
+                        try:
+                            old_qty = int(self.balance[code].get('보유수량', 0))
+                        except Exception:
+                            old_qty = 0
+                        new_qty = old_qty - exec_qty
+                        if new_qty <= 0:
+                            # 전량 매도
+                            try:
+                                del self.balance[code]
+                            except Exception:
+                                pass
+                            try:
+                                delete_purchase_date(code)
+                            except Exception:
+                                logger.exception("delete_purchase_date 실패: %s", code)
+                            logger.info(f"전량 매도 체결로 balance에서 제거: {code}")
+                        else:
+                            self.balance[code]['보유수량'] = new_qty
+                            self.balance[code]['매매가능수량'] = new_qty
+                            self.balance[code]['현재가'] = current_price
+                            logger.info(f"일부 매도 체결로 balance 업데이트: {code} 수량 {old_qty}->{new_qty}")
+                    else:
+                        logger.warning("매도 체결이 왔지만 balance에 없음: %s", code)
+
+            # 2) order 딕셔너리 업데이트(체결 처리 후 수행하여 DB 반영이 우선되도록 함)
             if unexec_qty > 0:
                 # 미체결 수량이 있으면 order에 유지
                 self.order[code] = {
@@ -1024,57 +1119,7 @@ class Kiwoom:
                 if code in self.order:
                     del self.order[code]
                     logger.info(f"주문 완전 체결로 order에서 제거: {code}")
-            
-            # balance 업데이트 (체결된 경우)
-            if exec_qty > 0:
-                if order_type_normalized == '매수':
-                    # 매수 체결: balance에 추가 또는 수량 증가
-                    if code in self.balance:
-                        # 기존 보유 종목에 추가 매수
-                        old_qty = self.balance[code]['보유수량']
-                        old_price = self.balance[code]['매입가']
-                        new_qty = old_qty + exec_qty
-                        # 평균 매입가 계산
-                        new_avg_price = ((old_qty * old_price) + (exec_qty * current_price)) // new_qty
-                        self.balance[code]['보유수량'] = new_qty
-                        self.balance[code]['매입가'] = new_avg_price
-                        self.balance[code]['현재가'] = current_price
-                        logger.info(f"매수 체결로 balance 업데이트: {code} 수량 {old_qty}->{new_qty}, 평균가 {new_avg_price}")
-                    else:
-                        # 신규 매수
-                        today_str = datetime.date.today().strftime('%Y%m%d')
-                        self.balance[code] = {
-                            '종목명': real_data.get('302', '').strip(),
-                            '보유수량': exec_qty,
-                            '매입가': current_price,
-                            '수익률': 0.0,
-                            '현재가': current_price,
-                            '매입금액': exec_qty * current_price,
-                            '매매가능수량': exec_qty,
-                            '매수일': today_str
-                        }
-                        # DB에 저장할 때도 정규화된 코드를 사용
-                        upsert_purchase_date(code, today_str)
-                        logger.info(f"신규 매수 체결로 balance 추가: {code} 수량 {exec_qty}, 가격 {current_price}")
-                
-                elif order_type_normalized == '매도':
-                    # 매도 체결: balance에서 수량 감소 또는 제거
-                    if code in self.balance:
-                        old_qty = self.balance[code]['보유수량']
-                        new_qty = old_qty - exec_qty
-                        if new_qty <= 0:
-                            # 전량 매도
-                            del self.balance[code]
-                            # DB 기록 삭제 시에도 정규화된 코드를 사용
-                            delete_purchase_date(code)
-                            logger.info(f"전량 매도 체결로 balance에서 제거: {code}")
-                        else:
-                            # 일부 매도
-                            self.balance[code]['보유수량'] = new_qty
-                            self.balance[code]['매매가능수량'] = new_qty
-                            self.balance[code]['현재가'] = current_price
-                            logger.info(f"일부 매도 체결로 balance 업데이트: {code} 수량 {old_qty}->{new_qty}")
-                    
+
         except Exception as e:
             logger.error(f"주문체결 데이터 처리 중 오류: {e}")
             logger.debug(f"real_data: {real_data}")
