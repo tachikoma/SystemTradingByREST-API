@@ -14,6 +14,7 @@ import numpy as np
 import math
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
+from collections import defaultdict
 import logging
 from util.logging_config import get_logger
 from util.rsi_calc import compute_rsi
@@ -25,7 +26,7 @@ logger = get_logger(__name__)
 class BacktestEngine:
     """백테스트 실행 엔진"""
 
-    DEFAULT_INITIAL_CAPITAL = 1_000_000
+    DEFAULT_INITIAL_CAPITAL = 10_000_000
     DEFAULT_RSI_SELL_THRESHOLD = 85.0
     DEFAULT_PROFIT_TARGET_PERCENT = 10.0
     DEFAULT_RSI_BUY_THRESHOLD = 3.0
@@ -615,6 +616,9 @@ class BacktestEngine:
         
         trading_dates = sorted(list(all_dates))
         
+        # 매수 예약 주문 관리: next_date -> [{'type': 'buy', 'code': str, 'budget': float}]
+        pending_orders = defaultdict(list)
+        
         # 날짜 필터링
         if start_date:
             trading_dates = [d for d in trading_dates if d >= start_date]
@@ -627,6 +631,24 @@ class BacktestEngine:
         
         # 각 거래일마다 시뮬레이션
         for idx, date in enumerate(trading_dates):
+            # 0) 전일 예약된 매수 주문 실행 (T+1 체결, 익일 시가)
+            orders = pending_orders.pop(date, [])
+            if orders:
+                buy_orders = [o for o in orders if o['type'] == 'buy']
+                if buy_orders:
+                    available_slots = self.max_holdings - len(self.holdings)
+                    if available_slots > 0:
+                        buy_orders = buy_orders[:available_slots]
+                        for o in buy_orders:
+                            code = o['code']
+                            df = processed_data.get(code)
+                            if df is None or date not in df.index or code in self.holdings:
+                                continue
+                            exec_price = df.loc[date, 'open']
+                            if np.isnan(exec_price):
+                                exec_price = df.loc[date, 'close']
+                            self.execute_buy(code, exec_price, date, o['budget'])
+
             # 1) 매도 신호 확인 (보유 종목)
             codes_to_sell = []
             for code in list(self.holdings.keys()):
@@ -692,13 +714,9 @@ class BacktestEngine:
                 # 매수 가능한 종목 수만큼만 매수 (universe 처리 순서 유지 — 실전과 동일)
                 buy_candidates = buy_candidates[:available_slots]
                 
-                # 매수 예산 배분 (RSIStrategy와 동일: 현금 보유 비율 적용)
-                # 전체 예수금의 (1 - CASH_RESERVE_RATIO)만 투자에 사용
-                # 남은 슬롯으로 나누어 종목당 예산 계산
                 if buy_candidates:
+                    # 매수 예산 배분 (RSIStrategy와 동일: 현금 보유 비율 적용)
                     investable_cash = self.cash * (1 - self.cash_reserve_ratio)
-                    # 현재 포트폴리오 가치 기준으로 단일 종목 최대 비중을 계산하여
-                    # 종목당 예산을 상한으로 설정
                     try:
                         portfolio_value_current = self.calculate_portfolio_value(date, processed_data)
                         cap_amount = portfolio_value_current * self.max_position_ratio
@@ -709,8 +727,18 @@ class BacktestEngine:
                     if cap_amount is not None:
                         budget_per_stock = min(budget_per_stock, cap_amount)
 
-                    for code, price in buy_candidates:
-                        self.execute_buy(code, price, date, budget_per_stock)
+                    # 매수 체결: 익일 시가로 예약 (T+1), 마지막 거래일은 즉시 종가 실행 (폴백)
+                    next_date = trading_dates[idx + 1] if idx + 1 < len(trading_dates) else None
+                    if next_date:
+                        for code, price in buy_candidates:
+                            pending_orders[next_date].append({
+                                'type': 'buy',
+                                'code': code,
+                                'budget': budget_per_stock,
+                            })
+                    else:
+                        for code, price in buy_candidates:
+                            self.execute_buy(code, price, date, budget_per_stock)
             
             # 3) 일일 포트폴리오 가치 기록
             portfolio_value = self.calculate_portfolio_value(date, processed_data)
