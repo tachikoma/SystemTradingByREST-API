@@ -69,18 +69,23 @@ def log_rsi_debug(symbol, stage, payload):
         logger.info("RSI_DEBUG (fallback): %s %s", symbol, stage)
 
 class RSIStrategy(threading.Thread):
-    # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
+    # 전략 상수 (Pullback in Uptrend + ATR Trailing Stop)
     MAX_HOLDINGS = 10  # 최대 보유 종목 수
-    RSI_PERIOD = 2  # RSI 계산 기간
+    RSI_PERIOD = 14  # RSI 계산 기간 (RSI(14) 사용)
     MA_SHORT = 20  # 단기 이동평균
     MA_LONG = 60  # 장기 이동평균
     MA_TREND = 200  # 장기 추세 이동평균 (필터용)
-    RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
-    PROFIT_TARGET_PERCENT = 10.0  # 매도 최소 수익률 기준 (%)
-    RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
-    PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
-    TIME_STOP_LOSS_DAYS = 90  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도 (최적화: 90일)
-    CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
+    RSI_SELL_THRESHOLD = 80  # 미사용 (ATR 트레일링이 매도 담당)
+    PROFIT_TARGET_PERCENT = 10.0  # 미사용 (ATR 트레일링이 매도 담당)
+    RSI_BUY_THRESHOLD = 30  # RSI 매수 기준 (RSI(14) < 30 = 과매도)
+    PRICE_DROP_THRESHOLD = -3.0  # 2일 가격 하락 기준 (%) (Pullback 확인)
+    TIME_STOP_LOSS_DAYS = 60  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도
+    PRICE_STOP_LOSS_PCT = -10.0  # 가격 손절 기준 (%): 매입가 대비 -10% 도달 시 즉시 청산
+
+    # ATR (Average True Range) 파라미터 — 트레일링 스탑 청산용
+    ATR_PERIOD = 14  # ATR 계산 기간
+    ATR_TRAILING_MULTIPLE = 3.0  # 트레일링 스탑 ATR 배수
+    CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (20% 현금 유지)
     MORNING_FALLBACK_GAP_UP_THRESHOLD = 3.0  # 오전 fallback 갭업 차단 기준 (%) — 이 이상 갭업이면 매수 보류
     REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (WebSocket API 제한)
     POLLING_MAX_CODES  = 150  # 폴링(REST) 추가 감시 최대 종목 수
@@ -227,6 +232,12 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
         try:
+            v = os.getenv('PRICE_DROP_THRESHOLD')
+            if v is not None:
+                self.PRICE_DROP_THRESHOLD = float(v)
+        except Exception:
+            pass
+        try:
             v = os.getenv('CASH_RESERVE_RATIO')
             if v is not None:
                 tmp = float(v)
@@ -249,6 +260,19 @@ class RSIStrategy(threading.Thread):
                 self.TIME_STOP_LOSS_DAYS = int(v)
         except Exception:
             pass
+        try:
+            v = os.getenv('PRICE_STOP_LOSS_PCT')
+            if v is not None:
+                self.PRICE_STOP_LOSS_PCT = float(v)
+        except Exception:
+            pass
+        self.enable_stop_loss = True  # 기본값: 가격 손절 활성화
+        try:
+            v = os.getenv('ENABLE_STOP_LOSS')
+            if v is not None:
+                self.enable_stop_loss = str(v).lower() in ('1', 'true')
+        except Exception:
+            pass
 
         # 단일 종목 최대 비중 비율 (예: 0.05 또는 5)
         try:
@@ -263,8 +287,8 @@ class RSIStrategy(threading.Thread):
         except Exception:
             self.MAX_POSITION_RATIO = 0.05
 
-        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s",
-                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS)
+        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s PRICE_STOP_LOSS_PCT=%s",
+                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS, self.PRICE_STOP_LOSS_PCT)
 
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
@@ -2043,8 +2067,7 @@ class RSIStrategy(threading.Thread):
             return None, None
 
     def check_sell_signal(self, code):
-        """매도대상인지 확인하는 함수"""
-        # RSI 계산 (공통 함수 사용)
+        """매도대상인지 확인하는 함수 (ATR 트레일링 스탑 + 시간 손절)"""
         df, close = self.calculate_rsi(code)
         
         if df is None or close is None:
@@ -2057,16 +2080,16 @@ class RSIStrategy(threading.Thread):
                 return False
             
             purchase_price = self.kiwoom.balance[code]['매입가']
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
 
-            # 시간 손절: 매수일 기준 N일 초과 시 강제 매도
+            # 1. 시간 손절: 매수일 기준 N일 초과 시 강제 매도
             purchase_date_str = self.kiwoom.balance[code].get('매수일')
             if purchase_date_str:
                 try:
                     purchase_date = datetime.strptime(purchase_date_str, '%Y%m%d').date()
                     holding_days = (get_korea_time().date() - purchase_date).days
                     if holding_days > self.TIME_STOP_LOSS_DAYS:
-                        name = self.resolve_stock_name(code)
-                        display = f"{name}({code})" if name else code
                         logger.info(
                             "시간 손절 발생: %s (보유일=%d일, 기준=%d일, 매입가=%d원)",
                             display, holding_days, self.TIME_STOP_LOSS_DAYS, purchase_price
@@ -2076,54 +2099,49 @@ class RSIStrategy(threading.Thread):
                 except Exception as e:
                     logger.warning("매수일 파싱 오류 (%s): %s", code, e)
 
-            # 금일의 RSI(N) 구하기
-            if len(df) == 0:
-                logger.warning("DataFrame이 비어있습니다: %s", code)
-                return False
-            
-            rsi = df[-1:][f'RSI({self.RSI_PERIOD})'].values[0]
-            
-            # RSI가 NaN이거나 inf인지 체크
-            if np.isnan(rsi) or np.isinf(rsi):
-                logger.warning("RSI 값이 유효하지 않습니다 (%s): %s", code, rsi)
-                return False
+            # 1.5 가격 손절: 매입가 대비 PRICE_STOP_LOSS_PCT% 이하로 떨어지면 즉시 청산
+            if self.enable_stop_loss:
+                price_change_pct = ((close - purchase_price) / purchase_price) * 100
+                if price_change_pct <= self.PRICE_STOP_LOSS_PCT:
+                    logger.info(
+                        "가격 손절: %s (close=%d, 매입가=%d, 손절=%.1f%%)",
+                        display, close, purchase_price, self.PRICE_STOP_LOSS_PCT
+                    )
+                    self._last_sell_reason = "PRICE_STOP_LOSS"
+                    return True
 
-            # 종목명 표시용 문자열
-            name = self.resolve_stock_name(code)
-            display = f"{name}({code})" if name else code
+            # 2. ATR 트레일링 스탑 청산
+            # 최고가 추적
+            highest_price = self.kiwoom.balance[code].get('highest_price', purchase_price)
+            if close > highest_price:
+                self.kiwoom.balance[code]['highest_price'] = close
+                highest_price = close
             
-            # 매도 시 수수료+세금을 고려한 손익분기점 계산
-            breakeven_price = math.ceil(purchase_price * self.SELL_FEE_RATE)
-
-            # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
-            target_price = math.ceil(breakeven_price * (1 + (self.PROFIT_TARGET_PERCENT / 100)))
-
-            # 로그: RSI 및 조건 여부
-            condition_met = (
-                rsi > self.RSI_SELL_THRESHOLD
-                and close > breakeven_price
-                and close >= target_price
-            )
-            logger.info(
-                "check_sell_signal %s RSI=%.2f close=%d breakeven=%d target_price=%d target_pct=%.2f condition=%s",
-                display,
-                rsi,
-                close,
-                breakeven_price,
-                target_price,
-                self.PROFIT_TARGET_PERCENT,
-                condition_met,
-            )
+            # ATR 계산 (full OHLCV 데이터가 있을 때만)
+            atr_stop_price = None
+            if 'high' in df.columns and 'low' in df.columns and len(df) > self.ATR_PERIOD:
+                try:
+                    prev_close = df['close'].shift(1)
+                    tr = pd.concat([
+                        df['high'] - df['low'],
+                        (df['high'] - prev_close).abs(),
+                        (df['low'] - prev_close).abs()
+                    ], axis=1).max(axis=1)
+                    atr = tr.rolling(window=self.ATR_PERIOD, min_periods=self.ATR_PERIOD).mean().iloc[-1]
+                    if not np.isnan(atr) and atr > 0:
+                        atr_stop_price = highest_price - self.ATR_TRAILING_MULTIPLE * atr
+                except Exception as e:
+                    logger.warning("ATR 계산 중 오류 (%s): %s", display, e)
             
-            # 매도 조건: RSI 과열+손익분기점 돌파 AND 목표가(손익분기점 기준) 도달
-            if condition_met:
-                estimated_profit_rate = ((close - breakeven_price) / purchase_price) * 100
-                logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d, breakeven=%d, 예상수익률=%.2f%%)", 
-                           display, rsi, close, purchase_price, breakeven_price, estimated_profit_rate)
-                self._last_sell_reason = "RSI_SIGNAL"
+            if atr_stop_price is not None and close < atr_stop_price:
+                logger.info(
+                    "ATR 트레일링 청산: %s (close=%d < stop_price=%d, 최고가=%d)",
+                    display, close, atr_stop_price, highest_price
+                )
+                self._last_sell_reason = "ATR_TRAILING"
                 return True
-            else:
-                return False
+            
+            return False
                 
         except (KeyError, IndexError) as e:
             logger.error("매도 신호 확인 중 오류 (%s): %s", code, e)

@@ -24,27 +24,31 @@ logger = get_logger(__name__)
 
 
 class BacktestEngine:
-    """백테스트 실행 엔진"""
+    """백테스트 실행 엔진 (Pullback in Uptrend + ATR Trailing Stop + Market Timing Filter)"""
 
     DEFAULT_INITIAL_CAPITAL = 10_000_000
     DEFAULT_RSI_SELL_THRESHOLD = 85.0
     DEFAULT_PROFIT_TARGET_PERCENT = 10.0
-    DEFAULT_RSI_BUY_THRESHOLD = 3.0
+    DEFAULT_RSI_BUY_THRESHOLD = 30.0
     DEFAULT_CASH_RESERVE_RATIO = 0.2
     DEFAULT_COMMISSION_RATE_MOCK = 0.0035
     DEFAULT_COMMISSION_RATE_REAL = 0.00015
     DEFAULT_TAX_RATE_MOCK = 0.0000
     DEFAULT_TAX_RATE_REAL = 0.0020
     DEFAULT_RSI_METHOD = 'wilder'
-    DEFAULT_TIME_STOP_LOSS_DAYS = 90
+    DEFAULT_TIME_STOP_LOSS_DAYS = 60
     DEFAULT_SLIPPAGE_BUY = 0.002   # 0.2% 매수 슬리피지 (체결 불리)
     DEFAULT_SLIPPAGE_SELL = 0.002  # 0.2% 매도 슬리피지 (체결 불리)
+    DEFAULT_ATR_PERIOD = 14
+    DEFAULT_ATR_TRAILING_MULTIPLE = 3.0
+    DEFAULT_MARKET_FILTER_CODE = '229200'   # KODEX 200 (KOSPI 200 ETF)
+    DEFAULT_MARKET_MA_PERIOD = 200
     
     def __init__(
         self,
         initial_capital: Optional[float] = None,  # env: INITIAL_CAPITAL, 기본값: DEFAULT_INITIAL_CAPITAL
         max_holdings: int = 10,  # 최대 보유 종목 수
-        rsi_period: int = 2,  # RSI 계산 기간
+        rsi_period: int = 14,  # RSI 계산 기간
         ma_short: int = 20,  # 단기 이동평균
         ma_long: int = 60,  # 장기 이동평균
         ma_trend: int = 200,  # 장기 추세 이동평균 (필터용)
@@ -53,43 +57,48 @@ class BacktestEngine:
         rsi_sell_threshold: Optional[float] = None,    # env: RSI_SELL_THRESHOLD, 기본값: DEFAULT_RSI_SELL_THRESHOLD
         profit_target_percent: float = None, # env: PROFIT_TARGET_PERCENT, 기본값: DEFAULT_PROFIT_TARGET_PERCENT
         rsi_buy_threshold: float = None,     # env: RSI_BUY_THRESHOLD, 기본값: DEFAULT_RSI_BUY_THRESHOLD
-        price_drop_threshold: float = -5.0,  # 가격 하락 기준 (%) (최적화된 값)
+        price_drop_threshold: float = -3.0,  # 2일간 가격 하락 기준 (%) (Pullback 확인)
         cash_reserve_ratio: float = None,    # env: CASH_RESERVE_RATIO, 기본값: DEFAULT_CASH_RESERVE_RATIO
         commission_rate: float = None,       # env: TRADING_FEE_PERCENT_REAL, 기본값: 실전 기본 수수료
         tax_rate: float = None,              # env: TRADING_TAX_PERCENT_REAL, 기본값: 실전 기본 거래세
         rsi_method: str = None,              # env: RSI_METHOD, 기본값: DEFAULT_RSI_METHOD
         rsi_min_periods: int = None,         # None이면 rsi_period 사용
-        # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
-        enable_stop_loss: bool = True,      # 가격 손절 비활성화 (최적화 기본값)
+        # ATR 트레일링 스탑 파라미터 (RSI 매도/고정 수익률 목표 대체)
+        atr_period: int = None,              # ATR 계산 기간, 기본값: DEFAULT_ATR_PERIOD
+        atr_trailing_multiple: float = None, # ATR 배수, 기본값: DEFAULT_ATR_TRAILING_MULTIPLE
+        # 손절 파라미터 (fixed % stop은 ATR이 대체, 비활성화 기본)
+        enable_stop_loss: bool = False,      # 가격 손절 (ATR이 대체하므로 기본 False)
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%)
-        enable_time_stop_loss: bool = True, # 시간 손절 독립 플래그 (최적화 기본값)
+        enable_time_stop_loss: bool = True,  # 시간 손절
         time_stop_loss_days: Optional[int] = None,  # env: TIME_STOP_LOSS_DAYS, 기본값: DEFAULT_TIME_STOP_LOSS_DAYS
         slippage_buy: float = None,              # env: SLIPPAGE_BUY, 기본값: DEFAULT_SLIPPAGE_BUY
         slippage_sell: float = None,             # env: SLIPPAGE_SELL, 기본값: DEFAULT_SLIPPAGE_SELL
+        market_filter_code: str = None,          # env: MARKET_FILTER_CODE, 기본값: None(미사용)
+        market_ma_period: int = None,            # env: MARKET_MA_PERIOD, 기본값: DEFAULT_MARKET_MA_PERIOD
         symbol_names: Dict[str, str] = None,
     ):
-        self.max_holdings = max_holdings
-        self.rsi_period = rsi_period
-        self.ma_short = ma_short
-        self.ma_long = ma_long
-        self.ma_trend = ma_trend
-        self.price_drop_threshold = price_drop_threshold
-        self.rsi_min_periods = rsi_min_periods if rsi_min_periods is not None else rsi_period
-
         # --- 우선순위 적용 헬퍼: 명시적 파라미터 > .env > 엔진 내부 기본값 ---
         def _resolve_float(explicit, env_name, fallback):
-            """명시적 값이 있으면 그것을 쓰고, 없으면 env, 그것도 없으면 fallback 사용"""
             if explicit is not None:
                 return float(explicit)
             v = os.getenv(env_name)
             return float(v) if v is not None else fallback
 
         def _resolve_int(explicit, env_name, fallback):
-            """명시적 값이 있으면 그것을 쓰고, 없으면 env, 그것도 없으면 fallback 사용"""
             if explicit is not None:
                 return int(explicit)
             v = os.getenv(env_name)
             return int(v) if v is not None else fallback
+
+        self.max_holdings = max_holdings
+        self.rsi_period = _resolve_int(rsi_period, 'RSI_PERIOD', rsi_period)
+        self.ma_short = ma_short
+        self.ma_long = ma_long
+        self.ma_trend = ma_trend
+        self.price_drop_threshold = _resolve_float(price_drop_threshold, 'PRICE_DROP_THRESHOLD', price_drop_threshold)
+        self.rsi_min_periods = rsi_min_periods if rsi_min_periods is not None else self.rsi_period
+        self.atr_period = _resolve_int(atr_period, 'ATR_PERIOD', self.DEFAULT_ATR_PERIOD)
+        self.atr_trailing_multiple = _resolve_float(atr_trailing_multiple, 'ATR_TRAILING_MULTIPLE', self.DEFAULT_ATR_TRAILING_MULTIPLE)
 
         self.initial_capital = _resolve_float(initial_capital, 'INITIAL_CAPITAL', self.DEFAULT_INITIAL_CAPITAL)
         self.rsi_sell_threshold   = _resolve_float(rsi_sell_threshold, 'RSI_SELL_THRESHOLD', self.DEFAULT_RSI_SELL_THRESHOLD)
@@ -155,15 +164,23 @@ class BacktestEngine:
         self.buy_fee_rate  = 1 + self.commission_rate
         self.sell_fee_rate = 1 + self.commission_rate + self.tax_rate
 
-        # 손절 설정
-        self.enable_stop_loss      = enable_stop_loss
-        self.price_stop_loss_pct   = price_stop_loss_pct
+        # 손절 설정 (env 우선, 명시적 파라미터는 fallback)
+        _env_enable_stop = os.getenv('ENABLE_STOP_LOSS')
+        self.enable_stop_loss = str(_env_enable_stop).lower() in ('1', 'true') if _env_enable_stop is not None else enable_stop_loss
+        _env_psp = os.getenv('PRICE_STOP_LOSS_PCT')
+        self.price_stop_loss_pct = float(_env_psp) if _env_psp is not None else price_stop_loss_pct
         self.enable_time_stop_loss = enable_time_stop_loss
+        self.time_stop_loss_days   = _resolve_int(time_stop_loss_days, 'TIME_STOP_LOSS_DAYS', self.DEFAULT_TIME_STOP_LOSS_DAYS)
         self.time_stop_loss_days   = _resolve_int(time_stop_loss_days, 'TIME_STOP_LOSS_DAYS', self.DEFAULT_TIME_STOP_LOSS_DAYS)
 
         # 슬리피지 설정 (매수 시 불리하게 적용: 가격 상승, 매도 시 불리하게 적용: 가격 하락)
         self.slippage_buy  = _resolve_float(slippage_buy,  'SLIPPAGE_BUY',  self.DEFAULT_SLIPPAGE_BUY)
         self.slippage_sell = _resolve_float(slippage_sell, 'SLIPPAGE_SELL', self.DEFAULT_SLIPPAGE_SELL)
+
+        # 마켓 타이밍 필터
+        _raw = market_filter_code if market_filter_code is not None else os.getenv('MARKET_FILTER_CODE')
+        self.market_filter_code = _raw if _raw else None
+        self.market_ma_period = _resolve_int(market_ma_period, 'MARKET_MA_PERIOD', self.DEFAULT_MARKET_MA_PERIOD)
 
         # 포트폴리오 상태
         self.cash = self.initial_capital
@@ -196,25 +213,40 @@ class BacktestEngine:
     
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """기술적 지표 계산
-        
+
+        - RSI (지정 기간, Cutler 또는 Wilder)
+        - 이동평균 (20/60/200)
+        - ATR (평균 진폭 범위, 트레일링 스탑용)
+
         Args:
             df: OHLCV 데이터프레임
-            
+
         Returns:
             지표가 추가된 데이터프레임
         """
         df = df.copy()
-        
-        # RSI 계산 (Wilder smoothing). 두 컬럼을 모두 만들어 RSIStrategy와 호환 유지
+
+        # RSI 계산
         rsi_series = self.calculate_rsi(df['close'], self.rsi_period)
         df[f'RSI({self.rsi_period})'] = rsi_series
         df['rsi'] = rsi_series
-        
+
         # 이동평균 계산
         df['ma20'] = df['close'].rolling(window=self.ma_short, min_periods=self.ma_short).mean()
         df['ma60'] = df['close'].rolling(window=self.ma_long, min_periods=self.ma_long).mean()
         df['ma200'] = df['close'].rolling(window=self.ma_trend, min_periods=self.ma_trend).mean()
-        
+
+        # ATR (Average True Range) 계산
+        prev_close = df['close'].shift(1)
+        tr = pd.concat([
+            (df['high'] - df['low']),
+            (df['high'] - prev_close).abs(),
+            (df['low'] - prev_close).abs()
+        ], axis=1).max(axis=1)
+        df['tr'] = tr
+        df['atr'] = tr.rolling(window=self.atr_period, min_periods=self.atr_period).mean()
+        df[f'ATR({self.atr_period})'] = df['atr']
+
         return df
     
     def check_buy_signal(
@@ -303,62 +335,15 @@ class BacktestEngine:
         df: pd.DataFrame,
         avg_purchase_price: float
     ) -> Tuple[bool, Optional[float]]:
-        """매도 신호 확인
+        """매도 신호 확인 (미사용 — ATR 트레일링 스탑이 check_stop_loss에서 처리)
         
-        Args:
-            code: 종목 코드
-            date: 현재 날짜
-            df: 해당 종목의 OHLCV + 지표 데이터
-            avg_purchase_price: 평균 매입가
-            
+        더 이상 메인 루프에서 호출되지 않습니다.
+        ATR 트레일링 + 시간 손절은 check_stop_loss에서 처리합니다.
+        
         Returns:
-            (매도 신호 여부, 매도 가격)
+            항상 (False, None)
         """
-        try:
-            if date not in df.index:
-                return False, None
-            
-            idx = df.index.get_loc(date)
-            current = df.iloc[idx]
-            previous = df.iloc[idx - 1] if idx > 0 else None
-
-            open_price = current['open']
-            close = current['close']
-            current_rsi = current['rsi']
-            prev_rsi = previous['rsi'] if previous is not None else np.nan
-
-            # display (name(code)) for logging
-            display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
-            logger.debug(
-                "check_sell_signal %s date=%s prev_rsi=%.2f current_rsi=%.2f open=%d close=%d",
-                display,
-                date,
-                prev_rsi,
-                current_rsi,
-                open_price,
-                close,
-            )
-            
-            # 값 유효성 체크
-            if np.isnan(prev_rsi) and np.isnan(current_rsi):
-                return False, None
-            
-            # 매도 시 수수료+세금을 고려한 손익분기점 계산
-            # RSIStrategy와 동일: math.ceil() 적용 (가격은 정수)
-            breakeven_price = math.ceil(avg_purchase_price * self.sell_fee_rate)
-
-            # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
-            target_price = math.ceil(breakeven_price * (1 + (self.profit_target_percent / 100)))
-            
-            # 매도 조건 확인: RSIStrategy와 동일하게 당일 RSI만 확인
-            if current_rsi > self.rsi_sell_threshold and close >= target_price:
-                return True, close
-            
-            return False, None
-            
-        except (KeyError, IndexError) as e:
-            logger.warning(f"매도 신호 확인 중 오류 ({code}, {date}): {e}")
-            return False, None
+        return False, None
     
     def check_stop_loss(
         self,
@@ -368,7 +353,7 @@ class BacktestEngine:
         avg_purchase_price: float,
         buy_date: str
     ) -> Tuple[bool, Optional[float], str]:
-        """손절 조건 확인
+        """청산 조건 확인 (ATR 트레일링 스탑 + 시간 손절)
         
         Args:
             code: 종목 코드
@@ -378,7 +363,7 @@ class BacktestEngine:
             buy_date: 매수 날짜
             
         Returns:
-            (손절 신호 여부, 매도 가격, 손절 사유)
+            (청산 신호 여부, 매도 가격, 청산 사유)
         """
         if not self.enable_stop_loss and not self.enable_time_stop_loss:
             return False, None, ""
@@ -391,13 +376,21 @@ class BacktestEngine:
             current = df.iloc[idx]
             close = current['close']
             
-            # 1. 가격 손절 체크 (enable_stop_loss가 True일 때만)
+            # 1. ATR 트레일링 스탑 (기본 청산 방식 — 수익/손실 모두 청산)
+            highest_price = self.holdings.get(code, {}).get('highest_price', avg_purchase_price)
+            atr = current.get('atr', np.nan)
+            if not np.isnan(atr) and atr > 0:
+                trailing_stop_price = highest_price - self.atr_trailing_multiple * atr
+                if close < trailing_stop_price:
+                    return True, close, f"ATR트레일링({close:.0f}<{trailing_stop_price:.0f})"
+            
+            # 2. 가격 손절 체크 (enable_stop_loss가 True일 때만, legacy fallback)
             if self.enable_stop_loss:
                 price_change_pct = ((close - avg_purchase_price) / avg_purchase_price) * 100
                 if price_change_pct <= self.price_stop_loss_pct:
                     return True, close, f"가격손절({price_change_pct:.2f}%)"
             
-            # 2. 시간 손절 체크 (enable_time_stop_loss가 True일 때만)
+            # 3. 시간 손절 체크 (enable_time_stop_loss가 True일 때만)
             if self.enable_time_stop_loss:
                 buy_date_dt = pd.to_datetime(buy_date, format='%Y%m%d')
                 current_date_dt = pd.to_datetime(date, format='%Y%m%d')
@@ -409,7 +402,7 @@ class BacktestEngine:
             return False, None, ""
             
         except (KeyError, IndexError) as e:
-            logger.warning(f"손절 확인 중 오류 ({code}, {date}): {e}")
+            logger.warning(f"청산 조건 확인 중 오류 ({code}, {date}): {e}")
             return False, None, ""
     
     def execute_buy(self, code: str, price: float, date: str, budget: float):
@@ -460,11 +453,12 @@ class BacktestEngine:
                 'buy_date': buy_date
             }
         else:
-            # 신규 매수
+            # 신규 매수 (highest_price: ATR 트레일링 스탑 기준)
             self.holdings[code] = {
                 'quantity': quantity,
                 'avg_price': execution_price,
-                'buy_date': date
+                'buy_date': date,
+                'highest_price': execution_price
             }
         
         # 거래 기록
@@ -609,6 +603,19 @@ class BacktestEngine:
         for code, df in price_data.items():
             processed_data[code] = self.calculate_indicators(df)
         
+        # 마켓 타이밍 필터: market_filter_code의 200MA 계산
+        market_ma = None
+        if self.market_filter_code and self.market_filter_code in processed_data:
+            market_df = processed_data[self.market_filter_code]
+            ma_period = self.market_ma_period
+            col_name = f'ma{ma_period}'
+            if col_name not in market_df.columns:
+                market_df[col_name] = market_df['close'].rolling(window=ma_period, min_periods=ma_period).mean()
+            market_ma = market_df[col_name]
+            logger.info(f"마켓 타이밍 필터: {self.market_filter_code}({col_name}) 적용 — 매수는 시장 지수가 {col_name} 위에 있을 때만 허용")
+        elif self.market_filter_code:
+            logger.warning(f"마켓 필터 코드({self.market_filter_code})를 processed_data에서 찾을 수 없습니다. 필터 미적용.")
+        
         # 모든 거래일 추출 (모든 종목의 날짜를 합침)
         all_dates = set()
         for df in processed_data.values():
@@ -649,7 +656,18 @@ class BacktestEngine:
                                 exec_price = df.loc[date, 'close']
                             self.execute_buy(code, exec_price, date, o['budget'])
 
-            # 1) 매도 신호 확인 (보유 종목)
+            # 1) 보유 종목 최고가 갱신 (ATR 트레일링 기준)
+            for code in list(self.holdings.keys()):
+                if code not in processed_data:
+                    continue
+                hold_df = processed_data[code]
+                if date in hold_df.index:
+                    today_close = hold_df.loc[date, 'close']
+                    current_highest = self.holdings[code].get('highest_price', self.holdings[code]['avg_price'])
+                    if today_close > current_highest:
+                        self.holdings[code]['highest_price'] = today_close
+            
+            # 2) 청산 신호 확인 (ATR 트레일링 + 시간 손절)
             codes_to_sell = []
             for code in list(self.holdings.keys()):
                 if code not in processed_data:
@@ -659,13 +677,7 @@ class BacktestEngine:
                 avg_price = self.holdings[code]['avg_price']
                 buy_date = self.holdings[code]['buy_date']
                 
-                # RSI 매도 신호 체크
-                sell_signal, sell_price = self.check_sell_signal(code, date, df, avg_price)
-                if sell_signal:
-                    codes_to_sell.append((code, sell_price, "RSI매도"))
-                    continue
-                
-                # 손절 체크
+                # ATR 트레일링 + 시간 손절 (check_stop_loss가 모든 청산 처리)
                 stop_loss_signal, stop_price, stop_reason = self.check_stop_loss(
                     code, date, df, avg_price, buy_date
                 )
@@ -676,14 +688,22 @@ class BacktestEngine:
             # 매도 실행
             for code, price, reason in codes_to_sell:
                 self.execute_sell(code, price, date)
-                if "손절" in reason:
-                    logger.info(f"[{date}] {reason}: {code}, 가격: {price:,.0f}")
+                logger.info(f"[{date}] {reason}: {code}, 가격: {price:,.0f}")
             
             # 2) 매수 신호 확인 (미보유 종목)
             current_holdings = len(self.holdings)
             available_slots = self.max_holdings - current_holdings
             
-            if available_slots > 0:
+            # 마켓 타이밍 필터: 시장이 200MA 위에 있을 때만 매수
+            market_ok = True
+            if market_ma is not None and date in market_ma.index:
+                m_idx = market_ma.index.get_loc(date)
+                m_current = market_ma.iloc[m_idx]
+                m_close = market_df.loc[date, 'close'] if date in market_df.index else None
+                if m_close is not None and not np.isnan(m_current):
+                    market_ok = m_close > m_current
+            
+            if available_slots > 0 and market_ok:
                 buy_candidates = []
                 
                 for code, df in processed_data.items():
@@ -805,15 +825,19 @@ class BacktestEngine:
             'win_rate': win_rate,
             'avg_profit_rate': avg_profit_rate,
             'total_profit': sum([t.get('profit', 0) for t in sell_trades]),
-            'stop_loss_count': self.stop_loss_count,  # 손절 횟수
-            'stop_loss_enabled': self.enable_stop_loss,  # 가격 손절 활성화 여부
-            'time_stop_loss_enabled': self.enable_time_stop_loss,  # 시간 손절 활성화 여부
-            'price_stop_loss_pct': self.price_stop_loss_pct,  # 가격 손절 기준
-            'time_stop_loss_days': self.time_stop_loss_days,  # 시간 손절 기준
-            'slippage_buy': self.slippage_buy,    # 매수 슬리피지 비율
-            'slippage_sell': self.slippage_sell,  # 매도 슬리피지 비율
-            'open_positions': dict(self.holdings),  # 미청산 포지션
-            'open_positions_value': final_value - self.cash,  # 미청산 포지션 평가금액
+            'stop_loss_count': self.stop_loss_count,
+            'stop_loss_enabled': self.enable_stop_loss,
+            'time_stop_loss_enabled': self.enable_time_stop_loss,
+            'price_stop_loss_pct': self.price_stop_loss_pct,
+            'time_stop_loss_days': self.time_stop_loss_days,
+            'slippage_buy': self.slippage_buy,
+            'slippage_sell': self.slippage_sell,
+            'atr_period': self.atr_period,
+            'atr_trailing_multiple': self.atr_trailing_multiple,
+            'market_filter_code': self.market_filter_code,
+            'market_ma_period': self.market_ma_period,
+            'open_positions': dict(self.holdings),
+            'open_positions_value': final_value - self.cash,
             'daily_values': df
         }
         

@@ -128,7 +128,6 @@ def run_walk_forward_backtest(
 
     engine = BacktestEngine(
         max_holdings=10,
-        rsi_min_periods=2,
         symbol_names=symbol_names,
     )
 
@@ -261,7 +260,12 @@ def print_results(results: dict):
     logger.info(f"총 수익:            {results['final_value'] - results['initial_capital']:>15,.0f} 원")
     logger.info(f"총 수익률:          {results['total_return']:>15.2f} %")
     logger.info(f"연환산 수익률:      {results['annual_return']:>15.2f} %")
-    logger.info(f"매도 익절 기준:      {results['profit_target_percent']:>15.2f} %")
+    logger.info(f"ATR 트레일링 배수:    {results.get('atr_trailing_multiple', 'N/A'):>15} ")
+    logger.info(f"ATR 기간:            {results.get('atr_period', 'N/A'):>15} ")  
+    mfc = results.get('market_filter_code', None)
+    mmp = results.get('market_ma_period', None)
+    if mfc:
+        logger.info(f"시장필터:             {mfc}(MA{mmp})")
     logger.info(f"샤프 비율:          {results['sharpe_ratio']:>15.2f}")
     logger.info(f"MDD:                {results['mdd']:>15.2f} %")
     logger.info("-"*60)
@@ -319,7 +323,7 @@ def plot_results(results: dict, save_path: str = None):
     df['date_dt'] = pd.to_datetime(df['date'], format='%Y%m%d')
     
     fig, axes = plt.subplots(3, 1, figsize=(14, 10))
-    fig.suptitle('RSI 전략 백테스트 결과', fontsize=16, fontweight='bold')
+    fig.suptitle('Pullback + ATR 트레일링 백테스트 결과', fontsize=16, fontweight='bold')
     
     # 1) 포트폴리오 가치 변화
     ax1 = axes[0]
@@ -329,7 +333,7 @@ def plot_results(results: dict, save_path: str = None):
     ax1.set_ylabel('포트폴리오 가치 (원)')
     ax1.set_title(
         f'총 수익률: {results["total_return"]:.2f}% | 연환산 수익률: {results["annual_return"]:.2f}% '
-        f'| 매도 익절 기준: {results["profit_target_percent"]:.2f}%'
+        f'| ATR 트레일링: {results.get("atr_trailing_multiple", "N/A")}x'
     )
     ax1.legend()
     ax1.grid(True, alpha=0.3)
@@ -482,7 +486,7 @@ def main():
     args = parse_arguments()
     
     logger.info("="*60)
-    logger.info("RSI 전략 백테스트 시작")
+    logger.info("Pullback + ATR 트레일링 전략 백테스트 시작")
     logger.info("="*60)
     
     # 1) DB에서 가격 데이터 로드
@@ -504,7 +508,6 @@ def main():
     # 환경 변수 대상 항목은 BacktestEngine 기본값 또는 .env 값 사용
     engine = BacktestEngine(
         max_holdings=10,
-        rsi_min_periods=2,  # RSI 최소 기간 (RSI_PERIOD와 동일)
     )
     
     # 3) 백테스트 실행 - 기간 설정
