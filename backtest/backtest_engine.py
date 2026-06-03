@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 class BacktestEngine:
     """백테스트 실행 엔진"""
 
-    DEFAULT_INITIAL_CAPITAL = 10_000_000
+    DEFAULT_INITIAL_CAPITAL = 1_000_000
     DEFAULT_RSI_SELL_THRESHOLD = 85.0
     DEFAULT_PROFIT_TARGET_PERCENT = 10.0
     DEFAULT_RSI_BUY_THRESHOLD = 3.0
@@ -59,7 +59,7 @@ class BacktestEngine:
         rsi_method: str = None,              # env: RSI_METHOD, 기본값: DEFAULT_RSI_METHOD
         rsi_min_periods: int = None,         # None이면 rsi_period 사용
         # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
-        enable_stop_loss: bool = False,      # 가격 손절 비활성화 (최적화 기본값)
+        enable_stop_loss: bool = True,      # 가격 손절 비활성화 (최적화 기본값)
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%)
         enable_time_stop_loss: bool = True, # 시간 손절 독립 플래그 (최적화 기본값)
         time_stop_loss_days: Optional[int] = None,  # env: TIME_STOP_LOSS_DAYS, 기본값: DEFAULT_TIME_STOP_LOSS_DAYS
@@ -349,12 +349,7 @@ class BacktestEngine:
             # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
             target_price = math.ceil(breakeven_price * (1 + (self.profit_target_percent / 100)))
             
-            # 매도 조건 확인
-            # 1) 전일 종가 기준 RSI가 과매수면 당일 시가 체결을 우선 시도
-            # 2) 시가 체결이 안 되면 당일 종가 RSI와 종가 기준으로 폴백
-            if prev_rsi > self.rsi_sell_threshold and open_price >= target_price:
-                return True, open_price
-
+            # 매도 조건 확인: RSIStrategy와 동일하게 당일 RSI만 확인
             if current_rsi > self.rsi_sell_threshold and close >= target_price:
                 return True, close
             

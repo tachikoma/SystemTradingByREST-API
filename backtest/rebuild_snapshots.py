@@ -94,7 +94,13 @@ def load_price_tables(conn: sqlite3.Connection, universe: dict) -> dict:
             continue
 
         try:
-            df = pd.read_sql(f'SELECT `index`, close, volume FROM `{code}`', conn)
+            # 'index' 또는 'date' 컬럼 처리
+            pragma = conn.execute(f"PRAGMA table_info(`{code}`)").fetchall()
+            col_names = [r[1] for r in pragma]
+            date_col = 'date' if 'date' in col_names else 'index'
+            df = pd.read_sql(f'SELECT `{date_col}`, close, volume FROM `{code}`', conn)
+            if 'date' in df.columns and 'index' not in df.columns:
+                df = df.rename(columns={'date': 'index'})
         except Exception as e:
             logger.warning(f"[{idx}/{total}] {code_name}({code}): 테이블 읽기 실패 — {e}")
             continue

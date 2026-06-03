@@ -147,7 +147,7 @@ def run_walk_forward_backtest(
 
 
 def load_price_data_from_db(strategy_name: str = 'backtest_data') -> tuple:
-    """DB에서 가격 데이터 로드
+    """DB에서 가격 데이터 로드 (Parquet 캐시 적용)
     
     Args:
         strategy_name: 전략 이름 (DB 이름)
@@ -155,56 +155,95 @@ def load_price_data_from_db(strategy_name: str = 'backtest_data') -> tuple:
     Returns:
         (price_data, date_range): 가격 데이터 딕셔너리와 데이터 기간 (start_date, end_date)
     """
+    import json
+    from util.db_helper import _db_path
+
+    CACHE_DIR = project_root / 'cache'
+    cache_file = CACHE_DIR / f'{strategy_name}_price_data.parquet'
+    meta_file = CACHE_DIR / f'{strategy_name}_price_data.json'
+    db_path = _db_path(strategy_name)
+
+    # 1) 캐시 확인
+    if cache_file.exists() and meta_file.exists():
+        try:
+            with open(meta_file) as f:
+                meta = json.load(f)
+            if meta.get('db_mtime') == os.path.getmtime(db_path):
+                logger.info("캐시에서 가격 데이터 로드 중...")
+                df = pd.read_parquet(cache_file)
+                df['date'] = df['date'].astype(str)
+                df = df.set_index(['code', 'date'])
+                price_data = {code: grp.droplevel('code') for code, grp in df.groupby(level='code')}
+                logger.info(f"캐시 로드 완료: {meta['count']} 종목")
+                return price_data, (meta['min_date'], meta['max_date'])
+        except Exception as e:
+            logger.warning(f"캐시 로드 실패, DB에서 다시 로드합니다: {e}")
+
+    # 2) DB에서 로드
     logger.info("DB에서 유니버스 로드 중...")
-    
-    # 유니버스 조회
+
     sql = "SELECT * FROM universe"
     cur = execute_sql(strategy_name, sql)
     universe_list = cur.fetchall()
-    
+    total = len(universe_list)
+    logger.info(f"유니버스: {total}개 종목")
+
     price_data = {}
     min_date = None
     max_date = None
-    
-    for item in universe_list:
-        idx, code, code_name, created_at = item
-        
-        # 해당 종목의 가격 데이터 테이블 존재 확인
+
+    for idx, item in enumerate(universe_list, 1):
+        code, code_name = item[1], item[2]
+
         if not check_table_exist(strategy_name, code):
-            logger.warning(f"가격 데이터 테이블이 없습니다: {code}")
             continue
-        
-        # 가격 데이터 로드
+
         sql = f"SELECT * FROM `{code}`"
         cur = execute_sql(strategy_name, sql)
         cols = [column[0] for column in cur.description]
-        
         df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
-        
+
         if df.empty:
-            logger.warning(f"가격 데이터가 비어있습니다: {code}")
             continue
-        
-        # 인덱스 설정 및 컬럼 이름 정리
+
+        if 'date' in df.columns and 'index' not in df.columns:
+            df = df.rename(columns={'date': 'index'})
         df = df.set_index('index')
         df.index.name = 'date'
-        
+
         price_data[code] = df
-        logger.info(f"로드 완료: {code} ({code_name}) - {len(df)}일")
-        
-        # 데이터 기간 추적
-        if len(df) > 0:
-            df_min = df.index.min()
-            df_max = df.index.max()
-            if min_date is None or df_min < min_date:
-                min_date = df_min
-            if max_date is None or df_max > max_date:
-                max_date = df_max
-    
+
+        df_min = df.index.min()
+        df_max = df.index.max()
+        if min_date is None or df_min < min_date:
+            min_date = df_min
+        if max_date is None or df_max > max_date:
+            max_date = df_max
+
+        if idx % 100 == 0 or idx == total:
+            logger.info(f"데이터 로드 진행: {idx}/{total}")
+
     logger.info(f"총 {len(price_data)} 종목 로드 완료")
     if min_date and max_date:
         logger.info(f"데이터 기간: {min_date} ~ {max_date}")
-    
+
+    # 3) 캐시 저장
+    if price_data:
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            combined = pd.concat(price_data, names=['code', 'date']).reset_index()
+            combined.to_parquet(cache_file, index=False)
+            with open(meta_file, 'w') as f:
+                json.dump({
+                    'db_mtime': os.path.getmtime(db_path),
+                    'min_date': min_date,
+                    'max_date': max_date,
+                    'count': len(price_data),
+                }, f)
+            logger.info(f"가격 데이터 캐시 저장 완료 ({cache_file})")
+        except Exception as e:
+            logger.warning(f"캐시 저장 실패: {e}")
+
     return price_data, (min_date, max_date)
 
 
@@ -418,13 +457,12 @@ def parse_arguments():
     )
 
     parser.add_argument(
-        '--walk-forward',
+        '--no-walk-forward',
         action='store_true',
         default=False,
         help=(
-            '워크포워드 모드 활성화: 월별 유니버스 스냅샷(YYYYMM)과 종목별 가용 기간을 함께 적용. '
-            'universe_snapshots/universe_availability 테이블이 필요합니다 '
-            '(fetch_historical_data.py 실행 시 자동 생성).'
+            '워크포워드 모드 비활성화 (기본값: 활성화). '
+            '비활성화 시 생존자 편향이 있을 수 있습니다.'
         )
     )
 
@@ -486,8 +524,9 @@ def main():
         end_date = args.end if args.end else (db_end_date if db_end_date else datetime.now().strftime('%Y%m%d'))
         logger.info(f"백테스트 기간 설정: {start_date} ~ {end_date} (DB 전체 기간)")
 
-    # 4) 워크포워드 or 일반 백테스트 분기
-    if args.walk_forward:
+    # 4) 워크포워드 or 일반 백테스트 분기 (기본값: 워크포워드)
+    use_walk_forward = not args.no_walk_forward
+    if use_walk_forward:
         logger.info("워크포워드 모드로 백테스트를 실행합니다.")
         results = run_walk_forward_backtest(
             price_data=price_data,
@@ -499,6 +538,10 @@ def main():
             logger.error("워크포워드 백테스트 실패. universe_snapshots / universe_availability 테이블을 확인하세요.")
             return
     else:
+        logger.warning(
+            "일반 모드(비 워크포워드)로 실행합니다. "
+            "이 모드는 생존자 편향이 있을 수 있습니다."
+        )
         results = engine.run_backtest(
             price_data=price_data,
             start_date=start_date,
@@ -517,8 +560,8 @@ def main():
     plot_path = output_dir / f'backtest_result{suffix}.png'
     plot_results(results, save_path=str(plot_path))
     
-    # 6) 거래 내역 저장 (워크포워드 모드에서는 외부 engine에 거래가 없으므로 스킵)
-    if not args.walk_forward:
+    # 6) 거래 내역 저장 (일반 모드에서만 engine 거래내역 있음)
+    if not use_walk_forward:
         trades_path = output_dir / f'trades{suffix}.csv'
         export_trades_to_csv(engine, str(trades_path))
 
@@ -531,9 +574,9 @@ def main():
             'tag': tag,
             'start_date': start_date,
             'end_date': end_date,
-            'walk_forward': args.walk_forward,
+            'walk_forward': use_walk_forward,
             'plot_path': str(plot_path),
-            'trades_path': str(trades_path) if not args.walk_forward else '',
+            'trades_path': str(trades_path) if not use_walk_forward else '',
         },
     )
     

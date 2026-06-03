@@ -746,7 +746,12 @@ class Kiwoom:
         self.balance = {code: info for code, info in all_holdings}
         for code in self.balance:
             preserved = existing_dates.get(code)
-            self.balance[code]['매수일'] = preserved if preserved else None
+            if preserved:
+                self.balance[code]['매수일'] = preserved
+            else:
+                # 메모리에 없으면 DB에서 조회하여 매수일 None 방지
+                db_date = get_purchase_date(code)
+                self.balance[code]['매수일'] = db_date if db_date else None
         return self.balance
 
     def get_executions_for_code(self, code, ord_dt=None, qry_tp='4', stk_bond_tp='1', sell_tp='0', dmst_stex_tp='%',

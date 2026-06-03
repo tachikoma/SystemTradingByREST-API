@@ -152,4 +152,7 @@ backtest/output
 data/
 run
 
+# Parquet cache
+cache/
+
 .env_approvals/

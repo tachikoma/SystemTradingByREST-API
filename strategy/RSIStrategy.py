@@ -1222,6 +1222,8 @@ class RSIStrategy(threading.Thread):
             cols = [column[0] for column in cur.description]
 
             price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
+            if 'date' in price_df.columns and 'index' not in price_df.columns:
+                price_df = price_df.rename(columns={'date': 'index'})
             price_df = price_df.set_index('index')
 
             # Detect missing recent trading date even when table exists
@@ -1447,7 +1449,24 @@ class RSIStrategy(threading.Thread):
                         
                         self.kiwoom.get_balance()
                         self._stop_event.wait(0.4)  # API 호출 간격 확보 (interruptible)
-                        
+
+                        # DB에서 매수일 복원 및 미청산 종목 정리
+                        try:
+                            saved_dates = load_all_purchase_dates()
+                            normalized_saved = {k.lstrip('A').strip(): v for k, v in saved_dates.items()}
+                            for code, purchase_date in normalized_saved.items():
+                                if code in self.kiwoom.balance:
+                                    if not self.kiwoom.balance[code].get('매수일'):
+                                        self.kiwoom.balance[code]['매수일'] = purchase_date
+                                        logger.info("DB에서 매수일 복원: %s -> %s", code, purchase_date)
+                            current_holdings = set(self.kiwoom.balance.keys())
+                            for code in list(normalized_saved.keys()):
+                                if code not in current_holdings:
+                                    delete_purchase_date(code)
+                                    logger.info("청산 확인으로 매수일 DB 정리: %s", code)
+                        except Exception as e:
+                            logger.warning("매수일 DB 복원 중 오류 (무시): %s", e)
+
                         self.update_deposit()
                         
                         self.last_sync_time = current_time
@@ -1857,6 +1876,8 @@ class RSIStrategy(threading.Thread):
                                 cur = execute_sql(self.strategy_name, sql)
                                 cols = [column[0] for column in cur.description]
                                 price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
+                                if 'date' in price_df.columns and 'index' not in price_df.columns:
+                                    price_df = price_df.rename(columns={'date': 'index'})
                                 price_df = price_df.set_index('index')
                             except Exception:
                                 price_df = None
