@@ -87,17 +87,20 @@ class HistoricalDataFetcher:
         )
         
         self.universe = dict(zip(universe_df['code'], universe_df['name']))
+        self._stocks_map = dict(zip(universe_df['code'], universe_df['stocks']))
+        self._market_map = dict(zip(universe_df['code'], universe_df['market']))
         logger.info(f"유니버스 종목 수: {len(self.universe)}개")
         logger.info(f"  - KOSPI: {len(universe_df[universe_df['market'] == 'KOSPI'])}")
         logger.info(f"  - KOSDAQ: {len(universe_df[universe_df['market'] == 'KOSDAQ'])}")
         logger.info(f"  - 상장폐지 출신: {len(universe_df[universe_df['source'] == 'delisted'])}")
         
-        # 유니버스를 DB에 저장
+        # 유니버스를 DB에 저장 (rebuild_snapshots.py에서 활용할 stocks 포함)
         now = datetime.now().strftime("%Y%m%d")
         universe_save_df = pd.DataFrame({
             'code': list(self.universe.keys()),
             'code_name': list(self.universe.values()),
-            'created_at': [now] * len(self.universe)
+            'stocks': [self._stocks_map[code] for code in self.universe.keys()],
+            'created_at': [now] * len(self.universe),
         })
         insert_df_to_db(self.db_name, 'universe', universe_save_df)
         logger.info("유니버스를 DB에 저장했습니다.")
@@ -118,11 +121,60 @@ class HistoricalDataFetcher:
     # 최소 일평균 거래대금 기준 (원 단위): 실전 전략의 30억(=3,000백만원) 기준과 동일
     _MIN_DAILY_TRADING_VALUE = 3_000_000_000  # 30억 원
 
+    # 시가총액 상한 (원 단위): 실전 전략과 동일
+    _MAX_MARKET_CAP = 5_000_000_000_000  # 5조 미만
+    # 시가총액 하한은 시장별 차등 적용: KOSPI 500억, KOSDAQ/KONEX 200억
+
+    # ETF 식별 키워드
+    _ETF_NAME_KEYWORDS = ['ETF', 'ETN']
+
+    @staticmethod
+    def _parse_env_csv_set(val: str) -> set:
+        return {x.strip() for x in val.split(',') if x.strip()} if val else set()
+
+    def _is_etf(self, code_name: str) -> bool:
+        for kw in self._ETF_NAME_KEYWORDS:
+            if kw in code_name:
+                return True
+        return False
+
+    def _passes_etf_filter(self, code: str, code_name: str) -> bool:
+        overrides = self.etf_policy_overrides or {}
+        mode = overrides.get('mode')
+        if not mode:
+            mode = os.getenv('UNIVERSE_ETF_MODE', 'exclude')
+        is_etf = self._is_etf(code_name)
+        if mode == 'all':
+            return True
+        elif mode == 'exclude':
+            return not is_etf
+        elif mode == 'only':
+            return is_etf
+        elif mode == 'auto':
+            if not is_etf:
+                return True
+            whitelist_names = self._parse_env_csv_set(
+                overrides.get('whitelist_names') if overrides.get('whitelist_names') is not None
+                else os.getenv('UNIVERSE_ETF_WHITELIST_NAMES', '')
+            )
+            if code_name in whitelist_names:
+                return True
+            whitelist_codes = self._parse_env_csv_set(
+                overrides.get('whitelist_codes') if overrides.get('whitelist_codes') is not None
+                else os.getenv('UNIVERSE_ETF_WHITELIST_CODES', '')
+            )
+            if code in whitelist_codes:
+                return True
+            return False
+        return True
+
     def _passes_strategy_filter(self, code: str, code_name: str) -> bool:
         """실전 전략과 동일한 종목 필터 통과 여부 확인
 
         1. 종목코드 끝자리 '0' (우선주 제외)
         2. 종목명 제외 키워드 (지주/홀딩스/스팩/리츠/캐피탈 등)
+        3. 환경변수 기반 제외 리스트 (UNIVERSE_EXCLUDE_NAMES/CODES)
+        4. ETF 정책 (UNIVERSE_ETF_MODE)
         """
         # 우선주 제외: 코드 끝자리 '0'인 종목만 허용
         if not code.endswith('0'):
@@ -131,6 +183,17 @@ class HistoricalDataFetcher:
         for keyword in self._NAME_EXCLUDE_KEYWORDS:
             if keyword in code_name:
                 return False
+        # 환경변수 기반 제외 리스트
+        exclude_names = self._parse_env_csv_set(os.getenv('UNIVERSE_EXCLUDE_NAMES', ''))
+        for ex_name in exclude_names:
+            if ex_name.lower() in code_name.lower():
+                return False
+        exclude_codes = self._parse_env_csv_set(os.getenv('UNIVERSE_EXCLUDE_CODES', ''))
+        if code in exclude_codes:
+            return False
+        # ETF 정책
+        if not self._passes_etf_filter(code, code_name):
+            return False
         return True
 
     def save_universe_snapshots(self, price_data_by_code: dict):
@@ -143,15 +206,19 @@ class HistoricalDataFetcher:
         - 해당 월에 가격 데이터가 존재하는 종목만 후보
         - 우선주 제외 (종목코드 끝자리 '0')
         - 종목명 제외 키워드 필터 (지주/홀딩스/스팩/리츠/캐피탈/CD금리/KOFR금리/머니마켓)
+        - 환경변수 기반 제외 리스트 (UNIVERSE_EXCLUDE_NAMES/CODES)
+        - ETF 정책 (UNIVERSE_ETF_MODE)
         - 최소 일평균 거래대금 기준 (30억 = close * volume 월평균 > 3,000,000,000원)
-        - 거래대금 기준 상위 N개 선택 (N = MONTHLY_UNIVERSE_SIZE 환경변수, 기본 100)
+        - 시가총액 필터 (KOSPI 500억↑ / KOSDAQ·기타 200억↑ ~ 5조 미만, 실전 전략과 동일)
+        - 거래대금(1순위) + 시가총액(2순위) 기준 상위 N개 선택
 
         Args:
             price_data_by_code: {
                 code: {
                     'earliest': 'YYYYMM',
                     'latest': 'YYYYMM',
-                    'monthly_liquidity': {'YYYYMM': float, ...}
+                    'monthly_liquidity': {'YYYYMM': float, ...},
+                    'monthly_avg_close': {'YYYYMM': float, ...}
                 },
                 ...
             }
@@ -180,7 +247,14 @@ class HistoricalDataFetcher:
             logger.warning("가용 기간으로 저장할 종목이 없습니다.")
 
         # 2) YYYYMM별 유니버스 구성 저장 — 실전 전략과 동일한 필터 소급 적용
-        snapshot_size = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '250'))
+        _monthly_size = os.getenv('MONTHLY_UNIVERSE_SIZE')
+        if _monthly_size is not None:
+            snapshot_size = int(_monthly_size)
+        else:
+            snapshot_size = (
+                int(os.getenv('REALTIME_MAX_CODES', '100')) +
+                int(os.getenv('POLLING_MAX_CODES', '150'))
+            )
 
         # 2-a) 1차 필터: 우선주 제외 + 종목명 키워드 제외 (시간 불변 필터)
         strategy_filtered_universe = {
@@ -194,16 +268,22 @@ class HistoricalDataFetcher:
             f"({excluded_count}개 제외)"
         )
 
-        # 2-b) 월별 거래대금 데이터 수집 (1차 필터 통과 종목만)
+        # 2-b) 월별 거래대금 + 시가총액 데이터 수집 (1차 필터 통과 종목만)
         monthly_rows = []
         for code, code_name in strategy_filtered_universe.items():
             monthly_liquidity = price_data_by_code[code].get('monthly_liquidity', {})
+            monthly_avg_close = price_data_by_code[code].get('monthly_avg_close', {})
+            stocks = self._stocks_map.get(code, 0) or 0
             for yyyymm, liquidity in monthly_liquidity.items():
+                market_cap = 0
+                if stocks > 0 and yyyymm in monthly_avg_close:
+                    market_cap = stocks * monthly_avg_close[yyyymm]
                 monthly_rows.append({
                     'yyyymm': yyyymm,
                     'code': code,
                     'code_name': code_name,
                     'monthly_trading_value': float(liquidity),
+                    'monthly_market_cap': float(market_cap),
                 })
 
         if not monthly_rows:
@@ -212,15 +292,42 @@ class HistoricalDataFetcher:
 
         monthly_df = pd.DataFrame(monthly_rows)
 
-        # 2-c) 2차 필터: 해당 월 최소 일평균 거래대금 기준 (30억 미만 제외)
+        # 시장구분 컬럼 추가 (실전 전략과 동일한 KOSPI/KOSDAQ 차등 시총 필터 적용)
+        monthly_df['market'] = monthly_df['code'].map(self._market_map).fillna('')
+
+        # 2-c) 2차 필터: 최소 일평균 거래대금 기준 (30억 미만 제외)
         before_liquidity_filter = len(monthly_df)
         monthly_df = monthly_df[monthly_df['monthly_trading_value'] >= self._MIN_DAILY_TRADING_VALUE]
         logger.info(
             f"2차 필터(최소 거래대금 30억): {len(monthly_df)}개 / {before_liquidity_filter}개 행 통과"
         )
 
-        # 2-d) 월별 거래대금 기준 상위 N개 선택
-        monthly_df = monthly_df.sort_values(['yyyymm', 'monthly_trading_value'], ascending=[True, False])
+        # 2-c-2) 시가총액 필터 — 실전 전략과 동일한 시장별 차등 적용
+        #      KOSPI: 500억 이상, KOSDAQ/기타: 200억 이상, 전체: 5조 미만
+        before_mcap_filter = len(monthly_df)
+        has_mcap = monthly_df['monthly_market_cap'] > 0
+        is_kospi = monthly_df['market'] == 'KOSPI'
+        monthly_df = monthly_df[
+            (~has_mcap) |
+            (
+                has_mcap &
+                (monthly_df['monthly_market_cap'] < self._MAX_MARKET_CAP) &
+                (
+                    (is_kospi & (monthly_df['monthly_market_cap'] >= 50_000_000_000)) |
+                    (~is_kospi & (monthly_df['monthly_market_cap'] >= 20_000_000_000))
+                )
+            )
+        ]
+        logger.info(
+            f"시가총액 필터(KOSPI 500억↑ / KOSDAQ·기타 200억↑ ~ 5조 미만): "
+            f"{len(monthly_df)}개 / {before_mcap_filter}개 행 통과"
+        )
+
+        # 2-d) 월별 거래대금(1순위) + 시가총액(2순위) 기준 상위 N개 선택
+        monthly_df = monthly_df.sort_values(
+            ['yyyymm', 'monthly_trading_value', 'monthly_market_cap'],
+            ascending=[True, False, False]
+        )
         monthly_df['liquidity_rank'] = monthly_df.groupby('yyyymm')['monthly_trading_value'].rank(
             method='first', ascending=False
         )
@@ -312,7 +419,11 @@ class HistoricalDataFetcher:
     def _get_index_col_name(self, code: str) -> str:
         cur = execute_sql(self.db_name, f"PRAGMA table_info(`{code}`)")
         cols = [r[1] for r in cur.fetchall()]
-        return 'date' if 'date' in cols else 'index'
+        if 'date' in cols:
+            return 'date'
+        if 'index' in cols:
+            return 'index'
+        return cols[0] if cols else 'date'
     
     def save_to_db(self, code: str, df: pd.DataFrame):
         """
@@ -393,11 +504,14 @@ class HistoricalDataFetcher:
                             tmp = pd.DataFrame(rows, columns=[col, 'close', 'volume'])
                             tmp['yyyymm'] = tmp[col].str[:6]
                             tmp['trading_value'] = tmp['close'].astype(float) * tmp['volume'].astype(float)
+                            tmp['trading_value'] = tmp['close'].astype(float) * tmp['volume'].astype(float)
                             monthly_liquidity = tmp.groupby('yyyymm')['trading_value'].mean().to_dict()
+                            monthly_avg_close = tmp.groupby('yyyymm')['close'].mean().to_dict()
                             price_data_range[code] = {
                                 'earliest': earliest,
                                 'latest': latest,
                                 'monthly_liquidity': monthly_liquidity,
+                                'monthly_avg_close': monthly_avg_close,
                             }
                 except Exception as e:
                     logger.warning(f"종목 {code}: 메타정보 갱신 실패 — {e}")
@@ -416,17 +530,19 @@ class HistoricalDataFetcher:
                 # DB에 저장
                 self.save_to_db(code, df)
                 success_count += 1
-                # 데이터 가용 기간 + 월별 거래대금 기록
+                # 데이터 가용 기간 + 월별 거래대금 + 월별 평균종가 기록
                 earliest = str(df.index.min())[:6]
                 latest = str(df.index.max())[:6]
                 tmp = df[['close', 'volume']].copy()
                 tmp['yyyymm'] = tmp.index.astype(str).str[:6]
                 tmp['trading_value'] = tmp['close'].astype(float) * tmp['volume'].astype(float)
                 monthly_liquidity = tmp.groupby('yyyymm')['trading_value'].mean().to_dict()
+                monthly_avg_close = tmp.groupby('yyyymm')['close'].mean().to_dict()
                 price_data_range[code] = {
                     'earliest': earliest,
                     'latest': latest,
                     'monthly_liquidity': monthly_liquidity,
+                    'monthly_avg_close': monthly_avg_close,
                 }
             else:
                 fail_count += 1

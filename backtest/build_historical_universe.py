@@ -43,7 +43,7 @@ def build_complete_universe(
     """전체 상장종목 리스트 구축 (현재상장 + 상장폐지)
 
     Returns:
-        DataFrame with columns: code, name, market, listing_date, delisting_date (nullable)
+        DataFrame with columns: code, name, market, listing_date, delisting_date (nullable), stocks
     """
     logger.info("=== 전체 상장종목 리스트 구축 시작 ===")
     logger.info(f"기간: {start_date} ~ {end_date}")
@@ -78,12 +78,27 @@ def build_complete_universe(
     })
     logger.info(f"상장폐지 종목(6자리 보통주): {len(delisted_df)}개")
 
-    # 3) 병합
+    # 3) 상장주식수(Stocks) 정보 수집
+    #    - 현재상장: fdr.StockListing('KRX')의 Stocks 컬럼
+    #    - 상장폐지: KRX-DELISTING의 ListingShares 컬럼
+    logger.info("상장주식수 정보 수집 중...")
+    krx_listing = fdr.StockListing('KRX')
+    stocks_map = dict(zip(krx_listing['Code'].astype(str), krx_listing['Stocks']))
+
+    delisted_raw = fdr.StockListing('KRX-DELISTING')
+    listing_shares_map = dict(
+        zip(delisted_raw['Symbol'].astype(str), delisted_raw['ListingShares'])
+    )
+
+    # 4) 병합
     all_stocks = pd.concat([current_df, delisted_df], ignore_index=True)
     all_stocks = all_stocks.drop_duplicates(subset='code', keep='first')
-    logger.info(f"병합 후 전체 고유 종목: {len(all_stocks)}개")
+    all_stocks['stocks'] = all_stocks['code'].map(
+        lambda c: stocks_map.get(c) or listing_shares_map.get(c) or 0
+    ).fillna(0).astype(int)
+    logger.info(f"병합 후 전체 고유 종목: {len(all_stocks)}개 (Stocks 정보 보유: {(all_stocks['stocks'] > 0).sum()})")
 
-    # 4) 백테스트 기간에 살아있었던 종목만 필터
+    # 5) 백테스트 기간에 살아있었던 종목만 필터
     start_dt = pd.to_datetime(start_date)
     end_dt = pd.to_datetime(end_date)
 
@@ -97,7 +112,7 @@ def build_complete_universe(
     all_stocks = all_stocks[mask].copy()
     logger.info(f"기간 내 존재했던 종목: {len(all_stocks)}개")
 
-    # 5) 기본 필터 (우선주 제외 + 이름 키워드 제외)
+    # 6) 기본 필터 (우선주 제외 + 이름 키워드 제외)
     mask_basic = all_stocks.apply(
         lambda r: passes_basic_filter(r['code'], r['name']), axis=1
     )

@@ -2,6 +2,9 @@ import os
 import sqlite3
 from pathlib import Path
 from typing import Dict, Optional
+
+import pandas as pd
+
 from util.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -170,6 +173,41 @@ def delete_purchase_date(code: str) -> None:
             con.commit()
     except Exception as e:
         logger.exception("delete_purchase_date 실패 (%s): %s", code, e)
+
+
+_OHLCV_COLS = {'open', 'high', 'low', 'close', 'volume', 'adj_close', 'change'}
+
+
+def resolve_date_column(df: pd.DataFrame) -> str:
+    """DataFrame에서 OHLCV가 아닌 첫 번째 컬럼을 날짜 컬럼명으로 반환
+
+    Returns:
+        컬럼명 (없으면 첫 번째 컬럼, DataFrame이 비어있으면 'index')
+    """
+    for col in df.columns:
+        if col.lower() not in _OHLCV_COLS:
+            return col
+    return df.columns[0] if len(df.columns) > 0 else 'index'
+
+
+def get_date_col_name(db_name: str, table_name: str) -> str:
+    """SQLite 테이블의 컬럼 중 OHLCV가 아닌 첫 번째 컬럼명을 반환
+
+    Args:
+        db_name: DB 파일명 (확장자 제외)
+        table_name: 테이블명
+
+    Returns:
+        날짜 컬럼명 (없으면 'index')
+    """
+    with sqlite3.connect(_db_path(db_name)) as con:
+        cur = con.cursor()
+        cur.execute(f"PRAGMA table_info(`{table_name}`)")
+        cols = [r[1] for r in cur.fetchall()]
+    for col in cols:
+        if col.lower() not in _OHLCV_COLS:
+            return col
+    return cols[0] if cols else 'index'
 
 
 if __name__ == "__main__":
