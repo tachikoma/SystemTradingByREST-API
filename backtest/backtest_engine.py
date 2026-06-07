@@ -12,15 +12,22 @@ RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를
 import pandas as pd
 import numpy as np
 import math
-from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
-import logging
 from util.logging_config import get_logger
 from util.rsi_calc import compute_rsi
 import os
 
 logger = get_logger(__name__)
+
+
+def _prev_yyyymm(yyyymm: str) -> str:
+    """YYYYMM 문자열의 이전 월을 반환합니다."""
+    year = int(yyyymm[:4])
+    month = int(yyyymm[4:6])
+    if month == 1:
+        return f"{year - 1}12"
+    return f"{year}{month - 1:02d}"
 
 
 class BacktestEngine:
@@ -619,7 +626,7 @@ class BacktestEngine:
         
         trading_dates = sorted(list(all_dates))
         
-        # 매수 예약 주문 관리: next_date -> [{'type': 'buy', 'code': str, 'budget': float}]
+        # 예약 주문 관리: next_date -> [{'type': 'buy'|'sell', ...}]
         pending_orders = defaultdict(list)
         
         # 날짜 필터링
@@ -631,12 +638,72 @@ class BacktestEngine:
         logger.info(f"백테스트 기간: {trading_dates[0]} ~ {trading_dates[-1]}")
         logger.info(f"총 거래일: {len(trading_dates)}일")
         logger.info(f"종목 수: {len(processed_data)}")
+
+        # 체결 시점 정렬: next_open(기본, T+1) | same_day_close(기존, T)
+        buy_execution_mode = os.getenv('BACKTEST_BUY_EXECUTION_MODE', 'next_open').strip().lower()
+        if buy_execution_mode not in ('next_open', 'same_day_close'):
+            logger.warning(
+                "알 수 없는 BACKTEST_BUY_EXECUTION_MODE=%s, next_open으로 대체",
+                buy_execution_mode,
+            )
+            buy_execution_mode = 'next_open'
+
+        sell_execution_mode = os.getenv('BACKTEST_SELL_EXECUTION_MODE', 'next_open').strip().lower()
+        if sell_execution_mode not in ('next_open', 'same_day_close'):
+            logger.warning(
+                "알 수 없는 BACKTEST_SELL_EXECUTION_MODE=%s, next_open으로 대체",
+                sell_execution_mode,
+            )
+            sell_execution_mode = 'next_open'
+
+        logger.info(
+            "백테스트 체결 모드: buy=%s, sell=%s",
+            buy_execution_mode,
+            sell_execution_mode,
+        )
+
+        # 월별 스냅샷 정렬: same_month(기존) 또는 prev_month(룩어헤드 방지)
+        snapshot_alignment = os.getenv('UNIVERSE_SNAPSHOT_ALIGNMENT', 'prev_month').strip().lower()
+        if snapshot_alignment not in ('same_month', 'prev_month'):
+            logger.warning(
+                "알 수 없는 UNIVERSE_SNAPSHOT_ALIGNMENT=%s, prev_month로 대체",
+                snapshot_alignment,
+            )
+            snapshot_alignment = 'prev_month'
         
         # 각 거래일마다 시뮬레이션
         for idx, date in enumerate(trading_dates):
-            # 0) 전일 예약된 매수 주문 실행 (T+1 체결, 익일 시가)
+            # 0) 전일 예약 주문 실행 (T+1 체결, 익일 시가)
             orders = pending_orders.pop(date, [])
             if orders:
+                # 매도 주문을 먼저 실행해 현금을 확보
+                sell_orders = [o for o in orders if o['type'] == 'sell']
+                for o in sell_orders:
+                    code = o['code']
+                    if code not in self.holdings:
+                        continue
+                    df = processed_data.get(code)
+                    if df is None or date not in df.index:
+                        continue
+                    exec_price = df.loc[date, 'open']
+                    if np.isnan(exec_price) or exec_price <= 0:
+                        exec_price = df.loc[date, 'close']
+                    if exec_price <= 0:
+                        continue
+                    self.execute_sell(code, exec_price, date)
+
+                    reason = o.get('reason', '')
+                    if '손절' in reason:
+                        signal_date = o.get('signal_date', 'unknown')
+                        logger.info(
+                            "[%s] %s(신호일:%s): %s, 체결가: %s",
+                            date,
+                            reason,
+                            signal_date,
+                            code,
+                            f"{exec_price:,.0f}",
+                        )
+
                 buy_orders = [o for o in orders if o['type'] == 'buy']
                 if buy_orders:
                     available_slots = self.max_holdings - len(self.holdings)
@@ -667,7 +734,7 @@ class BacktestEngine:
                 # RSI 매도 신호 체크
                 sell_signal, sell_price = self.check_sell_signal(code, date, df, avg_price)
                 if sell_signal:
-                    codes_to_sell.append((code, sell_price, "RSI매도"))
+                    codes_to_sell.append((code, sell_price, "RSI매도", date))
                     continue
                 
                 # 손절 체크
@@ -675,14 +742,23 @@ class BacktestEngine:
                     code, date, df, avg_price, buy_date
                 )
                 if stop_loss_signal:
-                    codes_to_sell.append((code, stop_price, stop_reason))
+                    codes_to_sell.append((code, stop_price, stop_reason, date))
                     self.stop_loss_count += 1
             
-            # 매도 실행
-            for code, price, reason in codes_to_sell:
-                self.execute_sell(code, price, date)
-                if "손절" in reason:
-                    logger.info(f"[{date}] {reason}: {code}, 가격: {price:,.0f}")
+            # 매도 체결: 설정에 따라 T+1(next_open) 또는 당일 종가(same_day_close)
+            next_date = trading_dates[idx + 1] if idx + 1 < len(trading_dates) else None
+            for code, price, reason, signal_date in codes_to_sell:
+                if next_date and sell_execution_mode == 'next_open':
+                    pending_orders[next_date].append({
+                        'type': 'sell',
+                        'code': code,
+                        'reason': reason,
+                        'signal_date': signal_date,
+                    })
+                else:
+                    self.execute_sell(code, price, date)
+                    if "손절" in reason:
+                        logger.info(f"[{date}] {reason}: {code}, 가격: {price:,.0f}")
             
             # 2) 매수 신호 확인 (미보유 종목)
             current_holdings = len(self.holdings)
@@ -691,7 +767,15 @@ class BacktestEngine:
             if available_slots > 0:
                 # 매수 신호 검토 순서: 실전과 동일하게 스냅샷 liquidity_rank 순
                 if monthly_universe_map:
-                    date_codes = monthly_universe_map.get(date[:6])
+                    yyyymm = date[:6]
+                    if snapshot_alignment == 'prev_month':
+                        snapshot_key = _prev_yyyymm(yyyymm)
+                        date_codes = monthly_universe_map.get(snapshot_key)
+                        if date_codes is None:
+                            # 데이터 범위 첫 월 등에서는 현재 월로 폴백
+                            date_codes = monthly_universe_map.get(yyyymm)
+                    else:
+                        date_codes = monthly_universe_map.get(yyyymm)
                     if date_codes:
                         codes_to_check = [c for c in date_codes if c in processed_data and c not in self.holdings]
                     else:
@@ -733,9 +817,8 @@ class BacktestEngine:
                     if cap_amount is not None:
                         budget_per_stock = min(budget_per_stock, cap_amount)
 
-                    # 매수 체결: 익일 시가로 예약 (T+1), 마지막 거래일은 즉시 종가 실행 (폴백)
-                    next_date = trading_dates[idx + 1] if idx + 1 < len(trading_dates) else None
-                    if next_date:
+                    # 매수 체결: 설정에 따라 T+1(next_open) 또는 당일 종가(same_day_close)
+                    if next_date and buy_execution_mode == 'next_open':
                         for code, price in buy_candidates:
                             pending_orders[next_date].append({
                                 'type': 'buy',

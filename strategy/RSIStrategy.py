@@ -134,6 +134,11 @@ class RSIStrategy(threading.Thread):
         self.last_full_cache_time = None
         self.full_cache_in_progress = False
         self.full_cache_done_today = False
+        # 신규 매수 중단 스위치(운영 안전장치)
+        self.pause_new_buys = str(os.getenv('RSI_PAUSE_NEW_BUYS', '0')).lower() in ('1', 'true', 'yes')
+        self._buy_pause_log_date = None
+        if self.pause_new_buys:
+            logger.warning("신규 매수 중단 모드 활성화: RSI_PAUSE_NEW_BUYS=1")
         # 오후 매수 윈도우 실행 여부 추적 (fallback 처리용)
         self.buy_window_done_today = False
         # 최근 매도 사유 (check_sell_signal → order_sell 간 전달용)
@@ -2060,6 +2065,17 @@ class RSIStrategy(threading.Thread):
 
             # 시간 손절: 매수일 기준 N일 초과 시 강제 매도
             purchase_date_str = self.kiwoom.balance[code].get('매수일')
+            if not purchase_date_str:
+                # 매수일 누락 시 DB에서 즉시 복원하여 시간 손절이 무력화되지 않도록 보정
+                try:
+                    restored_purchase_date = get_purchase_date(code)
+                    if restored_purchase_date:
+                        self.kiwoom.balance[code]['매수일'] = restored_purchase_date
+                        purchase_date_str = restored_purchase_date
+                        logger.info("매수일 실시간 복원: %s -> %s", code, restored_purchase_date)
+                except Exception as e:
+                    logger.warning("매수일 DB 복원 실패 (%s): %s", code, e)
+
             if purchase_date_str:
                 try:
                     purchase_date = datetime.strptime(purchase_date_str, '%Y%m%d').date()
@@ -2242,6 +2258,17 @@ class RSIStrategy(threading.Thread):
     @notify_on_exception(fallback_return=None)
     def check_buy_signal_and_order(self, code):
         """매수 대상인지 확인하고 주문을 접수하는 함수"""
+        # 운영 안전장치: 신규 매수 중단 모드
+        if self.pause_new_buys:
+            try:
+                today = get_korea_time().strftime('%Y%m%d')
+            except Exception:
+                today = None
+            if today and self._buy_pause_log_date != today:
+                self._buy_pause_log_date = today
+                logger.warning("신규 매수가 중단되어 매수 신호 검사를 건너뜁니다 (RSI_PAUSE_NEW_BUYS=1)")
+            return False
+
         # 매수 가능 시간 확인
         # 기본: 오후 14:50~15:20 허용
         # fallback: 오전 09:00~09:20 (오후 윈도우를 놓쳤을 때만)
