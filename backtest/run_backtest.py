@@ -33,7 +33,7 @@ env_path = project_root / '.env'
 load_dotenv(dotenv_path=env_path)
 
 from backtest.backtest_engine import BacktestEngine
-from util.db_helper import execute_sql, check_table_exist
+from util.db_helper import execute_sql, check_table_exist, resolve_date_column
 from util.logging_config import configure_logging, get_logger
 
 # 로깅 설정
@@ -65,22 +65,22 @@ def load_universe_availability(db_name: str) -> dict:
 
 
 def load_monthly_universe_snapshots(db_name: str) -> dict:
-    """DB에서 YYYYMM별 유니버스 스냅샷 로드
+    """DB에서 YYYYMM별 유니버스 스냅샷 로드 (liquidity_rank 순서 유지)
 
     Returns:
-        {YYYYMM: set([code1, code2, ...])}
+        {YYYYMM: [code1, code2, ...]}  — liquidity_rank 오름차순 정렬 리스트
     """
     if not check_table_exist(db_name, 'universe_snapshots'):
         return {}
 
-    sql = "SELECT yyyymm, code FROM universe_snapshots"
+    sql = "SELECT yyyymm, code FROM universe_snapshots ORDER BY yyyymm, liquidity_rank"
     cur = execute_sql(db_name, sql)
 
     snapshot_map = {}
     for yyyymm, code in cur.fetchall():
         if yyyymm not in snapshot_map:
-            snapshot_map[yyyymm] = set()
-        snapshot_map[yyyymm].add(code)
+            snapshot_map[yyyymm] = []
+        snapshot_map[yyyymm].append(code)
     return snapshot_map
 
 
@@ -205,9 +205,8 @@ def load_price_data_from_db(strategy_name: str = 'backtest_data') -> tuple:
         if df.empty:
             continue
 
-        if 'date' in df.columns and 'index' not in df.columns:
-            df = df.rename(columns={'date': 'index'})
-        df = df.set_index('index')
+        date_col = resolve_date_column(df)
+        df = df.set_index(date_col)
         df.index.name = 'date'
 
         price_data[code] = df

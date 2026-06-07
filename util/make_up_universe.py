@@ -1231,6 +1231,13 @@ def _filter_and_create_universe(
     """
     DataFrame을 받아서 필터링하고 유니버스를 생성하는 내부 함수
     네이버 크롤링과 키움 API 모두에서 공통으로 사용
+
+    Args:
+        df: 필터링할 종목 데이터 DataFrame
+        kiwoom_client: Kiwoom API 클라이언트 (보유/주문 종목 병합용)
+        max_codes: 선택할 유니버스 종목 수 (기본 200, 환경변수 REALTIME_MAX_CODES + POLLING_MAX_CODES로 오버라이드 가능)
+        universe_output_file: Parquet 출력 파일 경로
+        etf_policy_overrides: ETF 정책 오버라이드 딕셔너리
     """
     # 데이터 정제
     mapping = {',': '', 'N/A': '0', '%': ''}
@@ -1535,7 +1542,7 @@ def _filter_and_create_universe(
         raise Exception(error_msg)
 
     # 유니버스 생성 결과를 Parquet 출력
-    # 우선 df는 필터링 및 정렬을 마친 상위 100개(또는 지정된 수) 후보입니다.
+    # 우선 df는 필터링 및 정렬을 마친 상위 max_codes개(기본 200개, env로 오버라이드 가능) 후보입니다.
     # 추가 조치: 현재 보유/주문 종목(kiwoom_client)을 병합하여 보유종목이 누락되지 않도록 함
     try:
         if kiwoom_client is not None:

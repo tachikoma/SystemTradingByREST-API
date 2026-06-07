@@ -87,8 +87,8 @@ class RSIStrategy(threading.Thread):
     ATR_TRAILING_MULTIPLE = 3.0  # 트레일링 스탑 ATR 배수
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (20% 현금 유지)
     MORNING_FALLBACK_GAP_UP_THRESHOLD = 3.0  # 오전 fallback 갭업 차단 기준 (%) — 이 이상 갭업이면 매수 보류
-    REALTIME_MAX_CODES = 100  # 실시간 등록 최대 종목 수 (WebSocket API 제한)
-    POLLING_MAX_CODES  = 150  # 폴링(REST) 추가 감시 최대 종목 수
+    REALTIME_MAX_CODES = int(os.getenv('REALTIME_MAX_CODES', '100'))  # 실시간 등록 최대 종목 수 (WebSocket API 제한)
+    POLLING_MAX_CODES  = int(os.getenv('POLLING_MAX_CODES', '150'))  # 폴링(REST) 추가 감시 최대 종목 수
     POLLING_RATE_LIMIT = 0.2  # 종목당 REST 호출 간격 (초) — rate limit 방지
     POLLING_LOG_INTERVAL = 50  # N종목마다 폴링 진행 로그 출력
     # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (Wilder/EWMA)
@@ -1211,7 +1211,8 @@ class RSIStrategy(threading.Thread):
             
             # 케이스 2: 장 종료 후 데이터 업데이트 필요한지 확인
             if check_transaction_closed():
-                sql = "select max(`{}`) from `{}`".format('index', code)
+                date_col = get_date_col_name(self.strategy_name, code)
+                sql = "select max(`{}`) from `{}`".format(date_col, code)
                 cur = execute_sql(self.strategy_name, sql)
                 last_date = cur.fetchone()
                 now = get_korea_time().strftime("%Y%m%d")
@@ -1246,9 +1247,8 @@ class RSIStrategy(threading.Thread):
             cols = [column[0] for column in cur.description]
 
             price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
-            if 'date' in price_df.columns and 'index' not in price_df.columns:
-                price_df = price_df.rename(columns={'date': 'index'})
-            price_df = price_df.set_index('index')
+            date_col = resolve_date_column(price_df)
+            price_df = price_df.set_index(date_col)
 
             # Detect missing recent trading date even when table exists
             try:
@@ -1854,7 +1854,8 @@ class RSIStrategy(threading.Thread):
                         # DB에 있는 최근일자를 확인하여 최신성이 없으면 API로 보강
                         try:
                             # 최근 저장 일자 확인
-                            cur = execute_sql(self.strategy_name, f"select max(`index`) from `{code}`")
+                            date_col = get_date_col_name(self.strategy_name, code)
+                            cur = execute_sql(self.strategy_name, f"select max(`{date_col}`) from `{code}`")
                             last_date_row = cur.fetchone()
                             last_date = last_date_row[0] if last_date_row else None
                         except Exception:
@@ -1900,9 +1901,8 @@ class RSIStrategy(threading.Thread):
                                 cur = execute_sql(self.strategy_name, sql)
                                 cols = [column[0] for column in cur.description]
                                 price_df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
-                                if 'date' in price_df.columns and 'index' not in price_df.columns:
-                                    price_df = price_df.rename(columns={'date': 'index'})
-                                price_df = price_df.set_index('index')
+                                date_col = resolve_date_column(price_df)
+                                price_df = price_df.set_index(date_col)
                             except Exception:
                                 price_df = None
                     else:

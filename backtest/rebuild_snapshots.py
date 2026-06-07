@@ -10,7 +10,7 @@ API 재호출 없이 로컬 DB만으로 실행 가능합니다.
     poetry run python backtest/rebuild_snapshots.py
 
 환경변수:
-    MONTHLY_UNIVERSE_SIZE: 월별 유니버스 크기 (기본 250)
+    MONTHLY_UNIVERSE_SIZE: 월별 유니버스 크기 (미설정 시 REALTIME_MAX_CODES + POLLING_MAX_CODES)
     DB_DIR: DB 파일 디렉토리 (기본 ./data)
 """
 
@@ -27,8 +27,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
+import FinanceDataReader as fdr
+
 from util.logging_config import configure_logging, get_logger
-from util.db_helper import check_table_exist, insert_df_to_db, execute_sql
+from util.db_helper import check_table_exist, insert_df_to_db, execute_sql, resolve_date_column
 
 configure_logging(file_name='rebuild_snapshots.log')
 logger = get_logger('rebuild_snapshots')
@@ -47,18 +49,93 @@ NAME_EXCLUDE_KEYWORDS = [
 # 최소 일평균 거래대금 기준 (원 단위): 실전 전략의 30억 기준과 동일
 MIN_DAILY_TRADING_VALUE = 3_000_000_000  # 30억 원
 
+# 시가총액 상한 (원 단위): 실전 전략과 동일
+MAX_MARKET_CAP = 5_000_000_000_000  # 5조 미만
+# 시가총액 하한은 시장별 차등 적용: KOSPI 500억, KOSDAQ/KONEX 200억
+
+
+def build_stocks_map() -> dict:
+    """FDR에서 상장주식수 정보를 수집하여 {code: stocks} 딕셔너리 반환"""
+    stocks_map = {}
+    krx = fdr.StockListing('KRX')
+    stocks_map.update(dict(zip(krx['Code'].astype(str), krx['Stocks'])))
+    delisted = fdr.StockListing('KRX-DELISTING')
+    for _, row in delisted.iterrows():
+        code = str(row['Symbol'])
+        if code not in stocks_map and pd.notna(row.get('ListingShares')):
+            stocks_map[code] = int(row['ListingShares'])
+    return stocks_map
+
+
+def build_market_map() -> dict:
+    """FDR에서 시장구분 정보를 수집하여 {code: market} 딕셔너리 반환"""
+    market_map = {}
+    krx = fdr.StockListing('KRX')
+    market_map.update(dict(zip(krx['Code'].astype(str), krx['Market'])))
+    delisted = fdr.StockListing('KRX-DELISTING')
+    for _, row in delisted.iterrows():
+        code = str(row['Symbol'])
+        if code not in market_map:
+            market_map[code] = row.get('Market', '')
+    return market_map
+
+
+def _parse_env_csv_set(val: str) -> set:
+    return {x.strip() for x in val.split(',') if x.strip()} if val else set()
+
+
+def _is_etf(code_name: str) -> bool:
+    ETF_NAME_KEYWORDS = ['ETF', 'ETN']
+    for kw in ETF_NAME_KEYWORDS:
+        if kw in code_name:
+            return True
+    return False
+
+
+def _passes_etf_filter(code: str, code_name: str) -> bool:
+    mode = os.getenv('UNIVERSE_ETF_MODE', 'exclude')
+    is_etf = _is_etf(code_name)
+    if mode == 'all':
+        return True
+    elif mode == 'exclude':
+        return not is_etf
+    elif mode == 'only':
+        return is_etf
+    elif mode == 'auto':
+        if not is_etf:
+            return True
+        whitelist_names = _parse_env_csv_set(os.getenv('UNIVERSE_ETF_WHITELIST_NAMES', ''))
+        if code_name in whitelist_names:
+            return True
+        whitelist_codes = _parse_env_csv_set(os.getenv('UNIVERSE_ETF_WHITELIST_CODES', ''))
+        if code in whitelist_codes:
+            return True
+        return False
+    return True
+
 
 def passes_strategy_filter(code: str, code_name: str) -> bool:
     """실전 전략과 동일한 종목 필터 통과 여부 확인
 
     1. 종목코드 끝자리 '0' (우선주 제외)
     2. 종목명 제외 키워드 (지주/홀딩스/스팩/리츠/캐피탈 등)
+    3. 환경변수 기반 제외 리스트 (UNIVERSE_EXCLUDE_NAMES/CODES)
+    4. ETF 정책 (UNIVERSE_ETF_MODE)
     """
     if not code.endswith('0'):
         return False
     for keyword in NAME_EXCLUDE_KEYWORDS:
         if keyword in code_name:
             return False
+    exclude_names = _parse_env_csv_set(os.getenv('UNIVERSE_EXCLUDE_NAMES', ''))
+    for ex_name in exclude_names:
+        if ex_name.lower() in code_name.lower():
+            return False
+    exclude_codes = _parse_env_csv_set(os.getenv('UNIVERSE_EXCLUDE_CODES', ''))
+    if code in exclude_codes:
+        return False
+    if not _passes_etf_filter(code, code_name):
+        return False
     return True
 
 
@@ -80,7 +157,9 @@ def load_price_tables(conn: sqlite3.Connection, universe: dict) -> dict:
     """각 종목의 가격 테이블에서 월별 거래대금 계산
 
     Returns:
-        {code: {'earliest': 'YYYYMM', 'latest': 'YYYYMM', 'monthly_liquidity': {YYYYMM: float}}}
+        {code: {'earliest': 'YYYYMM', 'latest': 'YYYYMM',
+                'monthly_liquidity': {YYYYMM: float},
+                'monthly_avg_close': {YYYYMM: float}}}
     """
     price_data = {}
     tables = [r[0] for r in conn.execute(
@@ -94,26 +173,24 @@ def load_price_tables(conn: sqlite3.Connection, universe: dict) -> dict:
             continue
 
         try:
-            # 'index' 또는 'date' 컬럼 처리
-            pragma = conn.execute(f"PRAGMA table_info(`{code}`)").fetchall()
-            col_names = [r[1] for r in pragma]
-            date_col = 'date' if 'date' in col_names else 'index'
-            df = pd.read_sql(f'SELECT `{date_col}`, close, volume FROM `{code}`', conn)
-            if 'date' in df.columns and 'index' not in df.columns:
-                df = df.rename(columns={'date': 'index'})
+            df = pd.read_sql(f'SELECT * FROM `{code}`', conn)
+            if df.empty:
+                logger.debug(f"[{idx}/{total}] {code_name}({code}): 데이터 없음, 스킵")
+                continue
+            date_col = resolve_date_column(df)
+            df = df.set_index(date_col)
         except Exception as e:
             logger.warning(f"[{idx}/{total}] {code_name}({code}): 테이블 읽기 실패 — {e}")
             continue
 
-        if df.empty or 'index' not in df.columns:
-            logger.debug(f"[{idx}/{total}] {code_name}({code}): 데이터 없음, 스킵")
-            continue
+        df = df[['close', 'volume']]
 
-        df['yyyymm'] = df['index'].astype(str).str[:6]
+        df['yyyymm'] = df.index.astype(str).str[:6]
         df['trading_value'] = df['close'].astype(float) * df['volume'].astype(float)
         monthly_liquidity = df.groupby('yyyymm')['trading_value'].mean().to_dict()
+        monthly_avg_close = df.groupby('yyyymm')['close'].mean().to_dict()
 
-        date_sorted = sorted(df['index'].astype(str).tolist())
+        date_sorted = sorted(df.index.astype(str).tolist())
         earliest = date_sorted[0][:6]
         latest = date_sorted[-1][:6]
 
@@ -121,6 +198,7 @@ def load_price_tables(conn: sqlite3.Connection, universe: dict) -> dict:
             'earliest': earliest,
             'latest': latest,
             'monthly_liquidity': monthly_liquidity,
+            'monthly_avg_close': monthly_avg_close,
         }
 
         if idx % 20 == 0:
@@ -157,8 +235,16 @@ def rebuild_availability(conn: sqlite3.Connection, universe: dict, price_data: d
 
 def rebuild_snapshots(conn: sqlite3.Connection, universe: dict, price_data: dict):
     """universe_snapshots 테이블 재생성 (실전 전략 동일 기준)"""
-    snapshot_size = int(os.getenv('MONTHLY_UNIVERSE_SIZE', '250'))
-    logger.info(f"월별 유니버스 크기: {snapshot_size}개 (MONTHLY_UNIVERSE_SIZE)")
+    _monthly_size = os.getenv('MONTHLY_UNIVERSE_SIZE')
+    if _monthly_size is not None:
+        snapshot_size = int(_monthly_size)
+    else:
+        snapshot_size = (
+            int(os.getenv('REALTIME_MAX_CODES', '100')) +
+            int(os.getenv('POLLING_MAX_CODES', '150'))
+        )
+    _size_source = 'MONTHLY_UNIVERSE_SIZE' if os.getenv('MONTHLY_UNIVERSE_SIZE') else 'REALTIME_MAX_CODES + POLLING_MAX_CODES'
+    logger.info(f"월별 유니버스 크기: {snapshot_size}개 ({_size_source})")
 
     # 1차 필터: 우선주 + 이름 키워드 제외 (시간 불변)
     filtered_universe = {
@@ -172,16 +258,24 @@ def rebuild_snapshots(conn: sqlite3.Connection, universe: dict, price_data: dict
         f"({excluded}개 제외)"
     )
 
-    # 월별 거래대금 데이터 수집
+    # 월별 거래대금 + 시가총액 데이터 수집
     monthly_rows = []
+    stocks_map = build_stocks_map()
+    market_map = build_market_map()
     for code, code_name in filtered_universe.items():
         monthly_liquidity = price_data[code].get('monthly_liquidity', {})
+        monthly_avg_close = price_data[code].get('monthly_avg_close', {})
+        stocks = stocks_map.get(code, 0) or 0
         for yyyymm, liquidity in monthly_liquidity.items():
+            market_cap = 0
+            if stocks > 0 and yyyymm in monthly_avg_close:
+                market_cap = stocks * monthly_avg_close[yyyymm]
             monthly_rows.append({
                 'yyyymm': yyyymm,
                 'code': code,
                 'code_name': code_name,
                 'monthly_trading_value': float(liquidity),
+                'monthly_market_cap': float(market_cap),
             })
 
     if not monthly_rows:
@@ -189,6 +283,9 @@ def rebuild_snapshots(conn: sqlite3.Connection, universe: dict, price_data: dict
         return
 
     monthly_df = pd.DataFrame(monthly_rows)
+
+    # 시장구분 컬럼 추가 (KOSPI/KOSDAQ 차등 시총 필터 적용)
+    monthly_df['market'] = monthly_df['code'].map(market_map).fillna('')
 
     # 2차 필터: 최소 거래대금 30억 미만 제외
     before = len(monthly_df)
@@ -198,8 +295,32 @@ def rebuild_snapshots(conn: sqlite3.Connection, universe: dict, price_data: dict
         f"({before - len(monthly_df)}개 제외)"
     )
 
-    # 월별 거래대금 기준 상위 N개 선택
-    monthly_df = monthly_df.sort_values(['yyyymm', 'monthly_trading_value'], ascending=[True, False])
+    # 시가총액 필터 — 실전 전략과 동일한 시장별 차등 적용
+    #      KOSPI: 500억 이상, KOSDAQ/기타: 200억 이상, 전체: 5조 미만
+    before_mcap = len(monthly_df)
+    has_mcap = monthly_df['monthly_market_cap'] > 0
+    is_kospi = monthly_df['market'] == 'KOSPI'
+    monthly_df = monthly_df[
+        (~has_mcap) |
+        (
+            has_mcap &
+            (monthly_df['monthly_market_cap'] < MAX_MARKET_CAP) &
+            (
+                (is_kospi & (monthly_df['monthly_market_cap'] >= 50_000_000_000)) |
+                (~is_kospi & (monthly_df['monthly_market_cap'] >= 20_000_000_000))
+            )
+        )
+    ]
+    logger.info(
+        f"시가총액 필터(KOSPI 500억↑ / KOSDAQ·기타 200억↑ ~ 5조 미만): "
+        f"{len(monthly_df)}개 / {before_mcap}개 행 통과"
+    )
+
+    # 월별 거래대금(1순위) + 시가총액(2순위) 기준 상위 N개 선택
+    monthly_df = monthly_df.sort_values(
+        ['yyyymm', 'monthly_trading_value', 'monthly_market_cap'],
+        ascending=[True, False, False]
+    )
     monthly_df['liquidity_rank'] = monthly_df.groupby('yyyymm')['monthly_trading_value'].rank(
         method='first', ascending=False
     )

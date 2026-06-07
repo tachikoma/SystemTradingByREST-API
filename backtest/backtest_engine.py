@@ -416,6 +416,9 @@ class BacktestEngine:
         """
         # 슬리피지 적용: 매수 시 실제 체결 가격은 신호 가격보다 slippage_buy만큼 높음
         execution_price = math.ceil(price * (1 + self.slippage_buy))
+        if execution_price <= 0:
+            logger.warning(f"{code}: 매수 가격이 0 이하입니다 (price={price}), 매수 스킵")
+            return
         # 매수 가능 수량 계산 (RSIStrategy와 동일하게 math.floor 사용)
         quantity = math.floor(budget / execution_price)
         
@@ -567,7 +570,7 @@ class BacktestEngine:
         start_date: str = None,
         end_date: str = None,
         availability_map: Dict[str, tuple] = None,
-        monthly_universe_map: Dict[str, set] = None,
+        monthly_universe_map: Dict[str, list] = None,
     ) -> Dict:
         """백테스트 실행
         
@@ -578,8 +581,8 @@ class BacktestEngine:
             availability_map: {종목코드: (earliest_yyyymm, latest_yyyymm)} 딕셔너리.
                 지정하면 각 거래일마다 해당 날짜에 데이터가 존재하는 종목만 매수 신호 검토.
                 생존편향 제거를 위한 워크포워드 백테스트에서 활용합니다.
-            monthly_universe_map: {YYYYMM: {code1, code2, ...}} 딕셔너리.
-                지정하면 해당 월 스냅샷에 포함된 종목만 매수 신호 검토.
+            monthly_universe_map: {YYYYMM: [code1, code2, ...]} 딕셔너리.
+                지정하면 해당 월 스냅샷에 포함된 종목만 매수 신호 검토 (liquidity_rank 순서 유지).
                 진짜 월별 워크포워드 유니버스 적용 시 사용합니다.
             
         Returns:
@@ -652,8 +655,10 @@ class BacktestEngine:
                             if df is None or date not in df.index or code in self.holdings:
                                 continue
                             exec_price = df.loc[date, 'open']
-                            if np.isnan(exec_price):
+                            if np.isnan(exec_price) or exec_price <= 0:
                                 exec_price = df.loc[date, 'close']
+                            if exec_price <= 0:
+                                continue
                             self.execute_buy(code, exec_price, date, o['budget'])
 
             # 1) 보유 종목 최고가 갱신 (ATR 트레일링 기준)
@@ -704,18 +709,18 @@ class BacktestEngine:
                     market_ok = m_close > m_current
             
             if available_slots > 0 and market_ok:
+                # 매수 신호 검토 순서: 실전과 동일하게 스냅샷 liquidity_rank 순
+                if monthly_universe_map:
+                    date_codes = monthly_universe_map.get(date[:6])
+                    if date_codes:
+                        codes_to_check = [c for c in date_codes if c in processed_data and c not in self.holdings]
+                    else:
+                        codes_to_check = [c for c in processed_data if c not in self.holdings]
+                else:
+                    codes_to_check = [c for c in processed_data if c not in self.holdings]
                 buy_candidates = []
-                
-                for code, df in processed_data.items():
-                    # 이미 보유 중이면 스킵
-                    if code in self.holdings:
-                        continue
-
-                    # 월별 유니버스 스냅샷 필터
-                    if monthly_universe_map:
-                        month_codes = monthly_universe_map.get(date[:6], set())
-                        if month_codes and code not in month_codes:
-                            continue
+                for code in codes_to_check:
+                    df = processed_data[code]
 
                     # 워크포워드 모드: 해당 날짜에 데이터가 존재하는 종목만 매수 신호 검토
                     if availability_map and code in availability_map:

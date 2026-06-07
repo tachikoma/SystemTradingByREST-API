@@ -7,7 +7,7 @@
 - **진입점 (`main.py`):** `Kiwoom` 클래스와 `RSIStrategy` 스레드를 초기화하고 실행합니다.
 - **핵심 로직 (`strategy/RSIStrategy.py`):** RSI와 이동평균선을 기반으로 매매 신호를 생성하고 주문을 실행하는 주식 트레이딩 알고리즘을 포함합니다. `threading.Thread`를 상속받아 백그라운드에서 실행됩니다.
 - **API 추상화 (`api/Kiwoom.py`):** 키움 REST API와 WebSocket을 사용하여 통신합니다. `requests` 라이브러리를 사용하여 HTTP 요청을 보내고, `websockets` 라이브러리를 사용하여 실시간 시세를 수신합니다.
-- **종목 선정 (`util/make_up_universe.py`):** 키움 API(장 종료 후) 또는 네이버 금융(장 중) 크롤링으로 KOSPI/KOSDAQ 전체 종목 정보를 수집하여 거래량, 시가총액, 변동성 등의 지표를 기반으로 상위 100개 종목을 선정합니다. 매일 장 종료 후 자동으로 데이터를 캐싱하여 다음날 빠르게 시작할 수 있습니다.
+- **종목 선정 (`util/make_up_universe.py`):** 키움 API(장 종료 후) 또는 네이버 금융(장 중) 크롤링으로 KOSPI/KOSDAQ 전체 종목 정보를 수집하여 거래량, 시가총액, 변동성 등의 지표를 기반으로 상위 N개 종목(`REALTIME_MAX_CODES` + `POLLING_MAX_CODES`, 기본 250개)을 선정합니다. 매일 장 종료 후 자동으로 데이터를 캐싱하여 다음날 빠르게 시작할 수 있습니다.
  - **데이터베이스 (`util/db_helper.py`):** SQLite를 사용하여 종목 유니버스 및 과거 시세 데이터를 캐시하여 빠른 시작과 API 요청 제한을 회피합니다.
   - 기본 저장 위치: 애플리케이션은 캐시/파일(`all_stocks_kiwoom.parquet`, `all_stocks_naver.parquet`, `universe.parquet` 등)을 `DB_DIR` 환경변수로 지정한 디렉토리에 저장합니다. 기본값은 `./data`입니다.
    - 로컬 개발: `docker-compose.yml`의 `systemtrading` 서비스는 호스트의 `./data`를 `/app/data`로 바인드하도록 구성되어 있어 로컬에서 파일을 바로 확인할 수 있습니다.
@@ -52,10 +52,11 @@
    cp .env.example .env
    ```
 
-2. `.env` 파일을 열어 실제 API 키를 입력합니다:
+2. `.env` 파일을 열어 실제 API 키를 입력합니다 (자세한 옵션은 `.env.example` 참고):
    ```env
-   KIWOOM_APPKEY=your_actual_app_key
-   KIWOOM_SECRETKEY=your_actual_secret_key
+   KIWOOM_MODE=real
+   KIWOOM_REAL_APPKEY=your_real_app_key
+   KIWOOM_REAL_SECRETKEY=your_real_secret_key
    ```
 
 **⚠️ 보안 주의사항:**
@@ -147,47 +148,20 @@ poetry install
 cp .env.example .env
 ```
 
-2. `.env` 주요 항목 예시 (`.env.example` 참고):
-```env
-KIWOOM_MODE=mock  # 'mock' 또는 'real'
-KIWOOM_MOCK_APPKEY=your_mock_app_key
-KIWOOM_MOCK_SECRETKEY=your_mock_secret_key
-KIWOOM_REAL_APPKEY=your_real_app_key
-KIWOOM_REAL_SECRETKEY=your_real_secret_key
+2. `.env` 주요 항목은 `.env.example` 파일을 참고하여 설정하세요.
 
-# API Rate Limit Configuration
-# 키움 API 호출 간격 (초 단위)
-KIWOOM_API_SLEEP_MOCK=0.2  # 모의투자: rate limit이 더 엄격
-KIWOOM_API_SLEEP_REAL=0.1  # 실전투자: 0.1초로 안정적
+   전체 환경변수 목록은 `.env.example`에 있으며, 주요 항목은 다음과 같습니다:
 
-# Trading Fees (모의투자와 실전투자 별도 설정)
-TRADING_FEE_PERCENT_MOCK=0.35  # 모의투자 수수료 0.35%
-TRADING_TAX_PERCENT_MOCK=0.0   # 모의투자 거래세 없음
-TRADING_FEE_PERCENT_REAL=0.015 # 실전투자 수수료 0.015%
-TRADING_TAX_PERCENT_REAL=0.20  # 실전투자 거래세 0.20% (매도만)
-
-# Backtest defaults / overrides
-INITIAL_CAPITAL=10000000
-RSI_METHOD=wilder
-RSI_SELL_THRESHOLD=85
-PROFIT_TARGET_PERCENT=10.0
-RSI_BUY_THRESHOLD=3
-CASH_RESERVE_RATIO=0.2
-TIME_STOP_LOSS_DAYS=90
-
-# Logging
-KIW_LOG_DIR=./logs
-KIW_LOG_LEVEL=INFO
-KIW_LOG_ROTATION_MAX_BYTES=10485760
-KIW_LOG_BACKUP_COUNT=5
-
-# Telegram Bot (알림용)
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-TELEGRAM_CHAT_ID=your_telegram_chat_id
-
-# Integration tests gate
-# RUN_INTEGRATION=0
-```
+   | 변수 | 설명 | 기본값 |
+   |------|------|--------|
+   | `KIWOOM_MODE` | 모의투자(`mock`) / 실전투자(`real`) | `mock` |
+   | `KIWOOM_REAL_APPKEY` | 실전투자 앱키 | - |
+   | `KIWOOM_REAL_SECRETKEY` | 실전투자 시크릿키 | - |
+   | `REALTIME_MAX_CODES` | 실시간 WebSocket 등록 최대 종목 수 | `100` |
+   | `POLLING_MAX_CODES` | REST 폴링 추가 감시 최대 종목 수 | `150` |
+   | `UNIVERSE_ETF_MODE` | ETF 정책(`all`/`exclude`/`only`/`auto`) | `auto` |
+   | `UNIVERSE_EXCLUDE_NAMES` | 제외할 종목명 (부분일치, CSV) | - |
+   | `UNIVERSE_ETF_WHITELIST_CODES` | ETF 화이트리스트 코드 (CSV) | - |
 
 ### 텔레그램 봇 설정 (선택사항)
 전략 실행 중 매매 알림을 받으려면 텔레그램 봇을 설정하세요:
