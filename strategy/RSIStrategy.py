@@ -139,6 +139,29 @@ class RSIStrategy(threading.Thread):
         self._buy_pause_log_date = None
         if self.pause_new_buys:
             logger.warning("신규 매수 중단 모드 활성화: RSI_PAUSE_NEW_BUYS=1")
+        # 긴급 청산 자동 모드(운영 안전장치)
+        self.enable_emergency_liquidation = str(os.getenv('RSI_EMERGENCY_LIQUIDATION_ENABLED', '0')).lower() in ('1', 'true', 'yes')
+        try:
+            self.emergency_hard_stop_pct = float(os.getenv('RSI_EMERGENCY_HARD_STOP_PCT', '-30.0'))
+        except Exception:
+            self.emergency_hard_stop_pct = -30.0
+        try:
+            self.emergency_partial_stop_pct = float(os.getenv('RSI_EMERGENCY_PARTIAL_STOP_PCT', '-20.0'))
+        except Exception:
+            self.emergency_partial_stop_pct = -20.0
+        try:
+            self.emergency_partial_sell_ratio = float(os.getenv('RSI_EMERGENCY_PARTIAL_SELL_RATIO', '0.5'))
+        except Exception:
+            self.emergency_partial_sell_ratio = 0.5
+        self._emergency_partial_sell_date = None
+        self._emergency_partial_sold_codes = set()
+        if self.enable_emergency_liquidation:
+            logger.warning(
+                "긴급 청산 자동 모드 활성화: hard_stop=%.2f%% partial_stop=%.2f%% partial_ratio=%.2f",
+                self.emergency_hard_stop_pct,
+                self.emergency_partial_stop_pct,
+                self.emergency_partial_sell_ratio,
+            )
         # 오후 매수 윈도우 실행 여부 추적 (fallback 처리용)
         self.buy_window_done_today = False
         # 최근 매도 사유 (check_sell_signal → order_sell 간 전달용)
@@ -1507,6 +1530,11 @@ class RSIStrategy(threading.Thread):
                     # (3)보유 종목인지 확인
                     elif code in self.kiwoom.balance.keys():
                         logger.info('보유 종목 (%s)%s', code, self.kiwoom.balance[code])
+                        emergency_sell = self.get_emergency_liquidation_order(code)
+                        if emergency_sell:
+                            quantity, reason = emergency_sell
+                            self.order_sell(code, quantity=quantity, sell_reason=reason)
+                            continue
                         # (6)매도 대상 확인
                         if self.check_sell_signal(code):
                             # (7)매도 대상이면 매도 주문 접수
@@ -2149,7 +2177,7 @@ class RSIStrategy(threading.Thread):
             return False
 
     @notify_on_exception(fallback_return=None)
-    def order_sell(self, code):
+    def order_sell(self, code, quantity=None, sell_reason=None):
         """매도 주문 접수 함수"""
         try:
             # 보유 수량 확인(전량 매도 방식으로 보유한 수량을 모두 매도함)
@@ -2157,7 +2185,11 @@ class RSIStrategy(threading.Thread):
                 logger.error("보유하지 않은 종목입니다: %s", code)
                 return
             
-            quantity = self.kiwoom.balance[code]['보유수량']
+            tradable_quantity = self.kiwoom.balance[code].get('매매가능수량', self.kiwoom.balance[code]['보유수량'])
+            if quantity is None:
+                quantity = tradable_quantity
+            else:
+                quantity = min(int(quantity), int(tradable_quantity))
             
             if quantity <= 0:
                 logger.warning("보유 수량이 0 이하입니다 (%s): %d", code, quantity)
@@ -2175,6 +2207,10 @@ class RSIStrategy(threading.Thread):
             )
             if ask is None:
                 return
+
+            previous_sell_reason = self._last_sell_reason
+            if sell_reason:
+                self._last_sell_reason = sell_reason
 
             order_result = self.kiwoom.send_order('send_sell_order', '1001', 1, code, quantity, ask, '00')
 
@@ -2213,6 +2249,12 @@ class RSIStrategy(threading.Thread):
                     sell_reason=self._last_sell_reason,
                     order_no=str(order_result.get('order_no', '')),
                 )
+
+                if sell_reason == 'EMERGENCY_PARTIAL_STOP':
+                    try:
+                        self._mark_emergency_partial_sell(code)
+                    except Exception:
+                        pass
             else:
                 error_code = order_result.get('error_code', 'UNKNOWN')
                 error_message = order_result.get('error_message', '알 수 없는 오류')
@@ -2222,6 +2264,8 @@ class RSIStrategy(threading.Thread):
                     display, quantity, ask, error_code, html.escape(error_message))
                 logger.error("매도 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
                 self._queue_or_send(error_msg)
+
+            self._last_sell_reason = previous_sell_reason
             
         except KeyError as e:
             code_name = self.resolve_stock_name(code)
@@ -2229,6 +2273,69 @@ class RSIStrategy(threading.Thread):
         except Exception as e:
             code_name = self.resolve_stock_name(code)
             logger.error("매도 주문 처리 중 예상치 못한 오류 %s(%s): %s", code_name, code, e)
+
+    def _reset_emergency_partial_sell_state_if_needed(self):
+        """하루 1회 분할 청산 제한을 위해 날짜가 바뀌면 상태를 초기화합니다."""
+        try:
+            today = get_korea_time().strftime('%Y%m%d')
+        except Exception:
+            return
+        if self._emergency_partial_sell_date != today:
+            self._emergency_partial_sell_date = today
+            self._emergency_partial_sold_codes = set()
+
+    def _mark_emergency_partial_sell(self, code):
+        self._reset_emergency_partial_sell_state_if_needed()
+        self._emergency_partial_sold_codes.add(code)
+
+    def get_emergency_liquidation_order(self, code):
+        """긴급 청산 조건을 확인해 (수량, 사유)를 반환합니다."""
+        if not getattr(self, 'enable_emergency_liquidation', False):
+            return None
+        if code not in getattr(self.kiwoom, 'balance', {}):
+            return None
+
+        self._reset_emergency_partial_sell_state_if_needed()
+
+        balance = self.kiwoom.balance[code]
+        try:
+            profit_rate = float(balance.get('수익률'))
+        except Exception:
+            return None
+
+        tradable_quantity = int(balance.get('매매가능수량', balance.get('보유수량', 0)) or 0)
+        if tradable_quantity <= 0:
+            return None
+
+        name = self.resolve_stock_name(code)
+        display = f"{name}({code})" if name else code
+
+        if profit_rate <= self.emergency_hard_stop_pct:
+            logger.warning(
+                "긴급 전량 청산 조건 충족: %s 수익률=%.2f%% 기준=%.2f%% 수량=%d",
+                display,
+                profit_rate,
+                self.emergency_hard_stop_pct,
+                tradable_quantity,
+            )
+            return tradable_quantity, 'EMERGENCY_HARD_STOP'
+
+        if profit_rate <= self.emergency_partial_stop_pct and code not in self._emergency_partial_sold_codes:
+            raw_quantity = math.floor(tradable_quantity * self.emergency_partial_sell_ratio)
+            partial_quantity = max(1, raw_quantity)
+            partial_quantity = min(partial_quantity, tradable_quantity)
+            logger.warning(
+                "긴급 분할 청산 조건 충족: %s 수익률=%.2f%% 기준=%.2f%% 비율=%.2f 수량=%d/%d",
+                display,
+                profit_rate,
+                self.emergency_partial_stop_pct,
+                self.emergency_partial_sell_ratio,
+                partial_quantity,
+                tradable_quantity,
+            )
+            return partial_quantity, 'EMERGENCY_PARTIAL_STOP'
+
+        return None
 
     def _get_order_price(self, code, display, primary_key, price_label, fallback_keys=()):
         """주문 가격 조회 시 실시간 호가가 없으면 현재가로 제한적으로 폴백합니다."""
