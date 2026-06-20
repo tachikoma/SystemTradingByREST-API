@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime
 import re
+from typing import Dict, Tuple  # Dict type for index_data
 
 # 프로젝트 루트를 경로에 추가
 project_root = Path(__file__).parent.parent
@@ -89,6 +90,8 @@ def run_walk_forward_backtest(
     start_date: str,
     end_date: str,
     db_name: str = 'backtest_data',
+    index_data: Dict[str, pd.DataFrame] = None,
+    engine_kwargs: dict = None,
 ) -> dict:
     """워크포워드 백테스트 실행
 
@@ -100,6 +103,8 @@ def run_walk_forward_backtest(
         start_date: 백테스트 시작 날짜 (YYYYMMDD)
         end_date: 백테스트 종료 날짜 (YYYYMMDD)
         db_name: DB 이름
+        index_data: 마켓 필터용 인덱스(ETF) 가격 데이터
+        engine_kwargs: BacktestEngine 생성자에 전달할 추가 kwargs
 
     Returns:
         백테스트 결과 딕셔너리 (calculate_results() 형식과 동일)
@@ -126,11 +131,13 @@ def run_walk_forward_backtest(
     symbol_names = {code: info[2] for code, info in availability.items()}
     availability_map = {code: (info[0], info[1]) for code, info in availability.items()}
 
-    engine = BacktestEngine(
-        max_holdings=10,
-        rsi_min_periods=2,
-        symbol_names=symbol_names,
-    )
+    kwargs = dict(engine_kwargs or {})
+    kwargs.setdefault('max_holdings', 10)
+    kwargs.setdefault('rsi_min_periods', 2)
+    kwargs['symbol_names'] = symbol_names
+    kwargs['market_filter_enabled'] = (index_data is not None and len(index_data) > 0)
+    kwargs['index_data'] = index_data or {}
+    engine = BacktestEngine(**kwargs)
 
     logger.info(
         f"워크포워드 백테스트: {start_date} ~ {end_date}, "
@@ -143,6 +150,7 @@ def run_walk_forward_backtest(
         end_date=end_date,
         availability_map=availability_map,
         monthly_universe_map=monthly_snapshots,
+        index_data=index_data,
     )
 
 
@@ -471,8 +479,115 @@ def parse_arguments():
         default='',
         help='출력 파일명에 사용할 시나리오 태그'
     )
-    
+
+    parser.add_argument(
+        '--rsi-sell-mode',
+        type=str,
+        default=None,
+        choices=['above', 'cross'],
+        help='RSI 매도 모드: above(즉시, 기본), cross(하향돌파)'
+    )
+
+    parser.add_argument(
+        '--market-filter',
+        action='store_true',
+        default=False,
+        help='마켓 타이밍 필터 활성화 (KOSPI200/KOSDAQ150 200MA 이상일 때만 매수)'
+    )
+
+    parser.add_argument(
+        '--rsi-buy-threshold',
+        type=float,
+        default=None,
+        help='RSI 매수 임계값 (기본값: 3.0)'
+    )
+
+    parser.add_argument(
+        '--max-holdings',
+        type=int,
+        default=None,
+        help='최대 보유 종목 수 (기본값: 10)'
+    )
+
+    parser.add_argument(
+        '--rsi-sell-threshold',
+        type=float,
+        default=None,
+        help='RSI 매도 임계값 (기본값: 70.0)'
+    )
+
+    parser.add_argument(
+        '--entry-price-filter',
+        action='store_true',
+        default=False,
+        help='진입 가격 필터 활성화 (최근 N일 저점 대비 X%% 이내에서만 매수)'
+    )
+
+    parser.add_argument(
+        '--entry-price-filter-pct',
+        type=float,
+        default=None,
+        help='진입 가격 필터: 최근 저점 대비 최대 거리 % (기본값: 3.0%%)'
+    )
+
+    parser.add_argument(
+        '--entry-price-filter-lookback',
+        type=int,
+        default=None,
+        help='진입 가격 필터: 저점 탐색 기간 (기본값: 5일)'
+    )
+
+    parser.add_argument(
+        '--no-ma20-filter',
+        action='store_true',
+        default=False,
+        help='MA20 > MA60 추세 필터 비활성화'
+    )
+
+    parser.add_argument(
+        '--no-ma200-filter',
+        action='store_true',
+        default=False,
+        help='Close > MA200 추세 필터 비활성화'
+    )
+
+    parser.add_argument(
+        '--signal-strength-positioning',
+        action='store_true',
+        default=False,
+        help='신호 강도 기반 포지셔닝 활성화 (RSI 낮을수록 더 많은 자본 배분)'
+    )
+
     return parser.parse_args()
+
+
+def load_index_data(db_name: str) -> Dict[str, pd.DataFrame]:
+    """DB에서 인덱스(ETF) 가격 데이터 로드
+
+    229200(KOSPI200), 381180(KOSDAQ150) 등 마켓 타이밍 필터용 ETF 데이터를 로드합니다.
+    각 DataFrame은 'date' 인덱스에 'close' 컬럼을 포함합니다.
+    """
+    from util.db_helper import resolve_date_column
+
+    index_codes = ['229200', '381180']
+    index_data = {}
+    for code in index_codes:
+        if not check_table_exist(db_name, code):
+            logger.warning(f"인덱스 코드 {code} 테이블이 DB에 없습니다")
+            continue
+        sql = f"SELECT * FROM `{code}`"
+        cur = execute_sql(db_name, sql)
+        cols = [column[0] for column in cur.description]
+        df = pd.DataFrame.from_records(data=cur.fetchall(), columns=cols)
+        if df.empty:
+            continue
+        date_col = resolve_date_column(df)
+        df = df.set_index(date_col)
+        df.index.name = 'date'
+        df.index = df.index.astype(str)
+        index_data[code] = df
+        logger.info(f"인덱스 데이터 로드: {code} ({len(df)} rows, {df.index[0]} ~ {df.index[-1]})")
+    return index_data
 
 
 def main():
@@ -501,12 +616,41 @@ def main():
     
     # 2) 백테스트 엔진 생성
     # 환경 변수 대상 항목은 BacktestEngine 기본값 또는 .env 값 사용
-    engine = BacktestEngine(
-        max_holdings=10,
-        rsi_min_periods=2,  # RSI 최소 기간 (RSI_PERIOD와 동일)
+    engine_kwargs = dict(
+        max_holdings=args.max_holdings if args.max_holdings is not None else 10,
+        rsi_min_periods=2,
     )
+    if args.rsi_sell_mode:
+        engine_kwargs['rsi_sell_mode'] = args.rsi_sell_mode
+    if args.market_filter:
+        engine_kwargs['market_filter_enabled'] = True
+    if args.rsi_buy_threshold is not None:
+        engine_kwargs['rsi_buy_threshold'] = args.rsi_buy_threshold
+    if args.rsi_sell_threshold is not None:
+        engine_kwargs['rsi_sell_threshold'] = args.rsi_sell_threshold
+    if args.entry_price_filter:
+        engine_kwargs['entry_price_filter_enabled'] = True
+    if args.entry_price_filter_pct is not None:
+        engine_kwargs['entry_price_filter_pct'] = args.entry_price_filter_pct
+    if args.entry_price_filter_lookback is not None:
+        engine_kwargs['entry_price_filter_lookback'] = args.entry_price_filter_lookback
+    if args.no_ma20_filter:
+        engine_kwargs['use_ma20_filter'] = False
+    if args.no_ma200_filter:
+        engine_kwargs['use_ma200_filter'] = False
+    if args.signal_strength_positioning:
+        engine_kwargs['use_signal_strength_positioning'] = True
+    engine = BacktestEngine(**engine_kwargs)
     
-    # 3) 백테스트 실행 - 기간 설정
+    # 3) 인덱스 데이터 로드 (마켓 필터용)
+    index_data = None
+    if args.market_filter:
+        index_data = load_index_data(args.db)
+        if not index_data:
+            logger.warning("인덱스 데이터를 로드할 수 없어 마켓 필터를 비활성화합니다.")
+            engine.market_filter_enabled = False
+    
+    # 4) 백테스트 실행 - 기간 설정
     if args.start:
         # 특정 시작 날짜가 지정된 경우
         start_date = args.start
@@ -523,7 +667,7 @@ def main():
         end_date = args.end if args.end else (db_end_date if db_end_date else datetime.now().strftime('%Y%m%d'))
         logger.info(f"백테스트 기간 설정: {start_date} ~ {end_date} (DB 전체 기간)")
 
-    # 4) 워크포워드 or 일반 백테스트 분기 (기본값: 워크포워드)
+    # 5) 워크포워드 or 일반 백테스트 분기 (기본값: 워크포워드)
     use_walk_forward = not args.no_walk_forward
     if use_walk_forward:
         logger.info("워크포워드 모드로 백테스트를 실행합니다.")
@@ -532,6 +676,8 @@ def main():
             start_date=start_date,
             end_date=end_date,
             db_name=args.db,
+            index_data=index_data,
+            engine_kwargs=engine_kwargs,
         )
         if not results:
             logger.error("워크포워드 백테스트 실패. universe_snapshots / universe_availability 테이블을 확인하세요.")
@@ -544,7 +690,8 @@ def main():
         results = engine.run_backtest(
             price_data=price_data,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            index_data=index_data,
         )
     results['profit_target_percent'] = engine.profit_target_percent
     print_results(results)

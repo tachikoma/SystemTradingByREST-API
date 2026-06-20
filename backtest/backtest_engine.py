@@ -34,7 +34,7 @@ class BacktestEngine:
     """백테스트 실행 엔진"""
 
     DEFAULT_INITIAL_CAPITAL = 10_000_000
-    DEFAULT_RSI_SELL_THRESHOLD = 85.0
+    DEFAULT_RSI_SELL_THRESHOLD = 70.0
     DEFAULT_PROFIT_TARGET_PERCENT = 10.0
     DEFAULT_RSI_BUY_THRESHOLD = 3.0
     DEFAULT_CASH_RESERVE_RATIO = 0.2
@@ -67,13 +67,31 @@ class BacktestEngine:
         rsi_method: str = None,              # env: RSI_METHOD, 기본값: DEFAULT_RSI_METHOD
         rsi_min_periods: int = None,         # None이면 rsi_period 사용
         # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
-        enable_stop_loss: bool = True,      # 가격 손절 비활성화 (최적화 기본값)
+        enable_stop_loss: bool = False,     # 가격 손절 비활성화 (최적화 기본값)
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%)
-        enable_time_stop_loss: bool = True, # 시간 손절 독립 플래그 (최적화 기본값)
+        enable_time_stop_loss: bool = False, # 시간 손절 비활성화 (RSI>70+any-profit sell이 더 효과적)
         time_stop_loss_days: Optional[int] = None,  # env: TIME_STOP_LOSS_DAYS, 기본값: DEFAULT_TIME_STOP_LOSS_DAYS
         slippage_buy: float = None,              # env: SLIPPAGE_BUY, 기본값: DEFAULT_SLIPPAGE_BUY
         slippage_sell: float = None,             # env: SLIPPAGE_SELL, 기본값: DEFAULT_SLIPPAGE_SELL
         symbol_names: Dict[str, str] = None,
+        # RSI 매도 모드 (approach #3): 'above'=RSI>threshold 즉시 매도, 'cross'=RSI 하향 돌파 시 매도
+        rsi_sell_mode: str = 'above',
+        rsi_cross_exit_threshold: float = 50.0,
+        # 마켓 타이밍 필터 (approach #4): {인덱스코드: DataFrame(close 포함)}
+        index_data: Dict[str, pd.DataFrame] = None,
+        market_filter_enabled: bool = False,
+        market_filter_kospi_code: str = '229200',
+        market_filter_kosdaq_code: str = '381180',
+        market_filter_ma_period: int = 200,
+        # 진입 가격 필터: 최근 N일 저점 대비 X% 이내에서만 매수 (mean reversion 확인)
+        entry_price_filter_enabled: bool = False,
+        entry_price_filter_pct: float = 3.0,
+        entry_price_filter_lookback: int = 5,
+        # MA 필터 활성화/비활성화 (approach A): 추세 필터 제거 실험용
+        use_ma20_filter: bool = True,   # MA20 > MA60 조건 사용
+        use_ma200_filter: bool = True,  # Close > MA200 조건 사용
+        # 신호 강도 기반 포지셔닝: RSI가 낮을수록 더 많은 자본 배분
+        use_signal_strength_positioning: bool = False,
     ):
         self.max_holdings = max_holdings
         self.rsi_period = rsi_period
@@ -172,6 +190,30 @@ class BacktestEngine:
         self.slippage_buy  = _resolve_float(slippage_buy,  'SLIPPAGE_BUY',  self.DEFAULT_SLIPPAGE_BUY)
         self.slippage_sell = _resolve_float(slippage_sell, 'SLIPPAGE_SELL', self.DEFAULT_SLIPPAGE_SELL)
 
+        # RSI 매도 모드 (approach #3): env RSI_SELL_MODE 로 오버라이드
+        env_sell_mode = os.getenv('RSI_SELL_MODE', '').strip().lower()
+        self.rsi_sell_mode = env_sell_mode if env_sell_mode in ('above', 'cross') else rsi_sell_mode
+        self.rsi_cross_exit_threshold = rsi_cross_exit_threshold
+
+        # 마켓 타이밍 필터 (approach #4)
+        self.index_data = index_data or {}
+        self.market_filter_enabled = market_filter_enabled
+        self.market_filter_kospi_code = market_filter_kospi_code
+        self.market_filter_kosdaq_code = market_filter_kosdaq_code
+        self.market_filter_ma_period = market_filter_ma_period
+
+        # 진입 가격 필터
+        self.entry_price_filter_enabled = entry_price_filter_enabled
+        self.entry_price_filter_pct = entry_price_filter_pct
+        self.entry_price_filter_lookback = entry_price_filter_lookback
+
+        # MA 필터 토글 (approach A)
+        self.use_ma20_filter = use_ma20_filter
+        self.use_ma200_filter = use_ma200_filter
+
+        # 신호 강도 기반 포지셔닝
+        self.use_signal_strength_positioning = use_signal_strength_positioning
+
         # 포트폴리오 상태
         self.cash = self.initial_capital
         self.symbol_names = symbol_names or {}
@@ -224,6 +266,33 @@ class BacktestEngine:
         
         return df
     
+    def check_market_filter(self, code: str, date: str) -> bool:
+        """마켓 타이밍 필터: 인덱스(ETF)가 200MA 이상일 때만 매수 허용
+
+        index_data에 229200(KOSPI200)과 381180(KOSDAQ150)이 전달되면,
+        각각의 200MA를 계산하여 해당 날짜에 close > 200MA 조건을 충족하는지 확인합니다.
+        코드 분류 없이 모든 종목에 대해 KOSPI200 필터를 적용하고,
+        KOSDAQ150은 추가 필터로 함께 적용합니다.
+        """
+        if not self.market_filter_enabled or not self.index_data:
+            return True
+
+        for idx_code, idx_df in self.index_data.items():
+            if date not in idx_df.index:
+                return False
+            idx = idx_df.index.get_loc(date)
+            if idx < self.market_filter_ma_period:
+                return False
+            close = idx_df.iloc[idx]['close']
+            ma200 = idx_df['close'].iloc[idx - self.market_filter_ma_period:idx].mean()
+            if close <= ma200:
+                logger.debug(
+                    "마켓필터 차단 %s code=%s date=%s idx_close=%d ma200=%.0f",
+                    idx_code, code, date, close, ma200
+                )
+                return False
+        return True
+
     def check_buy_signal(
         self, 
         code: str, 
@@ -289,12 +358,25 @@ class BacktestEngine:
             # 가격 변동률 계산
             price_diff = (close - close_2days_ago) / close_2days_ago * 100
             
+            # 진입 가격 필터: 최근 N일 저점 대비 X% 이내인지 확인
+            if self.entry_price_filter_enabled:
+                lookback_start = max(0, idx - self.entry_price_filter_lookback)
+                recent_low = df.iloc[lookback_start:idx + 1]['close'].min()
+                if close > recent_low * (1 + self.entry_price_filter_pct / 100):
+                    logger.debug(
+                        "진입가격필터 차단 %s date=%s close=%d recent_low=%.0f filter_pct=%.1f%%",
+                        display, date, close, recent_low, self.entry_price_filter_pct
+                    )
+                    return False, None
+
             # 매수 조건 확인
-            # 1) ma20 > ma60 (단기 이평 > 장기 이평)
-            # 2) close > ma200 (장기 추세 상승)
+            # 1) [선택] ma20 > ma60 (단기 이평 > 장기 이평, use_ma20_filter=True 시)
+            # 2) [선택] close > ma200 (장기 추세 상승, use_ma200_filter=True 시)
             # 3) RSI < rsi_buy_threshold (과매도)
             # 4) 2일 전 대비 price_drop_threshold 이상 하락
-            if ma20 > ma60 and close > ma200 and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
+            ma20_ok = (not self.use_ma20_filter) or (ma20 > ma60)
+            ma200_ok = (not self.use_ma200_filter) or (close > ma200)
+            if ma20_ok and ma200_ok and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
                 return True, close
             
             return False, None
@@ -354,12 +436,23 @@ class BacktestEngine:
             # RSIStrategy와 동일: math.ceil() 적용 (가격은 정수)
             breakeven_price = math.ceil(avg_purchase_price * self.sell_fee_rate)
 
-            # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
-            target_price = math.ceil(breakeven_price * (1 + (self.profit_target_percent / 100)))
-            
-            # 매도 조건 확인: RSIStrategy와 동일하게 당일 RSI만 확인
-            if current_rsi > self.rsi_sell_threshold and close >= target_price:
-                return True, close
+            # 매도 조건 확인
+            if self.rsi_sell_mode == 'cross':
+                # RSI 하향 돌파 매도: RSI가 threshold 위로 갔다가 exit 이하로 내려올 때
+                prev_rsi_valid = not np.isnan(prev_rsi)
+                rsi_was_high = prev_rsi_valid and prev_rsi > self.rsi_sell_threshold
+                rsi_dropped = current_rsi < self.rsi_cross_exit_threshold
+                if rsi_was_high and rsi_dropped and close >= breakeven_price:
+                    logger.info(
+                        "RSI 하향돌파 매도 %s date=%s prev_rsi=%.2f curr_rsi=%.2f close=%d breakeven=%d",
+                        display, date, prev_rsi, current_rsi, close, breakeven_price
+                    )
+                    self._last_sell_reason = "RSI_CROSS"
+                    return True, close
+            else:
+                # RSI 과매수 즉시 매도: RSI가 threshold 초과 시 breakeven 이상이면 매도
+                if current_rsi > self.rsi_sell_threshold and close >= breakeven_price:
+                    return True, close
             
             return False, None
             
@@ -584,6 +677,7 @@ class BacktestEngine:
         end_date: str = None,
         availability_map: Dict[str, tuple] = None,
         monthly_universe_map: Dict[str, list] = None,
+        index_data: Dict[str, pd.DataFrame] = None,
     ) -> Dict:
         """백테스트 실행
         
@@ -597,6 +691,8 @@ class BacktestEngine:
             monthly_universe_map: {YYYYMM: [code1, code2, ...]} 딕셔너리.
                 지정하면 해당 월 스냅샷에 포함된 종목만 매수 신호 검토 (liquidity_rank 순서 유지).
                 진짜 월별 워크포워드 유니버스 적용 시 사용합니다.
+            index_data: {인덱스코드: DataFrame(close포함)} 딕셔너리.
+                지정하면 market_filter_enabled=True일 때 인덱스 200MA 이상에서만 매수 허용.
             
         Returns:
             백테스트 결과 딕셔너리
@@ -606,6 +702,14 @@ class BacktestEngine:
             logger.info("워크포워드 모드: 종목별 데이터 가용 기간 필터 적용")
         if monthly_universe_map:
             logger.info("워크포워드 모드: 월별 유니버스 스냅샷 필터 적용")
+        if index_data is not None:
+            # run_backtest() 호출 시 전달된 index_data를 self.index_data에 저장
+            self.index_data = index_data
+        if self.market_filter_enabled and self.index_data:
+            logger.info(
+                "마켓 타이밍 필터 적용: %d개 인덱스 200MA 필터",
+                len(self.index_data),
+            )
         
         # 초기화
         self.cash = self.initial_capital
@@ -794,6 +898,10 @@ class BacktestEngine:
                         if not (earliest <= date_yyyymm <= latest):
                             continue
                     
+                    # 마켓 타이밍 필터 (approach #4): 인덱스 200MA 이상일 때만 매수
+                    if not self.check_market_filter(code, date):
+                        continue
+                    
                     buy_signal, buy_price = self.check_buy_signal(
                         code, date, df, current_holdings
                     )
@@ -813,21 +921,35 @@ class BacktestEngine:
                     except Exception:
                         cap_amount = self.initial_capital * self.max_position_ratio
 
-                    budget_per_stock = investable_cash / available_slots
-                    if cap_amount is not None:
-                        budget_per_stock = min(budget_per_stock, cap_amount)
+                    if self.use_signal_strength_positioning and len(buy_candidates) > 1:
+                        strengths = []
+                        for code, _ in buy_candidates:
+                            current_rsi = processed_data[code].loc[date, 'rsi']
+                            strength = max(1.0, self.rsi_buy_threshold - current_rsi)
+                            strengths.append(strength)
+                        total_strength = sum(strengths)
+                        budgets = [investable_cash * s / total_strength for s in strengths]
+                        if cap_amount is not None:
+                            max_total = cap_amount * len(buy_candidates)
+                            if max_total < investable_cash:
+                                budgets = [b * max_total / investable_cash for b in budgets]
+                    else:
+                        b = investable_cash / len(buy_candidates)
+                        if cap_amount is not None:
+                            b = min(b, cap_amount)
+                        budgets = [b] * len(buy_candidates)
 
                     # 매수 체결: 설정에 따라 T+1(next_open) 또는 당일 종가(same_day_close)
                     if next_date and buy_execution_mode == 'next_open':
-                        for code, price in buy_candidates:
+                        for (code, price), budget in zip(buy_candidates, budgets):
                             pending_orders[next_date].append({
                                 'type': 'buy',
                                 'code': code,
-                                'budget': budget_per_stock,
+                                'budget': budget,
                             })
                     else:
-                        for code, price in buy_candidates:
-                            self.execute_buy(code, price, date, budget_per_stock)
+                        for (code, price), budget in zip(buy_candidates, budgets):
+                            self.execute_buy(code, price, date, budget)
             
             # 3) 일일 포트폴리오 가치 기록
             portfolio_value = self.calculate_portfolio_value(date, processed_data)
