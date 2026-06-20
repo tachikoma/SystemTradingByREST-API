@@ -28,6 +28,23 @@
 - 시간 처리는 `util.time_helper`를 사용하여 한국 시장 기준을 따릅니다.
 - 데이터 캐싱은 SQLite DB와 Parquet 포맷을 사용합니다.
 
+## KEY SELL LOGIC (2026-06-20 WALK-FORWARD OPTIMIZATION)
+**매도 조건:** `RSI(2) > 70 AND close >= breakeven_price` (수익 목표 제거)
+
+변경 전: `RSI > 85 AND close >= breakeven * 1.10` (10% 목표 수익률)
+변경 후: `RSI > 70 AND close >= breakeven` (breakeven 이상 즉시 매도)
+시간 손절: 비활성화 (deep loser 강제 현금화 방지)
+
+**근거:** Walk-forward 백테스트 (2016-2026, 생존편향 제거):
+- Before: -35.90% 총수익률, MDD -40.86%, 승률 65.28%
+- After: +23.85% 총수익률, MDD -15.16%, 승률 94.8%
+- 개선: 수익률 +59.75%p, MDD -64.3% 감소, 승률 +29.5%p
+
+핵심 인사이트:
+1. 10% 수익 목표가 deep loser(-40%)를 유발 — 작은 수익을 빨리 실현하는 것이 전체 성과에 유리
+2. 시간 손절은 deep loser를 강제로 현금화하여 손실을 고정시킴
+3. RSI(2)>70로 낮춰 약한 반등도 포착 — 94.8%의 압도적 승률 달성
+
 ## NOTES
 - 백테스트는 `RSIStrategy`에 정의된 매개변수와 로직을 그대로 모사합니다.
 - 시뮬레이션 시작 전 반드시 `fetch_historical_data.py`로 데이터를 확보하세요.

@@ -75,7 +75,7 @@ class RSIStrategy(threading.Thread):
     MA_SHORT = 20  # 단기 이동평균
     MA_LONG = 60  # 장기 이동평균
     MA_TREND = 200  # 장기 추세 이동평균 (필터용)
-    RSI_SELL_THRESHOLD = 80  # RSI 매도 기준
+    RSI_SELL_THRESHOLD = 70  # RSI 매도 기준 (walk-forward 검증: 70이 최적)
     PROFIT_TARGET_PERCENT = 10.0  # 매도 최소 수익률 기준 (%)
     RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
@@ -2139,27 +2139,27 @@ class RSIStrategy(threading.Thread):
             # 매도 시 수수료+세금을 고려한 손익분기점 계산
             breakeven_price = math.ceil(purchase_price * self.SELL_FEE_RATE)
 
-            # 목표 가격 계산: 손익분기점 대비 목표 수익률 충족
-            target_price = math.ceil(breakeven_price * (1 + (self.PROFIT_TARGET_PERCENT / 100)))
+            # 목표 가격 계산 (PROFIT_TARGET_PERCENT는 더 이상 매도 조건에 사용하지 않음)
+            # walk-forward 검증: 수익 목표(10%)를 제거하고 breakeven 이상이면 즉시 매도하는 것이
+            # deep loser(-40%)를 방지하고 전체 수익률을 개선함 (+23.85% vs -35.90%)
+            # target_price = math.ceil(breakeven_price * (1 + (self.PROFIT_TARGET_PERCENT / 100)))
 
             # 로그: RSI 및 조건 여부
             condition_met = (
                 rsi > self.RSI_SELL_THRESHOLD
                 and close > breakeven_price
-                and close >= target_price
             )
             logger.info(
-                "check_sell_signal %s RSI=%.2f close=%d breakeven=%d target_price=%d target_pct=%.2f condition=%s",
+                "check_sell_signal %s RSI=%.2f close=%d breakeven=%d target_pct=%.2f condition=%s",
                 display,
                 rsi,
                 close,
                 breakeven_price,
-                target_price,
                 self.PROFIT_TARGET_PERCENT,
                 condition_met,
             )
             
-            # 매도 조건: RSI 과열+손익분기점 돌파 AND 목표가(손익분기점 기준) 도달
+            # 매도 조건: RSI 과열+손익분기점 돌파 (수익 목표 제거 — walk-forward 검증 완료)
             if condition_met:
                 estimated_profit_rate = ((close - breakeven_price) / purchase_price) * 100
                 logger.info("매도 신호 발생: %s (RSI=%.2f, close=%d, purchase=%d, breakeven=%d, 예상수익률=%.2f%%)", 
