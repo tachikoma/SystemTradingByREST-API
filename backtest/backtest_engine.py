@@ -92,6 +92,8 @@ class BacktestEngine:
         use_ma200_filter: bool = True,  # Close > MA200 조건 사용
         # 신호 강도 기반 포지셔닝: RSI가 낮을수록 더 많은 자본 배분
         use_signal_strength_positioning: bool = False,
+        # 신호 강도 지수 승수: 1.0=선형, 2.0=제곱, 3.0=세제곱 (강한 과매도에 더 집중)
+        signal_strength_exponent: float = 1.0,
     ):
         self.max_holdings = max_holdings
         self.rsi_period = rsi_period
@@ -213,6 +215,7 @@ class BacktestEngine:
 
         # 신호 강도 기반 포지셔닝
         self.use_signal_strength_positioning = use_signal_strength_positioning
+        self.signal_strength_exponent = signal_strength_exponent
 
         # 포트폴리오 상태
         self.cash = self.initial_capital
@@ -925,7 +928,8 @@ class BacktestEngine:
                         strengths = []
                         for code, _ in buy_candidates:
                             current_rsi = processed_data[code].loc[date, 'rsi']
-                            strength = max(1.0, self.rsi_buy_threshold - current_rsi)
+                            raw_strength = (self.rsi_buy_threshold - current_rsi)
+                            strength = max(1.0, raw_strength) ** self.signal_strength_exponent
                             strengths.append(strength)
                         total_strength = sum(strengths)
                         budgets = [investable_cash * s / total_strength for s in strengths]

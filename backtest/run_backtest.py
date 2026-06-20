@@ -558,6 +558,20 @@ def parse_arguments():
         help='신호 강도 기반 포지셔닝 활성화 (RSI 낮을수록 더 많은 자본 배분)'
     )
 
+    parser.add_argument(
+        '--signal-strength-exponent',
+        type=float,
+        default=None,
+        help='신호 강도 지수 승수 (기본값: 1.0=선형, 2.0=제곱, 3.0=세제곱)'
+    )
+
+    parser.add_argument(
+        '--enable-time-stop-loss',
+        action='store_true',
+        default=False,
+        help='시간 손절 활성화 (90일 초과 보유 시 청산)'
+    )
+
     return parser.parse_args()
 
 
@@ -640,6 +654,10 @@ def main():
         engine_kwargs['use_ma200_filter'] = False
     if args.signal_strength_positioning:
         engine_kwargs['use_signal_strength_positioning'] = True
+    if args.signal_strength_exponent is not None:
+        engine_kwargs['signal_strength_exponent'] = args.signal_strength_exponent
+    if args.enable_time_stop_loss:
+        engine_kwargs['enable_time_stop_loss'] = True
     engine = BacktestEngine(**engine_kwargs)
     
     # 3) 인덱스 데이터 로드 (마켓 필터용)
