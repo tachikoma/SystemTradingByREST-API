@@ -76,7 +76,7 @@ class RSIStrategy(threading.Thread):
     MA_LONG = 60  # 장기 이동평균
     MA_TREND = 200  # 장기 추세 이동평균 (필터용)
     RSI_SELL_THRESHOLD = 70  # RSI 매도 기준 (walk-forward 검증: 70이 최적)
-    PROFIT_TARGET_PERCENT = 10.0  # 매도 최소 수익률 기준 (%)
+    PROFIT_TARGET_PERCENT = 10.0  # (deprecated) 더 이상 매도 조건에 사용되지 않음. breakeven 이상 즉시 매도
     RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
     TIME_STOP_LOSS_DAYS = 90  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도 (최적화: 90일)
