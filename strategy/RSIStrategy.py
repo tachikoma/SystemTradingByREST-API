@@ -76,10 +76,11 @@ class RSIStrategy(threading.Thread):
     MA_LONG = 60  # 장기 이동평균
     MA_TREND = 200  # 장기 추세 이동평균 (필터용)
     RSI_SELL_THRESHOLD = 70  # RSI 매도 기준 (walk-forward 검증: 70이 최적)
-    PROFIT_TARGET_PERCENT = 10.0  # (deprecated) 더 이상 매도 조건에 사용되지 않음. breakeven 이상 즉시 매도
+    PROFIT_TARGET_PERCENT = 0.0  # (deprecated) 더 이상 매도 조건에 사용되지 않음. breakeven 이상 즉시 매도 (walk-forward 검증: 수익 목표 0%가 최적)
     RSI_BUY_THRESHOLD = 3  # RSI 매수 기준 (최적화: 5→3)
     PRICE_DROP_THRESHOLD = -5.0  # 가격 하락 기준 (%) (최적화: -2→-5)
-    TIME_STOP_LOSS_DAYS = 90  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도 (최적화: 90일)
+    TIME_STOP_LOSS_DAYS = 180  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도 (walk-forward 검증: 180일이 최적, MDD -35.39%)
+    USE_MA20_FILTER = False  # MA20 > MA60 추세 필터 (walk-forward v2: OFF가 최적, +77.11% / MDD -22.85%)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
     MORNING_FALLBACK_GAP_UP_THRESHOLD = 3.0  # 오전 fallback 갭업 차단 기준 (%) — 이 이상 갭업이면 매수 보류
     REALTIME_MAX_CODES = int(os.getenv('REALTIME_MAX_CODES', '100'))  # 실시간 등록 최대 종목 수 (WebSocket API 제한)
@@ -87,7 +88,7 @@ class RSIStrategy(threading.Thread):
     POLLING_RATE_LIMIT = 0.2  # 종목당 REST 호출 간격 (초) — rate limit 방지
     POLLING_LOG_INTERVAL = 50  # N종목마다 폴링 진행 로그 출력
     # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (Wilder/EWMA)
-    RSI_METHOD = 'cutler'
+    RSI_METHOD = 'wilder'  # 백테스트(walk-forward v2/v3, +47.96%)와 동일한 Wilder RSI 사용
     
     def __init__(self, kiwoom, universe_cache_mode='on_demand'):
         threading.Thread.__init__(self)
@@ -278,6 +279,13 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
 
+        try:
+            v = os.getenv('USE_MA20_FILTER')
+            if v is not None:
+                self.USE_MA20_FILTER = v.lower() in ('1', 'true', 'yes')
+        except Exception:
+            pass
+
         # 단일 종목 최대 비중 비율 (예: 0.05 또는 5)
         try:
             v = os.getenv('MAX_POSITION_RATIO')
@@ -291,8 +299,8 @@ class RSIStrategy(threading.Thread):
         except Exception:
             self.MAX_POSITION_RATIO = 0.05
 
-        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s",
-                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS)
+        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s TIME_STOP_LOSS_DAYS=%s USE_MA20_FILTER=%s",
+                    self.RSI_SELL_THRESHOLD, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.TIME_STOP_LOSS_DAYS, self.USE_MA20_FILTER)
 
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
@@ -478,6 +486,9 @@ class RSIStrategy(threading.Thread):
                         applied.append(ku)
                     elif ku == 'TIME_STOP_LOSS_DAYS':
                         self.TIME_STOP_LOSS_DAYS = int(new)
+                        applied.append(ku)
+                    elif ku == 'USE_MA20_FILTER':
+                        self.USE_MA20_FILTER = str(new).lower() in ('1', 'true', 'yes')
                         applied.append(ku)
                     elif ku == 'MORNING_FALLBACK_GAP_UP_THRESHOLD':
                         self.MORNING_FALLBACK_GAP_UP_THRESHOLD = float(new)
@@ -2531,8 +2542,9 @@ class RSIStrategy(threading.Thread):
             return
 
         # (3)매수 신호 확인(조건에 부합하면 주문 접수)
-        # 조건: 단기 상승 추세 + 장기 상승 추세 + RSI 과매도 + 단기 하락
-        if ma20 > ma60 and close > ma200 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD:
+        # 조건: [선택: MA20>MA60] + 장기 상승 추세 + RSI 과매도 + 단기 하락
+        ma20_ok = (not self.USE_MA20_FILTER) or (ma20 > ma60)
+        if ma20_ok and close > ma200 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD:
             # (4)이미 보유한 종목, 매수 주문 접수한 종목의 합이 보유 가능 최대치라면 더 이상 매수 불가하므로 종료
             if (self.get_balance_count() + self.get_buy_order_count()) >= self.MAX_HOLDINGS:
                 return
