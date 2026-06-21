@@ -163,3 +163,4 @@ cache/
 !.omo/drafts/
 !.omo/evidence/
 !.omo/plans/
+.opencode/
