@@ -268,7 +268,11 @@ def print_results(results: dict):
     logger.info(f"총 수익:            {results['final_value'] - results['initial_capital']:>15,.0f} 원")
     logger.info(f"총 수익률:          {results['total_return']:>15.2f} %")
     logger.info(f"연환산 수익률:      {results['annual_return']:>15.2f} %")
-    logger.info(f"매도 익절 기준:      {results['profit_target_percent']:>15.2f} %")
+    pt = results.get('profit_target_percent', 0.0)
+    if pt is not None and pt > 0:
+        logger.info(f"매도 익절 기준:      {pt:>15.2f} %")
+    else:
+        logger.info(f"매도 조건:           {'breakeven 즉시 매도(PT=0)':>15s}")
     logger.info(f"샤프 비율:          {results['sharpe_ratio']:>15.2f}")
     logger.info(f"MDD:                {results['mdd']:>15.2f} %")
     logger.info("-"*60)
@@ -541,7 +545,7 @@ def parse_arguments():
         '--entry-price-filter-pct',
         type=float,
         default=None,
-        help='진입 가격 필터: 최근 저점 대비 최대 거리 % (기본값: 3.0%%)'
+        help='진입 가격 필터: 최근 저점 대비 최대 거리 %% (기본값: 3.0%%)'
     )
 
     parser.add_argument(
@@ -583,21 +587,21 @@ def parse_arguments():
         '--enable-time-stop-loss',
         action='store_true',
         default=False,
-        help='시간 손절 활성화 (기본 90일, --time-stop-loss-days 로 변경 가능)'
+        help='시간 손절 활성화 (기본 180일, --time-stop-loss-days 로 변경 가능)'
     )
 
     parser.add_argument(
         '--time-stop-loss-days',
         type=int,
         default=None,
-        help='시간 손절 기준일 (기본: 90일)'
+        help='시간 손절 기준일 (기본: 180일)'
     )
 
     parser.add_argument(
         '--profit-target-percent',
         type=float,
         default=None,
-        help='최소 수익률 조건 (설정 시 이 수익률 이상에서만 RSI 매도, 기본: 미사용)'
+        help='최소 수익률 조건 (기본: 0.0=breakeven 이상 즉시 매도, walk-forward 검증: 0%%가 최적)'
     )
 
     return parser.parse_args()
