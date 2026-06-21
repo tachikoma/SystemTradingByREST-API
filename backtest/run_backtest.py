@@ -496,6 +496,20 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        '--regime-filter',
+        action='store_true',
+        default=False,
+        help='레짐 필터 활성화 (KOSPI 지수 MA 이상일 때만 매수, 하락장에서 진입 회피)'
+    )
+
+    parser.add_argument(
+        '--regime-ma-period',
+        type=int,
+        default=120,
+        help='레짐 필터 이동평균 기간 (기본값: 120일)'
+    )
+
+    parser.add_argument(
         '--rsi-buy-threshold',
         type=float,
         default=None,
@@ -569,7 +583,21 @@ def parse_arguments():
         '--enable-time-stop-loss',
         action='store_true',
         default=False,
-        help='시간 손절 활성화 (90일 초과 보유 시 청산)'
+        help='시간 손절 활성화 (기본 90일, --time-stop-loss-days 로 변경 가능)'
+    )
+
+    parser.add_argument(
+        '--time-stop-loss-days',
+        type=int,
+        default=None,
+        help='시간 손절 기준일 (기본: 90일)'
+    )
+
+    parser.add_argument(
+        '--profit-target-percent',
+        type=float,
+        default=None,
+        help='최소 수익률 조건 (설정 시 이 수익률 이상에서만 RSI 매도, 기본: 미사용)'
     )
 
     return parser.parse_args()
@@ -638,6 +666,9 @@ def main():
         engine_kwargs['rsi_sell_mode'] = args.rsi_sell_mode
     if args.market_filter:
         engine_kwargs['market_filter_enabled'] = True
+    if args.regime_filter:
+        engine_kwargs['regime_filter_enabled'] = True
+        engine_kwargs['regime_ma_period'] = args.regime_ma_period
     if args.rsi_buy_threshold is not None:
         engine_kwargs['rsi_buy_threshold'] = args.rsi_buy_threshold
     if args.rsi_sell_threshold is not None:
@@ -658,14 +689,18 @@ def main():
         engine_kwargs['signal_strength_exponent'] = args.signal_strength_exponent
     if args.enable_time_stop_loss:
         engine_kwargs['enable_time_stop_loss'] = True
+    if args.time_stop_loss_days is not None:
+        engine_kwargs['time_stop_loss_days'] = args.time_stop_loss_days
+    if args.profit_target_percent is not None:
+        engine_kwargs['profit_target_percent'] = args.profit_target_percent
     engine = BacktestEngine(**engine_kwargs)
     
-    # 3) 인덱스 데이터 로드 (마켓 필터용)
+    # 3) 인덱스 데이터 로드 (마켓/레짐 필터용)
     index_data = None
-    if args.market_filter:
+    if args.market_filter or args.regime_filter:
         index_data = load_index_data(args.db)
         if not index_data:
-            logger.warning("인덱스 데이터를 로드할 수 없어 마켓 필터를 비활성화합니다.")
+            logger.warning("인덱스 데이터를 로드할 수 없어 필터를 비활성화합니다.")
             engine.market_filter_enabled = False
     
     # 4) 백테스트 실행 - 기간 설정

@@ -83,6 +83,9 @@ class BacktestEngine:
         market_filter_kospi_code: str = '229200',
         market_filter_kosdaq_code: str = '381180',
         market_filter_ma_period: int = 200,
+        # 레짐 필터 (B+C): KOSPI 지수 MA 기반 시장 국면 — 하락장에서 진입 회피
+        regime_filter_enabled: bool = False,
+        regime_ma_period: int = 120,
         # 진입 가격 필터: 최근 N일 저점 대비 X% 이내에서만 매수 (mean reversion 확인)
         entry_price_filter_enabled: bool = False,
         entry_price_filter_pct: float = 3.0,
@@ -204,6 +207,10 @@ class BacktestEngine:
         self.market_filter_kosdaq_code = market_filter_kosdaq_code
         self.market_filter_ma_period = market_filter_ma_period
 
+        # 레짐 필터 (B+C): KOSPI MA 기반 시장 국면 — 하락장에서 진입 회피
+        self.regime_filter_enabled = regime_filter_enabled
+        self.regime_ma_period = regime_ma_period
+
         # 진입 가격 필터
         self.entry_price_filter_enabled = entry_price_filter_enabled
         self.entry_price_filter_pct = entry_price_filter_pct
@@ -294,6 +301,34 @@ class BacktestEngine:
                     idx_code, code, date, close, ma200
                 )
                 return False
+        return True
+
+    def check_regime_filter(self, code: str, date: str) -> bool:
+        """레짐 필터 (B+C): KOSPI 지수가 이동평균 이상일 때만 매수 허용
+
+        기존 market_filter (ETF MA200)와 별개로, configurable MA period로
+        시장 국면(상승장/하락장)을 판단합니다. 하락장(close < MA)에서는 매수 차단.
+        """
+        if not self.regime_filter_enabled or not self.index_data:
+            return True
+
+        kospi_code = self.market_filter_kospi_code
+        idx_df = self.index_data.get(kospi_code)
+        if idx_df is None:
+            return True
+        if date not in idx_df.index:
+            return False
+        idx = idx_df.index.get_loc(date)
+        if idx < self.regime_ma_period:
+            return False
+        close = idx_df.iloc[idx]['close']
+        ma = idx_df['close'].iloc[idx - self.regime_ma_period:idx].mean()
+        if close <= ma:
+            logger.debug(
+                "레짐필터 차단 %s code=%s date=%s idx_close=%d ma%d=%.0f",
+                kospi_code, code, date, close, self.regime_ma_period, ma
+            )
+            return False
         return True
 
     def check_buy_signal(
@@ -455,6 +490,11 @@ class BacktestEngine:
             else:
                 # RSI 과매수 즉시 매도: RSI가 threshold 초과 시 breakeven 이상이면 매도
                 if current_rsi > self.rsi_sell_threshold and close >= breakeven_price:
+                    # profit_target_percent > 0 이면 최소 수익 조건으로 사용
+                    if self.profit_target_percent is not None and self.profit_target_percent > 0:
+                        profit_pct = (close - avg_purchase_price) / avg_purchase_price * 100
+                        if profit_pct < self.profit_target_percent:
+                            return False, None
                     return True, close
             
             return False, None
@@ -903,6 +943,10 @@ class BacktestEngine:
                     
                     # 마켓 타이밍 필터 (approach #4): 인덱스 200MA 이상일 때만 매수
                     if not self.check_market_filter(code, date):
+                        continue
+
+                    # 레짐 필터 (B+C): KOSPI 지수 MA 이상일 때만 매수
+                    if not self.check_regime_filter(code, date):
                         continue
                     
                     buy_signal, buy_price = self.check_buy_signal(

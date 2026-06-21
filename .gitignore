@@ -156,3 +156,4 @@ run
 cache/
 
 .env_approvals/
+.omo

@@ -1,7 +1,7 @@
 # PROJECT KNOWLEDGE BASE
 
-**생성:** 2026-06-20 19:33 KST
-**Commit:** `8e7ba18` (`feature/new-exit`)
+**생성:** 2026-06-20 21:57 KST
+**Commit:** `7e561e7` (`feature/new-exit`)
 **Stack:** Python 3.11+, Poetry, Kiwoom REST API + WebSocket, SQLite, pytest
 
 ## OVERVIEW
