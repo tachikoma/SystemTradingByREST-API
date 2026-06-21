@@ -2,27 +2,28 @@
 
 RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를 수행하는 프레임워크입니다.
 
-## 🎯 최적 전략 적용 (2026-01-01 업데이트)
+## ⚠️ 주요 변경사항 (2026-06-20 walk-forward 검증)
 
-**현재 적용된 전략: 기존 RSI + 현금 20% + 진입 조건 강화**
+**매도 조건이 변경되었습니다.**
+- 변경 전: `RSI > 85 AND close >= breakeven * 1.10` (10% 목표 수익률)
+- 변경 후: `RSI > 70 AND close >= breakeven` (수익 목표 제거, breakeven 이상 즉시 매도)
+
+이 변경으로 deep loser(-40%) 방지 및 전체 수익률이 개선되었습니다.
+자세한 내용은 `strategy/AGENTS.md` 및 `backtest/AGENTS.md`를 참고하세요.
+
+## 🎯 최적 전략 적용 (2026-01-01, 이전)
+
+**과거 최적화 결과 (walk-forward 검증 이전):**
 
 ```python
 BacktestEngine(
-    initial_capital=10_000_000,   # 초기 자본금 (env: INITIAL_CAPITAL)
-    cash_reserve_ratio=0.2,       # 현금 20% 유지
-    rsi_sell_threshold=85,        # 매도 기준 강화
-    rsi_buy_threshold=3,          # 5 → 3 (더 강한 과매도)
-    price_drop_threshold=-5.0,    # -2% → -5% (더 큰 하락)
-    rsi_method='wilder',          # 현재 기본 RSI 방식
-    time_stop_loss_days=90,       # 90일 초과 보유 시 청산
+    initial_capital=10_000_000,
+    cash_reserve_ratio=0.2,
+    rsi_sell_threshold=85,        # walk-forward 검증 후 70으로 변경
+    rsi_buy_threshold=3,
+    price_drop_threshold=-5.0,
 )
 ```
-
-**성과 (2016-2025, 9.7년):**
-- 연수익률: **25.53%** (기존 21.71% 대비 +3.82%p)
-- MDD: **-49.35%** (기존 -55.15% 대비 +5.80%p 개선)
-- Sharpe: **0.98** (기존 0.84 대비 +0.14)
-- 위험조정수익: **0.5175** (기존 0.3937 대비 +31% 개선)
 
 자세한 내용: [MDD_REDUCTION_FINAL_RECOMMENDATION.md](MDD_REDUCTION_FINAL_RECOMMENDATION.md)
 
@@ -93,7 +94,7 @@ engine = BacktestEngine(
     ma_short=20,                  # 단기 이동평균
     ma_long=60,                   # 장기 이동평균
     cash_reserve_ratio=0.2,       # 현금 보유 비율
-    rsi_sell_threshold=85,        # RSI 매도 기준
+    rsi_sell_threshold=70,        # RSI 매도 기준 (walk-forward 검증: 70이 최적)
     rsi_buy_threshold=3,          # RSI 매수 기준
     price_drop_threshold=-5.0,    # 가격 하락 기준 (%)
     rsi_method='wilder',          # RSI 계산 방식
@@ -127,9 +128,10 @@ print(f"MDD: {results['mdd']:.2f}%")
 5. 최대 보유 종목 수 미만
 6. **현금 20% 보유** (총 자본의 80%만 투자) ⭐
 
-**청산 조건 (매도):**
-1. **RSI > 80** (과매수 상태)
-2. **현재가 > 손익분기점** (수수료+세금 포함)
+**청산 조건 (매도) — walk-forward 검증 (2026-06-20):**
+1. **RSI > 70** (과매수 상태, 기존 80→70)
+2. **현재가 > 손익분기점** (수수료+세금 포함, breakeven 이상 즉시 매도)
+3. ~~목표 수익률(10%) 조건 제거~~ — 수익 목표가 deep loser를 유발하여 제거함
 
 ⭐ 표시: 최적화를 통해 변경된 파라미터
 
