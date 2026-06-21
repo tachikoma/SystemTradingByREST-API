@@ -4,7 +4,7 @@ RSI 전략 백테스트 엔진
 RSIStrategy의 매매 로직을 재현하여 과거 데이터로 백테스트를 수행합니다.
 
 주의: 
-- RSI 계산 방식은 RSIStrategy와 동일하게 'cutler' (SMA) 또는 'wilder' (EWMA) 선택 가능
+- RSI 계산 방식은 RSIStrategy와 동일: 기본값 'wilder' (EWMA), 환경변수 RSI_METHOD로 변경 가능
 - 거래 비용 계산은 RSIStrategy와 동일: BUY_FEE_RATE, SELL_FEE_RATE 분리 적용
 - 현금 보유 비율(CASH_RESERVE_RATIO) 적용: 투자 가능 금액의 20%를 현금으로 유지
 """
@@ -35,7 +35,7 @@ class BacktestEngine:
 
     DEFAULT_INITIAL_CAPITAL = 10_000_000
     DEFAULT_RSI_SELL_THRESHOLD = 70.0
-    DEFAULT_PROFIT_TARGET_PERCENT = 10.0
+    DEFAULT_PROFIT_TARGET_PERCENT = 0.0
     DEFAULT_RSI_BUY_THRESHOLD = 3.0
     DEFAULT_CASH_RESERVE_RATIO = 0.2
     DEFAULT_COMMISSION_RATE_MOCK = 0.0035
@@ -43,7 +43,7 @@ class BacktestEngine:
     DEFAULT_TAX_RATE_MOCK = 0.0000
     DEFAULT_TAX_RATE_REAL = 0.0020
     DEFAULT_RSI_METHOD = 'wilder'
-    DEFAULT_TIME_STOP_LOSS_DAYS = 90
+    DEFAULT_TIME_STOP_LOSS_DAYS = 180
     DEFAULT_SLIPPAGE_BUY = 0.002   # 0.2% 매수 슬리피지 (체결 불리)
     DEFAULT_SLIPPAGE_SELL = 0.002  # 0.2% 매도 슬리피지 (체결 불리)
     
@@ -66,10 +66,10 @@ class BacktestEngine:
         tax_rate: float = None,              # env: TRADING_TAX_PERCENT_REAL, 기본값: 실전 기본 거래세
         rsi_method: str = None,              # env: RSI_METHOD, 기본값: DEFAULT_RSI_METHOD
         rsi_min_periods: int = None,         # None이면 rsi_period 사용
-        # 손절 파라미터 (백테스트 결과: 손절 없음이 최고 성능)
-        enable_stop_loss: bool = False,     # 가격 손절 비활성화 (최적화 기본값)
+        # 손절 파라미터
+        enable_stop_loss: bool = False,     # 가격 손절 비활성화
         price_stop_loss_pct: float = -20.0,  # 가격 손절 기준 (%)
-        enable_time_stop_loss: bool = False, # 시간 손절 비활성화 (RSI>70+any-profit sell이 더 효과적)
+        enable_time_stop_loss: bool = True,  # 시간 손절 활성화 (180일 env 기본값)
         time_stop_loss_days: Optional[int] = None,  # env: TIME_STOP_LOSS_DAYS, 기본값: DEFAULT_TIME_STOP_LOSS_DAYS
         slippage_buy: float = None,              # env: SLIPPAGE_BUY, 기본값: DEFAULT_SLIPPAGE_BUY
         slippage_sell: float = None,             # env: SLIPPAGE_SELL, 기본값: DEFAULT_SLIPPAGE_SELL
@@ -91,12 +91,32 @@ class BacktestEngine:
         entry_price_filter_pct: float = 3.0,
         entry_price_filter_lookback: int = 5,
         # MA 필터 활성화/비활성화 (approach A): 추세 필터 제거 실험용
-        use_ma20_filter: bool = True,   # MA20 > MA60 조건 사용
+        use_ma20_filter: bool = False,  # MA20 > MA60 조건 사용 (walk-forward v2: OFF가 최적, +77.11%)
         use_ma200_filter: bool = True,  # Close > MA200 조건 사용
         # 신호 강도 기반 포지셔닝: RSI가 낮을수록 더 많은 자본 배분
         use_signal_strength_positioning: bool = False,
         # 신호 강도 지수 승수: 1.0=선형, 2.0=제곱, 3.0=세제곱 (강한 과매도에 더 집중)
         signal_strength_exponent: float = 1.0,
+        # 거래량 확인 필터 (Experiment 3): 거래량이 평균 대비 X% 미만이면 매수 스킵
+        use_volume_filter: bool = False,
+        volume_filter_min_ratio: float = 0.5,
+        # ATR 기반 트레일링 스탑 (Experiment 4)
+        use_atr_trailing_stop: bool = False,
+        atr_trailing_stop_multiple: float = 2.0,
+        atr_trailing_stop_period: int = 14,
+        atr_trailing_stop_activation_pct: float = 5.0,
+        # Kelly 포지션 사이징 (Experiment 5)
+        use_kelly_sizing: bool = False,
+        kelly_win_rate_window: int = 50,
+        kelly_fractional: float = 0.5,
+        # ADX 레짐 필터 (Experiment 6)
+        use_adx_filter: bool = False,
+        adx_period: int = 14,
+        adx_trend_threshold: float = 25,
+        adx_reduction_factor: float = 0.5,
+        # 동적 현금 비중 (Experiment 8)
+        use_dynamic_cash_reserve: bool = False,
+        dyn_cash_reserve_max: float = 0.5,
     ):
         self.max_holdings = max_holdings
         self.rsi_period = rsi_period
@@ -220,9 +240,32 @@ class BacktestEngine:
         self.use_ma20_filter = use_ma20_filter
         self.use_ma200_filter = use_ma200_filter
 
+        # 거래량 확인 필터 (Experiment 3)
+        self.use_volume_filter = use_volume_filter
+        self.volume_filter_min_ratio = volume_filter_min_ratio
+
         # 신호 강도 기반 포지셔닝
         self.use_signal_strength_positioning = use_signal_strength_positioning
         self.signal_strength_exponent = signal_strength_exponent
+        self.use_atr_trailing_stop = use_atr_trailing_stop
+        self.atr_trailing_stop_multiple = atr_trailing_stop_multiple
+        self.atr_trailing_stop_period = atr_trailing_stop_period
+        self.atr_trailing_stop_activation_pct = atr_trailing_stop_activation_pct
+        
+        # Kelly 포지션 사이징 (Experiment 5)
+        self.use_kelly_sizing = use_kelly_sizing
+        self.kelly_win_rate_window = kelly_win_rate_window
+        self.kelly_fractional = kelly_fractional
+        
+        # ADX 레짐 필터 (Experiment 6): ADX > threshold면 포지션 축소
+        self.use_adx_filter = use_adx_filter
+        self.adx_period = adx_period
+        self.adx_trend_threshold = adx_trend_threshold
+        self.adx_reduction_factor = adx_reduction_factor
+        
+        # 동적 현금 비중 (Experiment 8): DD 깊이에 따라 현금 비중 가변
+        self.use_dynamic_cash_reserve = use_dynamic_cash_reserve
+        self.dyn_cash_reserve_max = dyn_cash_reserve_max
 
         # 포트폴리오 상태
         self.cash = self.initial_capital
@@ -273,6 +316,62 @@ class BacktestEngine:
         df['ma20'] = df['close'].rolling(window=self.ma_short, min_periods=self.ma_short).mean()
         df['ma60'] = df['close'].rolling(window=self.ma_long, min_periods=self.ma_long).mean()
         df['ma200'] = df['close'].rolling(window=self.ma_trend, min_periods=self.ma_trend).mean()
+        
+        # ATR 계산 (Experiment 4 — 트레일링 스탑용)
+        # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+        prev_close = df['close'].shift(1)
+        tr = pd.concat([
+            df['high'] - df['low'],
+            (df['high'] - prev_close).abs(),
+            (df['low'] - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        # Wilder smoothing ATR — numpy array 사용 (pandas chained assignment 회피)
+        atr_period = self.atr_trailing_stop_period
+        atr_arr = np.empty(len(df), dtype=np.float64)
+        atr_arr[:atr_period] = tr.iloc[:atr_period].mean()
+        tr_arr = tr.to_numpy()
+        for i in range(atr_period, len(atr_arr)):
+            atr_arr[i] = (atr_arr[i - 1] * (atr_period - 1) + tr_arr[i]) / atr_period
+        df['atr'] = atr_arr
+        
+        # ADX(14) 계산 (Experiment 6 — 방향성 지표)
+        adx_period = self.adx_period
+        high, low, close = df['high'], df['low'], df['close']
+        prev_high, prev_low, prev_close = high.shift(1), low.shift(1), close.shift(1)
+        # +DM, -DM
+        up_move = high - prev_high
+        down_move = prev_low - low
+        pos_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+        neg_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+        # Wilder smoothing of +DM, -DM, and TR — numpy array 사용
+        tr_arr = tr.to_numpy()
+        pos_dm_arr = pos_dm.to_numpy()
+        neg_dm_arr = neg_dm.to_numpy()
+        tr_smooth_arr = np.empty(len(df), dtype=np.float64)
+        pos_dm_smooth_arr = np.empty(len(df), dtype=np.float64)
+        neg_dm_smooth_arr = np.empty(len(df), dtype=np.float64)
+        tr_smooth_arr[:adx_period] = tr.iloc[:adx_period].mean()
+        pos_dm_smooth_arr[:adx_period] = pos_dm.iloc[:adx_period].mean()
+        neg_dm_smooth_arr[:adx_period] = neg_dm.iloc[:adx_period].mean()
+        for i in range(adx_period, len(df)):
+            tr_smooth_arr[i] = (tr_smooth_arr[i - 1] * (adx_period - 1) + tr_arr[i]) / adx_period
+            pos_dm_smooth_arr[i] = (pos_dm_smooth_arr[i - 1] * (adx_period - 1) + pos_dm_arr[i]) / adx_period
+            neg_dm_smooth_arr[i] = (neg_dm_smooth_arr[i - 1] * (adx_period - 1) + neg_dm_arr[i]) / adx_period
+        # +DI, -DI (zero TR → DI=0 처리)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            pos_di = 100 * pos_dm_smooth_arr / tr_smooth_arr
+            neg_di = 100 * neg_dm_smooth_arr / tr_smooth_arr
+        pos_di = np.nan_to_num(pos_di, nan=0.0, posinf=0.0, neginf=0.0)
+        neg_di = np.nan_to_num(neg_di, nan=0.0, posinf=0.0, neginf=0.0)
+        # DX, ADX — numpy array 사용
+        dx_arr = 100 * np.abs(pos_di - neg_di) / (pos_di + neg_di + 1e-10)  # zero-division 방지
+        adx_arr = np.empty(len(df), dtype=np.float64)
+        adx_arr[:adx_period] = dx_arr[:adx_period].mean()
+        for i in range(adx_period, len(df)):
+            adx_arr[i] = (adx_arr[i - 1] * (adx_period - 1) + dx_arr[i]) / adx_period
+        df['adx'] = adx_arr
+        df['pos_di'] = pos_di
+        df['neg_di'] = neg_di
         
         return df
     
@@ -412,9 +511,33 @@ class BacktestEngine:
             # 2) [선택] close > ma200 (장기 추세 상승, use_ma200_filter=True 시)
             # 3) RSI < rsi_buy_threshold (과매도)
             # 4) 2일 전 대비 price_drop_threshold 이상 하락
+            # 5) [실험3] 거래량 확인 필터: 거래량이 20일 평균 대비 volume_filter_min_ratio 미만이면 스킵
             ma20_ok = (not self.use_ma20_filter) or (ma20 > ma60)
             ma200_ok = (not self.use_ma200_filter) or (close > ma200)
-            if ma20_ok and ma200_ok and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
+            volume_ok = True
+            if self.use_volume_filter and 'volume' in df.columns:
+                try:
+                    vol_series = df['volume'].iloc[:idx + 1]
+                    vol_ma20 = vol_series.rolling(20, min_periods=10).mean().iloc[-1]
+                    current_vol = current['volume']
+                    if vol_ma20 > 0 and current_vol < vol_ma20 * self.volume_filter_min_ratio:
+                        logger.debug("거래량필터 차단 %s date=%s cur_vol=%.0f avg20=%.0f ratio=%.2f",
+                                     display, date, current_vol, vol_ma20, current_vol / vol_ma20)
+                        volume_ok = False
+                except Exception:
+                    pass
+            # ADX 레짐 필터 (Experiment 6): ADX > threshold면 강한 추세로 간주, 역추세 매수 회피
+            adx_ok = True
+            if self.use_adx_filter and 'adx' in df.columns:
+                try:
+                    adx_val = current.get('adx', np.nan)
+                    if not np.isnan(adx_val) and adx_val > self.adx_trend_threshold:
+                        logger.debug("ADX필터 차단 %s date=%s adx=%.1f threshold=%.1f",
+                                     display, date, adx_val, self.adx_trend_threshold)
+                        adx_ok = False
+                except Exception:
+                    pass
+            if ma20_ok and ma200_ok and volume_ok and adx_ok and rsi < self.rsi_buy_threshold and price_diff < self.price_drop_threshold:
                 return True, close
             
             return False, None
@@ -660,6 +783,14 @@ class BacktestEngine:
         profit = net_proceeds - buy_cost
         profit_rate = (profit / buy_cost) * 100
         
+        # Kelly 사이징: 거래 결과 추적 (1=승, 0=패)
+        self._trade_results.append(1 if profit > 0 else 0)
+        # 피크 포트폴리오 가치 갱신 (동적 현금 비중용)
+        self._peak_portfolio_value = max(self._peak_portfolio_value, self.cash + sum(
+            h['quantity'] * avg_price  # approximate — real value in daily_portfolio_value
+            for h in self.holdings.values()
+        ))
+        
         # 포지션 제거
         del self.holdings[code]
         
@@ -760,6 +891,10 @@ class BacktestEngine:
         self.trades = []
         self.daily_portfolio_value = []
         self.stop_loss_count = 0
+        # Kelly 사이징: 거래 결과 이력 (1=승, 0=패)
+        self._trade_results: List[int] = []
+        # 동적 현금 비중: 피크 추적
+        self._peak_portfolio_value = self.initial_capital
         
         # 지표 계산
         processed_data = {}
@@ -878,11 +1013,39 @@ class BacktestEngine:
                 avg_price = self.holdings[code]['avg_price']
                 buy_date = self.holdings[code]['buy_date']
                 
+                # ATR 트레일링 스탑을 위한 최고가 추적
+                if date in df.index:
+                    df_idx = df.index.get_loc(date)
+                    current_close = df.iloc[df_idx]['close']
+                    old_highest = self.holdings[code].get('highest_close', avg_price)
+                    new_highest = max(old_highest, current_close)
+                    self.holdings[code]['highest_close'] = new_highest
+                
                 # RSI 매도 신호 체크
                 sell_signal, sell_price = self.check_sell_signal(code, date, df, avg_price)
                 if sell_signal:
                     codes_to_sell.append((code, sell_price, "RSI매도", date))
                     continue
+                
+                # ATR 트레일링 스탑 체크 (Experiment 4)
+                if self.use_atr_trailing_stop and date in df.index:
+                    df_idx = df.index.get_loc(date)
+                    current = df.iloc[df_idx]
+                    close_ = current['close']
+                    highest_ = self.holdings[code].get('highest_close', avg_price)
+                    profit_pct = (highest_ - avg_price) / avg_price * 100
+                    if profit_pct >= self.atr_trailing_stop_activation_pct:
+                        atr_val = current.get('atr', np.nan)
+                        if not np.isnan(atr_val) and atr_val > 0:
+                            trail_stop = highest_ - self.atr_trailing_stop_multiple * atr_val
+                            if close_ < trail_stop:
+                                display = f"{self.symbol_names.get(code)}({code})" if self.symbol_names.get(code) else code
+                                logger.info(
+                                    "ATR트레일링스탑 %s date=%s high=%.0f trail=%.0f close=%.0f profit=%.1f%%",
+                                    display, date, highest_, trail_stop, close_, profit_pct
+                                )
+                                codes_to_sell.append((code, close_, "ATR트레일링스탑", date))
+                                continue
                 
                 # 손절 체크
                 stop_loss_signal, stop_price, stop_reason = self.check_stop_loss(
@@ -960,13 +1123,63 @@ class BacktestEngine:
                 buy_candidates = buy_candidates[:available_slots]
                 
                 if buy_candidates:
-                    # 매수 예산 배분 (RSIStrategy와 동일: 현금 보유 비율 적용)
-                    investable_cash = self.cash * (1 - self.cash_reserve_ratio)
+                    # 동적 현금 비중 (Experiment 8): DD 깊이에 따라 현금 보유 비율 증가
+                    if self.use_dynamic_cash_reserve:
+                        try:
+                            pv = self.calculate_portfolio_value(date, processed_data)
+                            self._peak_portfolio_value = max(self._peak_portfolio_value, pv)
+                            dd_pct = (pv - self._peak_portfolio_value) / self._peak_portfolio_value
+                            if dd_pct < -0.20:
+                                effective_cr = self.dyn_cash_reserve_max
+                            elif dd_pct < -0.15:
+                                effective_cr = self.cash_reserve_ratio + 0.30
+                            elif dd_pct < -0.10:
+                                effective_cr = self.cash_reserve_ratio + 0.20
+                            elif dd_pct < -0.05:
+                                effective_cr = self.cash_reserve_ratio + 0.10
+                            else:
+                                effective_cr = self.cash_reserve_ratio
+                            if dd_pct < -0.05:
+                                logger.info("DYN_CASH date=%s pv=%.0f peak=%.0f dd=%.1f%% cr=%.2f",
+                                             date, pv, self._peak_portfolio_value, dd_pct*100, effective_cr)
+                        except Exception as e:
+                            logger.warning("DYN_CASH error date=%s: %s", date, e)
+                            effective_cr = self.cash_reserve_ratio
+                    else:
+                        effective_cr = self.cash_reserve_ratio
+
+                    # 매수 예산 배분
+                    investable_cash = self.cash * (1 - effective_cr)
                     try:
                         portfolio_value_current = self.calculate_portfolio_value(date, processed_data)
                         cap_amount = portfolio_value_current * self.max_position_ratio
                     except Exception:
                         cap_amount = self.initial_capital * self.max_position_ratio
+
+                    # Kelly 포지션 사이징 (Experiment 5): rolling win rate 기반 예산 조정
+                    kelly_mult = 1.0
+                    if self.use_kelly_sizing and len(self._trade_results) >= 20:
+                        recent = self._trade_results[-self.kelly_win_rate_window:]
+                        win_rate = sum(recent) / len(recent)
+                        avg_win_rate = np.mean([1 for r in recent if r == 1]) if any(r == 1 for r in recent) else 0.01
+                        avg_loss_rate = np.mean([0 for r in recent if r == 0])  # loss = 0 profit, so b = avg_win / flat avg loss
+                        # 평균 승/패 비율: 승리 거래 평균 수익률 vs 패배 거래 평균 손실률
+                        sell_trades_data = [t for t in self.trades if t['type'] == 'sell']
+                        recent_sells = sell_trades_data[-len(recent):] if len(sell_trades_data) >= len(recent) else sell_trades_data[-min(100, len(sell_trades_data)):]
+                        if recent_sells:
+                            wins = [t['profit'] for t in recent_sells if t['profit'] > 0]
+                            losses = [t['profit'] for t in recent_sells if t['profit'] <= 0]
+                            avg_win = np.mean(wins) if wins else 1.0
+                            avg_loss = abs(np.mean(losses)) if losses else 1.0
+                            if avg_loss > 0:
+                                b_ratio = avg_win / avg_loss
+                                p = win_rate
+                                q = 1 - p
+                                raw_kelly = (p * b_ratio - q) / b_ratio if b_ratio > 0 else 0
+                                kelly_mult = max(0.3, min(1.5, raw_kelly * self.kelly_fractional / 0.2))
+                                # 0.2 = baseline 조정 계수 (equal weight 기준)
+                                logger.debug("KELLY date=%s win_rate=%.3f b=%.2f raw=%.3f mult=%.2f",
+                                             date, win_rate, b_ratio, raw_kelly, kelly_mult)
 
                     if self.use_signal_strength_positioning and len(buy_candidates) > 1:
                         strengths = []
@@ -982,7 +1195,7 @@ class BacktestEngine:
                             if max_total < investable_cash:
                                 budgets = [b * max_total / investable_cash for b in budgets]
                     else:
-                        b = investable_cash / len(buy_candidates)
+                        b = investable_cash / len(buy_candidates) * kelly_mult
                         if cap_amount is not None:
                             b = min(b, cap_amount)
                         budgets = [b] * len(buy_candidates)
