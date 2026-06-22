@@ -241,7 +241,7 @@ class Kiwoom:
     def get_stock_info(self, code, max_retries=3, retry_delay=0.5):
         """
         종목의 상세 기본정보를 조회합니다 (ka10001).
-        당일 거래량, 거래대금, 등락률, 현재가, 외국인비율 등을 포함합니다.
+        당일 거래량, 거래대금, 등락률, 현재가, 외국인비율, PER/PBR/EPS/BPS 등을 포함합니다.
         
         Returns:
             dict: 종목 상세 정보
@@ -254,6 +254,10 @@ class Kiwoom:
                 - list_cnt: 상장주식수 (String)
                 - mrkt_cap: 시가총액 (String, 억원 단위 - API 원본값)
                 - for_exh_rt: 외국인비율 (String, %)
+                - eps: 주당순이익 (String, 원)
+                - pbr: 주가순자산비율 (String, 배)
+                - bps: 주당순자산 (String, 원)
+                - per: 주가수익비율 (String, 배, 계산값 = cur_prc / eps)
                 또는 None (실패 시)
         
         주의: 시가총액은 억원 단위로 반환되므로, 백만원 단위 변환이 필요하면 ×100 해야 함
@@ -289,6 +293,13 @@ class Kiwoom:
                         else:
                             list_cnt = '0'
                     
+                    eps_raw = res_data.get('eps', '0').replace('+', '').replace('-', '')
+                    eps_val = abs(float(eps_raw)) if eps_raw else 0.0
+                    pbr_val = res_data.get('pbr', '0').replace('+', '')
+                    bps_raw = res_data.get('bps', '0').replace('+', '').replace('-', '')
+                    bps_val = abs(float(bps_raw)) if bps_raw else 0.0
+                    per_val = str(int(cur_prc / eps_val)) if eps_val > 0 and cur_prc > 0 else '0'
+
                     return {
                         'code': res_data.get('stk_cd'),
                         'name': res_data.get('stk_nm'),
@@ -298,7 +309,11 @@ class Kiwoom:
                         'flu_rt': res_data.get('flu_rt', '0').replace('+', ''),
                         'list_cnt': list_cnt,
                         'mrkt_cap': mrkt_cap,
-                        'for_exh_rt': res_data.get('for_exh_rt', '0').replace('+', '')
+                        'for_exh_rt': res_data.get('for_exh_rt', '0').replace('+', ''),
+                        'eps': str(eps_val),
+                        'pbr': pbr_val,
+                        'bps': str(bps_val),
+                        'per': per_val,
                     }
                 except (ValueError, TypeError) as e:
                     logger.warning(f"Failed to parse stock info for {code}: {e}")

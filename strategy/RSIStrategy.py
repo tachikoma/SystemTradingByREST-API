@@ -69,7 +69,25 @@ def log_rsi_debug(symbol, stage, payload):
         logger.info("RSI_DEBUG (fallback): %s %s", symbol, stage)
 
 class RSIStrategy(threading.Thread):
-    # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
+    """
+    RSI(2) + Value 하이브리드 전략.
+
+    매수 조건:
+      - 단기 상승 추세 (MA20 > MA60)
+      - 장기 상승 추세 (close > MA200)
+      - RSI(2) 과매도 (RSI < RSI_BUY_THRESHOLD, 기본 3)
+      - 단기 하락 (2거래일 전 대비 -5% 이상 하락)
+      - 저PBR 필터 (PBR <= MAX_PBR, 기본 2.0)
+
+    매도 조건:
+      - RSI(2) 과매수 (RSI >= 80)
+      - 수익률 목표 도달 (종가 기준 +10% 이상, RSI > 80 동시 충족)
+      - 시간 손절 (매수 후 90일 초과)
+
+    참고: 저PBR 필터는 2026년 6월 value backtest 결과를 반영하여 추가.
+         PBR 데이터는 pykrx로 매일 1회 일괄 조회하여 캐싱.
+    """
+    # 전략 상수 정의 (백테스트 최적화 반영: 2026-06-22)
     MAX_HOLDINGS = 10  # 최대 보유 종목 수
     RSI_PERIOD = 2  # RSI 계산 기간
     MA_SHORT = 20  # 단기 이동평균
@@ -82,6 +100,7 @@ class RSIStrategy(threading.Thread):
     TIME_STOP_LOSS_DAYS = 90  # 시간 손절 기준 (일): 매수 후 N일 초과 시 강제 매도 (최적화: 90일)
     CASH_RESERVE_RATIO = 0.2  # 현금 보유 비율 (최적화: 20% 현금 유지)
     MORNING_FALLBACK_GAP_UP_THRESHOLD = 3.0  # 오전 fallback 갭업 차단 기준 (%) — 이 이상 갭업이면 매수 보류
+    MAX_PBR = 2.0  # PBR 상한 (저PBR 필터): 이 값 이하만 매수, inf면 비활성
     REALTIME_MAX_CODES = int(os.getenv('REALTIME_MAX_CODES', '100'))  # 실시간 등록 최대 종목 수 (WebSocket API 제한)
     POLLING_MAX_CODES  = int(os.getenv('POLLING_MAX_CODES', '150'))  # 폴링(REST) 추가 감시 최대 종목 수
     POLLING_RATE_LIMIT = 0.2  # 종목당 REST 호출 간격 (초) — rate limit 방지
@@ -129,6 +148,9 @@ class RSIStrategy(threading.Thread):
         self.last_universe_update = get_korea_time()
         self.UNIVERSE_UPDATE_DAYS = 30  # 30일마다 재구성
         self.universe_updated_today = False
+        # 가치 지표 캐시 (PER/PBR/EPS/BPS/DIV)
+        self.fundamental = {}  # {code: {PER, PBR, EPS, BPS, DIV}}
+        self._fundamental_updated_today = False
         
         # 전체 데이터 캐싱 관련 변수 (30일 주기)
         self.last_full_cache_time = None
@@ -263,8 +285,20 @@ class RSIStrategy(threading.Thread):
         except Exception:
             self.MAX_POSITION_RATIO = 0.05
 
-        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s",
-                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS)
+        # 저PBR 필터 임계값 (환경변수로 오버라이드)
+        try:
+            v = os.getenv('MAX_PBR')
+            if v is not None:
+                tmp = float(v)
+                if tmp <= 0:
+                    self.MAX_PBR = float('inf')  # 0이하 → 비활성
+                else:
+                    self.MAX_PBR = tmp
+        except Exception:
+            pass
+
+        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s MAX_PBR=%s",
+                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS, self.MAX_PBR)
 
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
@@ -624,6 +658,26 @@ class RSIStrategy(threading.Thread):
         except Exception as cache_error:
             logger.error("❌ 전체 종목 캐싱 실패: %s", cache_error)
             self._queue_or_send(f"❌ 전체 종목 캐싱 실패\n{cache_error}\n캐시 없이 진행합니다.")
+    
+    @notify_on_exception(fallback_return=None)
+    def _refresh_fundamental_data(self):
+        """
+        pykrx로 전 종목 PER/PBR/EPS/BPS/DIV를 조회하여 self.fundamental에 캐싱.
+        Universe에 속한 종목만 필터링하여 저장.
+        """
+        self._fundamental_updated_today = False
+        from util.make_up_universe import fetch_fundamental_data
+        raw = fetch_fundamental_data()
+        if raw is None:
+            logger.warning("pykrx fundamental data fetch failed — skipping")
+            return
+        codes_in_universe = set(self.universe.keys())
+        self.fundamental = {
+            code: vals for code, vals in raw.items() if code in codes_in_universe
+        }
+        logger.info("Fundamental data refreshed: %d/%d universe stocks have data",
+                     len(self.fundamental), len(codes_in_universe))
+        self._fundamental_updated_today = True
     
     @notify_on_exception(fallback_return=None)
     def load_mock_blacklist(self):
@@ -1306,6 +1360,7 @@ class RSIStrategy(threading.Thread):
                             self.universe_updated_today = False
                             self.full_cache_done_today = False
                             self.buy_window_done_today = False
+                            self._fundamental_updated_today = False
                             # MA200 집계 날짜 초기화
                             today = get_korea_time().strftime('%Y%m%d')
                             if self.ma200_skip_date != today:
@@ -1333,6 +1388,8 @@ class RSIStrategy(threading.Thread):
                                 self._queue_or_send("⚠️ 일일 가격 데이터 갱신 실패: 장 시작 전 재시도 예정")
                             except Exception:
                                 pass
+                        # 가치 지표(PER/PBR) 갱신 (pykrx, 1회 호출)
+                        self._refresh_fundamental_data()
                 except Exception:
                     pass
 
@@ -1399,6 +1456,8 @@ class RSIStrategy(threading.Thread):
                             self.update_universe_with_holdings()
                             self.last_universe_update = now
                             self.universe_updated_today = True
+                            # Universe 재구성 후 가치 지표 갱신
+                            self._refresh_fundamental_data()
                             
                             logger.info("✅ Universe 재구성 완료 (종목 수: %d)", len(self.universe))
                             self._queue_or_send(f"✅ Universe 재구성 완료\n종목 수: {len(self.universe)}")
@@ -2396,9 +2455,16 @@ class RSIStrategy(threading.Thread):
             logger.debug("블랙리스트 종목 매수 시도 차단: %s", display)
             return
 
-        # (3)매수 신호 확인(조건에 부합하면 주문 접수)
-        # 조건: 단기 상승 추세 + 장기 상승 추세 + RSI 과매도 + 단기 하락
-        if ma20 > ma60 and close > ma200 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD:
+        # (3)매수 신호 확인 (RSI + Value 하이브리드)
+        # 조건: 단기 상승 추세 + 장기 상승 추세 + RSI 과매도 + 단기 하락 + 저PBR
+        # 저PBR 필터: PBR 데이터가 있으면 MAX_PBR 이하만 매수
+        fund = self.fundamental.get(code)
+        pbr_ok = True
+        if fund is not None and self.MAX_PBR < float('inf'):
+            if fund.get('PBR', float('inf')) > self.MAX_PBR:
+                logger.debug("PBR 필터 차단 %s: PBR=%.2f > %.2f", display, fund['PBR'], self.MAX_PBR)
+                pbr_ok = False
+        if ma20 > ma60 and close > ma200 and rsi < self.RSI_BUY_THRESHOLD and price_diff < self.PRICE_DROP_THRESHOLD and pbr_ok:
             # (4)이미 보유한 종목, 매수 주문 접수한 종목의 합이 보유 가능 최대치라면 더 이상 매수 불가하므로 종료
             if (self.get_balance_count() + self.get_buy_order_count()) >= self.MAX_HOLDINGS:
                 return

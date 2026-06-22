@@ -5,9 +5,9 @@
 
 ## 아키텍처
 - **진입점 (`main.py`):** `Kiwoom` 클래스와 `RSIStrategy` 스레드를 초기화하고 실행합니다.
-- **핵심 로직 (`strategy/RSIStrategy.py`):** RSI와 이동평균선을 기반으로 매매 신호를 생성하고 주문을 실행하는 주식 트레이딩 알고리즘을 포함합니다. `threading.Thread`를 상속받아 백그라운드에서 실행됩니다.
+- **핵심 로직 (`strategy/RSIStrategy.py`):** RSI(2) 과매도/과매수 + 이동평균 추세 필터 + 저PBR 가치 필터를 결합한 하이브리드 트레이딩 전략입니다. PBR 데이터는 pykrx로 매일 1회 일괄 조회하여 캐싱합니다. `threading.Thread`를 상속받아 백그라운드에서 실행됩니다.
 - **API 추상화 (`api/Kiwoom.py`):** 키움 REST API와 WebSocket을 사용하여 통신합니다. `requests` 라이브러리를 사용하여 HTTP 요청을 보내고, `websockets` 라이브러리를 사용하여 실시간 시세를 수신합니다.
-- **종목 선정 (`util/make_up_universe.py`):** 키움 API(장 종료 후) 또는 네이버 금융(장 중) 크롤링으로 KOSPI/KOSDAQ 전체 종목 정보를 수집하여 거래량, 시가총액, 변동성 등의 지표를 기반으로 상위 N개 종목(`REALTIME_MAX_CODES` + `POLLING_MAX_CODES`, 기본 250개)을 선정합니다. 매일 장 종료 후 자동으로 데이터를 캐싱하여 다음날 빠르게 시작할 수 있습니다.
+- **종목 선정 (`util/make_up_universe.py`):** 키움 API(장 종료 후) 또는 네이버 금융(장 중) 크롤링으로 KOSPI/KOSDAQ 전체 종목 정보를 수집하여 거래량, 시가총액, 변동성 등의 지표를 기반으로 상위 N개 종목(`REALTIME_MAX_CODES` + `POLLING_MAX_CODES`, 기본 250개)을 선정합니다. 수집 시 ka10001 API의 EPS/PBR/BPS/PER 가치지표도 함께 저장합니다. 매일 장 종료 후 자동으로 데이터를 캐싱하며, pykrx로 전 종목 PER/PBR/EPS/BPS/DIV를 1회 호출로 갱신합니다.
  - **데이터베이스 (`util/db_helper.py`):** SQLite를 사용하여 종목 유니버스 및 과거 시세 데이터를 캐시하여 빠른 시작과 API 요청 제한을 회피합니다.
   - 기본 저장 위치: 애플리케이션은 캐시/파일(`all_stocks_kiwoom.parquet`, `all_stocks_naver.parquet`, `universe.parquet` 등)을 `DB_DIR` 환경변수로 지정한 디렉토리에 저장합니다. 기본값은 `./data`입니다.
    - 로컬 개발: `docker-compose.yml`의 `systemtrading` 서비스는 호스트의 `./data`를 `/app/data`로 바인드하도록 구성되어 있어 로컬에서 파일을 바로 확인할 수 있습니다.

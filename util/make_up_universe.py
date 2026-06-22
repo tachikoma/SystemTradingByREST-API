@@ -723,8 +723,11 @@ def cache_daily_data(kiwoom_client):
 
 def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True, cache_file='all_stocks_kiwoom.parquet'):
     """
-    키움 API를 활용하여 전체 종목 리스트를 수집하는 함수
+    키움 API(ka10001)로 전체 종목 리스트 수집
     (유니버스 생성용 기초 데이터)
+    
+    ka10001은 종목별 1회 호출 (rate limit: 0.1~0.2초).
+    현재가/거래량/시가총액 외에도 EPS/PBR/BPS/PER 등 가치지표 포함.
     
     Args:
         kiwoom_client: Kiwoom API 클라이언트 인스턴스
@@ -809,6 +812,11 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
                     '등락률': float(info.get('flu_rt', 0)),
                     '외국인비율': float(info.get('for_exh_rt', 0)),
                     '상장주식수': int(info.get('list_cnt', 0)),
+                    # 가치 지표 (ka10001 API 원본값)
+                    'EPS': int(float(info.get('eps', 0))),
+                    'PBR': float(info.get('pbr', 0)),
+                    'BPS': int(float(info.get('bps', 0))),
+                    'PER': int(float(info.get('per', 0))),
                 })
             except (ValueError, TypeError) as e:
                 logger.warning(f"종목 {stock['code']} 데이터 파싱 실패: {e}")
@@ -1695,6 +1703,41 @@ def _filter_and_create_universe(
     universe_list = df['종목명'].tolist() if '종목명' in df.columns else df.iloc[:, 0].astype(str).tolist()
     logger.info(f"Universe 생성 완료: {len(universe_list)}개 종목 (병합 후)")
     return universe_list
+
+
+def fetch_fundamental_data(today=None):
+    """
+    pykrx로 전 종목 PER/PBR/EPS/BPS/DIV 조회 (1회 호출).
+    Args:
+        today: 조회일 (YYYYMMDD 문자열, 기본값: 오늘)
+    Returns:
+        dict: {code: {'PER': float, 'PBR': float, 'EPS': float, 'BPS': float, 'DIV': float}, ...}
+        실패 시 None
+    """
+    if today is None:
+        today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
+
+    try:
+        from pykrx import stock as krx_stock
+        df = krx_stock.get_market_fundamental_by_ticker(today, market='ALL')
+    except Exception as e:
+        logger.error(f"pykrx fundamental 조회 실패 ({today}): {e}")
+        return None
+
+    result = {}
+    for code, row in df.iterrows():
+        code = str(code).zfill(6)
+        try:
+            per = float(row['PER']) if row['PER'] > 0 else float('inf')
+            pbr = float(row['PBR']) if row['PBR'] > 0 else float('inf')
+            eps = float(row['EPS'])
+            bps = float(row['BPS'])
+            div = float(row['DIV'])
+        except (ValueError, TypeError, KeyError):
+            continue
+        result[code] = {'PER': per, 'PBR': pbr, 'EPS': eps, 'BPS': bps, 'DIV': div}
+    logger.info(f"pykrx fundamental 조회 완료: {len(result)}개 종목 ({today})")
+    return result
 
 
 if __name__ == "__main__":
