@@ -112,15 +112,12 @@ watchdog는 `main.py`를 `nohup`으로 실행하며, 로그는 `logs/kiwoom_nohu
 # 1. 로그 디렉토리 확인
 ls -la logs/
 
-# 2. 최신 nohup 로그 확인 (watchdog의 표준출력)
+# 2. nohup 로그 확인 (watchdog가 자식 프로세스의 출력을 기록)
 tail -100 logs/kiwoom_nohup.log
 
 # 3. RotatingFileHandler 로그 확인 (전략 상세 로그)
-# 파일명 패턴 확인
-ls -lt logs/*.log | head -5
-
-# 가장 최근 로그 확인
-tail -100 logs/kiwoom_nohup.log
+# RotatingFileHandler가 남기는 로그 파일 확인
+ls -lt logs/*.log* | head -5
 
 # 4. 실시간 로그 팔로우
 tail -f logs/kiwoom_nohup.log

@@ -86,6 +86,6 @@ VALUE_KEEP_HOLDINGS=1
    ```bash
    # .env 복원
    cp .env.backup.YYYYMMDD_HHMMSS .env
-   # docker 재시작
-   docker-compose down && docker-compose up -d
+   # watchdog 재시작
+   sh scripts/stop_watchdog.sh && sleep 2 && sh scripts/start_watchdog.sh
    ```
