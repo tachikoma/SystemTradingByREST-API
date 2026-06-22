@@ -18,9 +18,12 @@
 
 **Effort:** Short (Phase 1: 모니터링 외 무대응, Phase 2: 머지+설정변경+재시작 = 30분)
 **Risk:** Medium (가치 전략은 백테스트 검증 필요, PBR 데이터 품질에 의존)
-**Decisions to sanity-check:** TIME_STOP_LOSS_DAYS=90 (develop 180→feature 90)로 머지 시 기존 보유 종목의 시간손절이 조기 발동할 수 있음
+**Decisions to sanity-check:** TIME_STOP_LOSS_DAYS=90 (develop 180→feature 90)로 머지 시 기존 보유 종목의 시간손절이 조기 발동할 수 있음. 단 VALUE 모드에서는 time-stop-loss 미실행되어 실제 영향 없음.
 
-Your next move: 승인 시 Phase 1 준비(Wave 1: 전환 청사진 + 충돌 해결 + .env 블루프린트)를 실행합니다.
+**Wave 1 ✅ 완료 (2026-06-22):** 전환 청사진, 머지 충돌 분석, .env 블루프린트, VPS 런북 모두 작성 완료.
+
+Your next move: **Phase 1 (대기):** VPS develop 유지, -29% 종목 반등하여 breakeven+RSI>70 매도 대기.
+  **Phase 2:** RSI 종목 전량 매도 확인 후 `$start-work` 로 머지+전환 실행.
 
 ---
 
