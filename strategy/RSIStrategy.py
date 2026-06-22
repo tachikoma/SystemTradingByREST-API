@@ -70,7 +70,12 @@ def log_rsi_debug(symbol, stage, payload):
 
 class RSIStrategy(threading.Thread):
     """
-    RSI(2) + Value 하이브리드 전략.
+    듀얼 모드 전략 (RSI mode / Value mode).
+
+    STRATEGY_MODE 환경변수로 전환 (기본값: rsi).
+
+    --- RSI mode (STRATEGY_MODE=rsi, 기본) ---
+    RSI(2) 과매도/과매수 + 이동평균 추세 필터 + 저PBR 필터 기반 하이브리드 전략.
 
     매수 조건:
       - 단기 상승 추세 (MA20 > MA60)
@@ -84,8 +89,19 @@ class RSIStrategy(threading.Thread):
       - 수익률 목표 도달 (종가 기준 +10% 이상, RSI > 80 동시 충족)
       - 시간 손절 (매수 후 90일 초과)
 
-    참고: 저PBR 필터는 2026년 6월 value backtest 결과를 반영하여 추가.
-         PBR 데이터는 pykrx로 매일 1회 일괄 조회하여 캐싱.
+    --- Value mode (STRATEGY_MODE=value) ---
+    PBR 랭킹 기반 정기 리밸런싱 전략.
+    Universe 전체 종목의 PBR을 오름차순 정렬하여 PBR이 낮은 N개 종목으로 포트폴리오 구성.
+    매일 1회 장중(09:00~15:20)에 리밸런싱하며, 시장 필터(KOSPI200 > MA200) 선택 적용.
+
+    주요 파라미터:
+      - VALUE_HOLDINGS: 목표 보유 종목 수 (기본 10)
+      - VALUE_MARKET_FILTER: KOSPI200 MA200 필터 사용 여부 (기본 True)
+      - VALUE_MAX_BUDGET: 최대 투자 금액 (0=무제한, 기본 0)
+      - VALUE_KEEP_HOLDINGS: 기존 RSI 보유 종목 매도하지 않고 유지 (기본 False)
+
+    공통:
+      PBR 데이터는 pykrx로 매일 1회 일괄 조회하여 캐싱.
     """
     # 전략 상수 정의 (백테스트 최적화 반영: 2026-06-22)
     MAX_HOLDINGS = 10  # 최대 보유 종목 수
@@ -107,6 +123,11 @@ class RSIStrategy(threading.Thread):
     POLLING_LOG_INTERVAL = 50  # N종목마다 폴링 진행 로그 출력
     # RSI 계산 방식: 'cutler' (SMA) 또는 'wilder' (Wilder/EWMA)
     RSI_METHOD = 'cutler'
+    # Value 전략 파라미터 (strategy_mode='value'일 때 사용)
+    VALUE_HOLDINGS = 10
+    VALUE_MARKET_FILTER = True  # KOSPI200 > MA200 필터 사용
+    VALUE_MAX_BUDGET = 0          # 0 = 무제한, 양수 = 최대 투자 금액 (원)
+    VALUE_KEEP_HOLDINGS = False   # True면 기존 보유 종목 매도하지 않음
     
     def __init__(self, kiwoom, universe_cache_mode='on_demand'):
         threading.Thread.__init__(self)
@@ -297,8 +318,44 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
 
-        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s MAX_PBR=%s",
-                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS, self.MAX_PBR)
+        # 전략 모드: 'rsi' (기본) 또는 'value'
+        self.strategy_mode = str(os.getenv('STRATEGY_MODE', 'rsi')).strip().lower()
+        if self.strategy_mode not in ('rsi', 'value'):
+            logger.warning("Unknown STRATEGY_MODE '%s', falling back to 'rsi'", self.strategy_mode)
+            self.strategy_mode = 'rsi'
+        logger.info("전략 모드: %s", 'RSI' if self.strategy_mode == 'rsi' else 'Value')
+
+        # Value 전략 관련 상태
+        self._value_rebalance_done_today = False
+
+        # Value 전략 파라미터 (환경변수 오버라이드)
+        try:
+            v = os.getenv('VALUE_HOLDINGS')
+            if v is not None:
+                self.VALUE_HOLDINGS = int(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('VALUE_MARKET_FILTER')
+            if v is not None:
+                self.VALUE_MARKET_FILTER = str(v).lower() in ('1', 'true', 'yes')
+        except Exception:
+            pass
+        try:
+            v = os.getenv('VALUE_MAX_BUDGET')
+            if v is not None:
+                self.VALUE_MAX_BUDGET = int(v)
+        except Exception:
+            pass
+        try:
+            v = os.getenv('VALUE_KEEP_HOLDINGS')
+            if v is not None:
+                self.VALUE_KEEP_HOLDINGS = str(v).lower() in ('1', 'true', 'yes')
+        except Exception:
+            pass
+
+        logger.info("환경변수 파라미터: RSI_SELL_THRESHOLD=%s PROFIT_TARGET_PERCENT=%s RSI_BUY_THRESHOLD=%s CASH_RESERVE_RATIO=%s MORNING_FALLBACK_GAP_UP_THRESHOLD=%s TIME_STOP_LOSS_DAYS=%s MAX_PBR=%s STRATEGY_MODE=%s VALUE_MAX_BUDGET=%s VALUE_KEEP_HOLDINGS=%s",
+                    self.RSI_SELL_THRESHOLD, self.PROFIT_TARGET_PERCENT, self.RSI_BUY_THRESHOLD, self.CASH_RESERVE_RATIO, self.MORNING_FALLBACK_GAP_UP_THRESHOLD, self.TIME_STOP_LOSS_DAYS, self.MAX_PBR, self.strategy_mode, self.VALUE_MAX_BUDGET, self.VALUE_KEEP_HOLDINGS)
 
         # 스레드 중지/웨이크용 이벤트
         self._stop_event = threading.Event()
@@ -678,7 +735,194 @@ class RSIStrategy(threading.Thread):
         logger.info("Fundamental data refreshed: %d/%d universe stocks have data",
                      len(self.fundamental), len(codes_in_universe))
         self._fundamental_updated_today = True
-    
+
+    @notify_on_exception(fallback_return=None)
+    def _check_market_filter(self):
+        """KOSPI200(069500) 200일 이동평균선 필터.
+        Returns True if market is OK (close > MA200), False if bear market.
+        VALUE_MARKET_FILTER가 False면 항상 True 반환.
+        """
+        if not self.VALUE_MARKET_FILTER:
+            return True
+        try:
+            if not check_table_exist(self.strategy_name, '069500'):
+                logger.warning("069500 데이터 없음 — 마켓 필터 우회")
+                return True
+
+            sql = 'SELECT close_date, close FROM "069500" ORDER BY close_date DESC LIMIT 200'
+            cur = execute_sql(self.strategy_name, sql)
+            rows = cur.fetchall()
+
+            if not rows or len(rows) < 200:
+                logger.warning("069500 데이터 부족 (%d일) — 마켓 필터 우회", len(rows) if rows else 0)
+                return True
+
+            closes = [float(r[1]) for r in rows]
+            current_price = closes[0]
+            ma200 = sum(closes[:200]) / 200
+
+            ok = current_price > ma200
+            logger.info("KOSPI200 마켓 필터: 현재가=%.2f, MA200=%.2f, 상태=%s",
+                       current_price, ma200, '상승' if ok else '하락')
+            return ok
+        except Exception as e:
+            logger.warning("마켓 필터 체크 중 오류 (우회): %s", e)
+            return True
+
+    @notify_on_exception(fallback_return=None)
+    def _rebalance_value(self):
+        """
+        PBR 랭킹 기반 리밸런싱 (value mode).
+        매일 1회 장중(09:00~15:20)에 PBR 하위 N개 종목으로 포트폴리오를 재구성.
+        """
+        if self._value_rebalance_done_today:
+            return
+
+        # 장중(09:00~15:20)인지 확인 — value는 PBR 순위 기반이라 시간 무관
+        if not check_transaction_open():
+            return
+
+        # KOSPI200 MA200 마켓 필터
+        if not self._check_market_filter():
+            logger.warning("KOSPI200 < MA200: 약세장으로 전량 청산")
+            for code in list(self.kiwoom.balance.keys()):
+                self._last_sell_reason = "VALUE_MARKET_FILTER"
+                self.order_sell(code)
+            self._value_rebalance_done_today = True
+            return
+
+        # PBR 데이터 갱신
+        if not self._fundamental_updated_today:
+            self._refresh_fundamental_data()
+
+        if not self.fundamental:
+            logger.warning("PBR 데이터 없음 — 리밸런싱 생략")
+            return
+
+        # Universe 종목 중 PBR 데이터가 있는 것만 추려서 오름차순 정렬
+        candidates = []
+        for code in self.universe:
+            fund = self.fundamental.get(code)
+            if fund is not None:
+                pbr = fund.get('PBR')
+                if pbr is not None and pbr < float('inf'):
+                    candidates.append((code, pbr))
+
+        candidates.sort(key=lambda x: x[1])
+
+        if not candidates:
+            logger.warning("PBR 데이터가 있는 종목이 없습니다 — 리밸런싱 생략")
+            return
+
+        target = candidates[:self.VALUE_HOLDINGS]
+        target_set = {code for code, _ in target}
+        target_pbr = dict(target)
+
+        logger.info("Value 리밸런싱 대상 %d개: %s", len(target), [c for c, _ in target])
+
+        # VALUE_KEEP_HOLDINGS: 첫 실행 시 기존 보유 종목 스냅샷 저장
+        if self.VALUE_KEEP_HOLDINGS and not hasattr(self, '_value_initial_holdings'):
+            self._value_initial_holdings = set(self.kiwoom.balance.keys())
+            logger.info("Value 초기 보유 종목 스냅샷: %d개", len(self._value_initial_holdings))
+
+        # 보유 종목 중 대상에서 밀려난 종목 매도 (VALUE_KEEP_HOLDINGS면 스킵)
+        if not self.VALUE_KEEP_HOLDINGS:
+            for code in list(self.kiwoom.balance.keys()):
+                if code not in target_set:
+                    logger.info("Value 청산: %s (PBR 순위 밖)", code)
+                    self._last_sell_reason = "VALUE_REBALANCE"
+                    self.order_sell(code)
+
+        # 대상 종목 중 미보유/미주문 종목 매수
+        current_held = set(self.kiwoom.balance.keys())
+        current_ordered = set(self.kiwoom.order.keys())
+
+        for code, pbr_val in target:
+            if code in current_held or code in current_ordered:
+                continue
+
+            # VALUE_KEEP_HOLDINGS 시 기존 보유 종목은 보유 수에서 제외
+            if self.VALUE_KEEP_HOLDINGS and hasattr(self, '_value_initial_holdings'):
+                value_held_count = len(set(self.kiwoom.balance.keys()) - self._value_initial_holdings)
+            else:
+                value_held_count = self.get_balance_count()
+            if (value_held_count + self.get_buy_order_count()) >= self.VALUE_HOLDINGS:
+                break
+
+            name = self.resolve_stock_name(code)
+            display = f"{name}({code})" if name else code
+
+            # 모의투자 블랙리스트 체크
+            if self.kiwoom.mock and code in self.mock_trade_blacklist:
+                logger.debug("블랙리스트 종목 Value 매수 차단: %s", display)
+                continue
+
+            # 예산 계산 (VALUE_MAX_BUDGET 캡 적용, RSI용 CASH_RESERVE_RATIO는 적용하지 않음)
+            investable_deposit = min(self.deposit, self.VALUE_MAX_BUDGET) if self.VALUE_MAX_BUDGET > 0 else self.deposit
+            remaining_slots = self.VALUE_HOLDINGS - (value_held_count + self.get_buy_order_count())
+            if remaining_slots <= 0:
+                break
+            budget = investable_deposit / remaining_slots
+
+            bid = self._get_order_price(
+                code,
+                display,
+                primary_key='(최우선)매수호가',
+                price_label='매수호가',
+                fallback_keys=('현재가', '(최우선)매도호가'),
+            )
+            if bid is None:
+                continue
+
+            base_qty = math.floor(budget / bid)
+            cap_qty = math.floor((self.deposit * self.MAX_POSITION_RATIO) / bid)
+            if cap_qty < 1:
+                logger.info("Value 매수 불가 (비중 캡): %s", display)
+                continue
+            quantity = min(base_qty, cap_qty)
+
+            if quantity < 1:
+                logger.info("Value 매수 불가 (수량 부족): %s, budget=%d, bid=%d", display, budget, bid)
+                continue
+
+            # 예수금 체크
+            amount = quantity * bid
+            estimated_cost = math.floor(amount * self.BUY_FEE_RATE)
+            if self.deposit < estimated_cost:
+                logger.warning("Value 매수 예수금 부족: %s, deposit=%d, cost=%d", display, self.deposit, estimated_cost)
+                continue
+
+            order_result = self.kiwoom.send_order('send_buy_order', '1001', 0, code, quantity, bid, '00')
+
+            if order_result.get('success'):
+                self.deposit = self.deposit - estimated_cost
+                message = "📈 <b>Value 매수 주문 접수</b>\n종목: {}\n주문번호: {}\n수량: {}주\n가격: {:,}원\nPBR: {:.2f}\n예수금: {:,}원".format(
+                    display, order_result.get('order_no', 'N/A'), quantity, bid, pbr_val, self.deposit)
+                logger.info(message)
+                self._queue_or_send(message)
+
+                trade_logger.log_trade(
+                    mode='mock' if self.kiwoom.mock else 'real',
+                    action='BUY',
+                    code=code,
+                    name=name or code,
+                    price=bid,
+                    quantity=quantity,
+                    fee=estimated_cost - amount,
+                    net_amount=estimated_cost,
+                    order_no=str(order_result.get('order_no', '')),
+                )
+            else:
+                error_code = order_result.get('error_code', 'UNKNOWN')
+                error_message = order_result.get('error_message', '알 수 없는 오류')
+                error_msg = "❌ <b>Value 매수 주문 실패</b>\n종목: {}\n수량: {}주\n가격: {:,}원\nPBR: {:.2f}\n오류코드: {}\n오류메시지: {}".format(
+                    display, quantity, bid, pbr_val, error_code, html.escape(error_message))
+                logger.error("Value 매수 주문 실패: 종목=%s, error_code=%s, error_msg=%s", display, error_code, error_message)
+                self._queue_or_send(error_msg)
+
+        self._value_rebalance_done_today = True
+        logger.info("Value 리밸런싱 완료")
+
     @notify_on_exception(fallback_return=None)
     def load_mock_blacklist(self):
         """DB에서 모의투자 블랙리스트를 로드하는 함수"""
@@ -1361,6 +1605,7 @@ class RSIStrategy(threading.Thread):
                             self.full_cache_done_today = False
                             self.buy_window_done_today = False
                             self._fundamental_updated_today = False
+                            self._value_rebalance_done_today = False
                             # MA200 집계 날짜 초기화
                             today = get_korea_time().strftime('%Y%m%d')
                             if self.ma200_skip_date != today:
@@ -1543,32 +1788,37 @@ class RSIStrategy(threading.Thread):
                 # — 루프 실행 중 WebSocket/폴링 워커에 의한 값 변경이 개별 종목 판단에 영향을 주지 않도록 고정
                 self._rt_snapshot = dict(self.kiwoom.universe_realtime_transaction_info)
 
-                for idx, code in enumerate(self.universe.keys()):
-                    logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
-                    self._stop_event.wait(0.3)  # 종목별 처리 간격 (interruptible)
+                if self.strategy_mode == 'value':
+                    # Value mode: PBR 랭킹 기반 리밸런싱
+                    self._rebalance_value()
+                else:
+                    # RSI mode: 기존 RSI 기반 매매
+                    for idx, code in enumerate(self.universe.keys()):
+                        logger.debug('[{}/{} {}_{}]'.format(idx + 1, len(self.universe), code, self.universe[code]['code_name'].strip()))
+                        self._stop_event.wait(0.3)  # 종목별 처리 간격 (interruptible)
 
-                    # (1)접수한 주문이 있는지 확인
-                    if code in self.kiwoom.order.keys():
-                        # (2)주문이 있음
-                        logger.info('접수 주문 (%s)%s', code, self.kiwoom.order[code])
+                        # (1)접수한 주문이 있는지 확인
+                        if code in self.kiwoom.order.keys():
+                            # (2)주문이 있음
+                            logger.info('접수 주문 (%s)%s', code, self.kiwoom.order[code])
 
-                        # (2.1) '미체결수량' 확인하여 미체결 종목인지 확인
-                        if self.kiwoom.order[code]['미체결수량'] > 0:
-                            # 미체결 주문이 있으면 다음 종목으로 (현재는 자동 체결 대기)
-                            logger.info('미체결 수량 존재: %d', self.kiwoom.order[code]['미체결수량'])
-                            continue
+                            # (2.1) '미체결수량' 확인하여 미체결 종목인지 확인
+                            if self.kiwoom.order[code]['미체결수량'] > 0:
+                                # 미체결 주문이 있으면 다음 종목으로 (현재는 자동 체결 대기)
+                                logger.info('미체결 수량 존재: %d', self.kiwoom.order[code]['미체결수량'])
+                                continue
 
-                    # (3)보유 종목인지 확인
-                    elif code in self.kiwoom.balance.keys():
-                        logger.info('보유 종목 (%s)%s', code, self.kiwoom.balance[code])
-                        # (6)매도 대상 확인
-                        if self.check_sell_signal(code):
-                            # (7)매도 대상이면 매도 주문 접수
-                            self.order_sell(code)
+                        # (3)보유 종목인지 확인
+                        elif code in self.kiwoom.balance.keys():
+                            logger.info('보유 종목 (%s)%s', code, self.kiwoom.balance[code])
+                            # (6)매도 대상 확인
+                            if self.check_sell_signal(code):
+                                # (7)매도 대상이면 매도 주문 접수
+                                self.order_sell(code)
 
-                    else:
-                        # (4)접수 주문 및 보유 종목이 아니라면 매수대상인지 확인 후 주문접수
-                        self.check_buy_signal_and_order(code)
+                        else:
+                            # (4)접수 주문 및 보유 종목이 아니라면 매수대상인지 확인 후 주문접수
+                            self.check_buy_signal_and_order(code)
 
             except Exception as e:
                 logger.exception("Run loop exception: %s", traceback.format_exc())
