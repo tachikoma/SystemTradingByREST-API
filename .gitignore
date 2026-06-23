@@ -156,3 +156,7 @@ run
 cache/
 
 .env_approvals/
+!.omo/
+.omo/*
+!.omo/evidence/
+!.omo/plans/

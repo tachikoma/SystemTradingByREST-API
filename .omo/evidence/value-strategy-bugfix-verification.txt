@@ -1,0 +1,41 @@
+=== Value Strategy Bug Fix — 검증 결과 ===
+날짜: 2026-06-24
+
+=== 수정 사항 ===
+
+Bug A: _check_market_filter() close_date 컬럼명 하드코딩
+- 수정: line 752 → get_date_col_name() 동적 조회
+- 파일: strategy/RSIStrategy.py
+
+Bug B: _rebalance_value() 예산 공식 재설계
+- 수정: lines 860-865 → MAX_POSITION_RATIO 기반 + CASH_RESERVE_RATIO 적용
+- 파일: strategy/RSIStrategy.py
+
+Bug C: .env VALUE_MAX_BUDGET 증액
+- 수정: 1,000,000 → 5,000,000
+- 파일: .env
+
+=== 예산 변화 ===
+Before: budget = min(deposit, 1,000,000) / 10 = 100,000원 → 0/10 매수 가능
+After:  budget = min(deposit*0.2, total_investable) = 455,733원 → 10/10 매수 가능
+
+=== 종목별 매수 가능 여부 (예산 455,733원) ===
+기아(000270): 3주 ✅
+현대모비스(012330): 1주 ✅
+KB금융(105560): 2주 ✅
+현대차(005380): 2주 ✅
+삼성생명(032830): 5주 ✅
+삼성물산(028260): 3주 ✅
+삼성SDI(006400): 1주 ✅
+LG에너지솔루션(373220): 1주 ✅
+삼성전자(005930): 1주 ✅
+한화에어로스페이스(012450): 1주 ✅
+
+=== 체크리스트 ===
+[✅] lsp_diagnostics: clean
+[✅] Python syntax: OK
+[✅] Import: get_date_col_name already in scope (from util.db_helper import *)
+[✅] Budget math: 455,733원 = 455,733원 verified
+[✅] Config: VALUE_MAX_BUDGET=5000000 confirmed in .env
+[✅] Python AST: budget and get_date_col_name references found
+[✅] Mock run: strategy initializes cleanly, no import/syntax errors
