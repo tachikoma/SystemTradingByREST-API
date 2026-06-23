@@ -749,7 +749,8 @@ class RSIStrategy(threading.Thread):
                 logger.warning("069500 데이터 없음 — 마켓 필터 우회")
                 return True
 
-            sql = 'SELECT close_date, close FROM "069500" ORDER BY close_date DESC LIMIT 200'
+            date_col = get_date_col_name(self.strategy_name, '069500')
+            sql = f'SELECT "{date_col}", close FROM "069500" ORDER BY "{date_col}" DESC LIMIT 200'
             cur = execute_sql(self.strategy_name, sql)
             rows = cur.fetchall()
 
@@ -857,12 +858,21 @@ class RSIStrategy(threading.Thread):
                 logger.debug("블랙리스트 종목 Value 매수 차단: %s", display)
                 continue
 
-            # 예산 계산 (VALUE_MAX_BUDGET 캡 적용, RSI용 CASH_RESERVE_RATIO는 적용하지 않음)
-            investable_deposit = min(self.deposit, self.VALUE_MAX_BUDGET) if self.VALUE_MAX_BUDGET > 0 else self.deposit
+            # 예산 계산: MAX_POSITION_RATIO 기반 + CASH_RESERVE_RATIO 적용
+            total_investable = self.deposit
+            # 1차: CASH_RESERVE_RATIO 적용 (RSI 모드와 일관성)
+            total_investable = total_investable * (1 - self.CASH_RESERVE_RATIO)
+            # 2차: VALUE_MAX_BUDGET total cap 적용 (개별 예산 제한 아님)
+            if self.VALUE_MAX_BUDGET > 0:
+                total_investable = min(total_investable, self.VALUE_MAX_BUDGET)
+
             remaining_slots = self.VALUE_HOLDINGS - (value_held_count + self.get_buy_order_count())
             if remaining_slots <= 0:
                 break
-            budget = investable_deposit / remaining_slots
+
+            # 3차: 종목당 예산 = MAX_POSITION_RATIO 기반 (예수금의 MAX_POSITION_RATIO%),
+            # 단 잔여 투자 가능 금액(total_investable)을 초과 불가
+            budget = min(self.deposit * self.MAX_POSITION_RATIO, total_investable)
 
             bid = self._get_order_price(
                 code,
