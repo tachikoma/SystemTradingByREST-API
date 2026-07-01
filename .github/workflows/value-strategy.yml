@@ -30,7 +30,7 @@ jobs:
     if: >
       !(github.event_name == 'workflow_dispatch'
         && inputs.mode == 'real'
-        && inputs.dry_run != 'true')
+        && inputs.dry_run != true)
     runs-on: ubuntu-latest
     defaults:
       run:
