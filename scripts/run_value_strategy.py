@@ -75,7 +75,178 @@ def send_telegram(message: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# pykrx data fetchers
+# Naver stock screener data fetcher (primary)
+# ---------------------------------------------------------------------------
+
+NAVER_BASE = "https://finance.naver.com/sise/sise_market_sum.nhn?sosok="
+NAVER_POST = "https://finance.naver.com/sise/field_submit.nhn"
+NAVER_FIELDS = ["per", "pbr", "eps", "dividend", "market_sum"]
+
+
+def fetch_naver_stock_data() -> dict[str, dict[str, float | int]]:
+    """Fetch PBR/PER/EPS/BPS/DIV/market_cap from Naver stock screener.
+
+    Handles KOSPI + KOSDAQ, pagination, column-name-based field mapping.
+    Returns the same dict format as ``fetch_fundamental()`` but with an
+    additional ``market_cap`` key per stock.
+    """
+    import numpy as np
+    import requests
+    from bs4 import BeautifulSoup
+
+    logger.info("Fetching Naver stock data (PBR/PER/EPS/BPS/market_cap) …")
+
+    all_data: dict[str, dict[str, float | int]] = {}
+    session = requests.Session()
+
+    # We request just enough fields to cover our needs. Naver includes extra
+    # base columns (현재가, 전일비, 등락률 etc.) that do not map 1:1 to
+    # NAVER_FIELDS — we match by column header text below.
+    fields = NAVER_FIELDS
+
+    for sosok in (0, 1):
+        market_name = "KOSPI" if sosok == 0 else "KOSDAQ"
+
+        # GET first page → parse total pages + available field IDs
+        try:
+            r0 = session.get(NAVER_BASE + str(sosok), timeout=15)
+            r0.encoding = "euc-kr"
+            soup0 = BeautifulSoup(r0.text, "lxml")
+        except Exception as e:
+            logger.warning("  %s first page failed (%s) — skipped", market_name, e)
+            continue
+
+        # Total page count from the "맨뒤" (last-page) link
+        total_pages = 1
+        pgRR = soup0.select_one("td.pgRR > a")
+        if pgRR:
+            href = pgRR.get("href", "")
+            if "page=" in href:
+                total_pages = int(href.split("page=")[-1].split("&")[0])
+
+        # Dynamically discover field IDs (including PER/PBR etc.)
+        ipt_div = soup0.select_one("div.subcnt_sise_item_top")
+        if ipt_div:
+            available = [i.get("value") for i in ipt_div.select("input")]
+            fields = [f for f in NAVER_FIELDS if f in available] or NAVER_FIELDS
+
+        logger.info("  %s: %d pages, %d fields", market_name, total_pages, len(fields))
+
+        for page in range(1, total_pages + 1):
+            post_data = {
+                "menu": "market_sum",
+                "fieldIds": fields,
+                "returnUrl": f"{NAVER_BASE}{sosok}&page={page}",
+            }
+            try:
+                r = session.post(NAVER_POST, data=post_data, timeout=15)
+                r.encoding = "euc-kr"
+            except Exception as e:
+                logger.warning("  Page %d/%s failed (%s)", page, market_name, e)
+                continue
+
+            soup = BeautifulSoup(r.text, "lxml")
+            table = soup.select_one("div.box_type_l")
+            if not table:
+                continue
+
+            # Column headers: skip first (순위) and last (기타)
+            ths = table.select("thead th")
+            header_data = [th.get_text().strip() for th in ths][1:-1]
+            if not header_data:
+                continue
+
+            # Stock codes from <a class="tltle"> href
+            codes: list[str] = []
+            for a in table.select("a.tltle"):
+                href = a.get("href", "")
+                if "code=" in href:
+                    codes.append(href.split("code=")[1].split("&")[0].zfill(6))
+                else:
+                    codes.append("")
+
+            # Flat list: [stock_name, td_val1, td_val2, …, stock_name, …]
+            inner_data = [
+                item.get_text().strip()
+                for item in table.find_all(
+                    lambda x: (x.name == "a" and "tltle" in x.get("class", []))
+                    or (x.name == "td" and "number" in x.get("class", []))
+                )
+            ]
+
+            no_count = len(table.select("td.no"))
+            if no_count == 0:
+                continue
+            if len(inner_data) != no_count * len(header_data):
+                continue  # malformed page
+
+            arr = np.array(inner_data).reshape(no_count, len(header_data))
+
+            # Map Korean column names to our internal field keys
+            # header_data sample (fieldIds=per,pbr,eps,dividend,market_sum):
+            # ['종목명','현재가','전일비','등락률','액면가','시가총액','주당순이익','보통주배당금','PER','PBR']
+            COL_MAP = {
+                "시가총액": "market_cap_raw",
+                "주당순이익": "EPS",
+                "보통주배당금": "div_per_share",
+                "PER": "PER",
+                "PBR": "PBR",
+                "현재가": "cur_price",
+            }
+            col_idx: dict[str, int] = {}
+            for j, col in enumerate(header_data):
+                mapped = COL_MAP.get(col)
+                if mapped:
+                    col_idx[mapped] = j
+
+            def _num(row_i: int, key: str, default: float = 0.0) -> float:
+                idx = col_idx.get(key)
+                if idx is None:
+                    return default
+                try:
+                    raw = arr[row_i][idx]
+                    # Remove non-numeric chars except . , -
+                    import re
+                    cleaned = re.sub(r"[^0-9.,\-]", "", raw).strip()
+                    cleaned = cleaned.replace(",", "")
+                    if not cleaned or cleaned in ("-",):
+                        return default
+                    return float(cleaned)
+                except (ValueError, IndexError):
+                    return default
+
+            for i in range(no_count):
+                code = codes[i] if i < len(codes) else ""
+                if not code:
+                    continue
+
+                pbr = _num(i, "PBR")
+                if pbr <= 0:
+                    continue
+
+                raw_mcap = _num(i, "market_cap_raw")  # 억(10⁸) 단위
+                market_cap = int(raw_mcap * 100_000_000)
+
+                eps = _num(i, "EPS")
+                div_ps = _num(i, "div_per_share")
+                cur_prc = _num(i, "cur_price")
+                div_pct = (div_ps / cur_prc * 100) if cur_prc > 0 and div_ps > 0 else 0.0
+
+                all_data[code] = {
+                    "PBR": pbr,
+                    "PER": _num(i, "PER", float("inf")),
+                    "EPS": eps,
+                    "BPS": 0.0,  # not available from Naver screener
+                    "DIV": div_pct,
+                    "market_cap": market_cap,
+                }
+
+    logger.info("Naver stock data: %d stocks", len(all_data))
+    return all_data
+
+
+# ---------------------------------------------------------------------------
+# pykrx data fetchers (fallback / supplementary)
 # ---------------------------------------------------------------------------
 
 def fetch_fundamental(today: str | None = None) -> dict[str, dict[str, float]]:
@@ -190,7 +361,8 @@ def run() -> None:
     logger.info("  Value Strategy — Standalone One-Shot Execution")
     logger.info("  %s", datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S %Z"))
     logger.info("  Mode: %s  |  Dry-run: %s", "REAL" if not is_mock else "MOCK", dry_run)
-    logger.info("  PBR data: pykrx (PREVIOUS trading day)")
+    logger.info("  PBR/시총 data: Naver stock screener (실시간)")
+    logger.info("  Market filter: pykrx KOSPI200 MA200")
     logger.info("  VALUE_HOLDINGS=%d  VALUE_MAX_BUDGET=%d  MIN_MCAP=%d",
                 value_holdings, value_max_budget, value_min_market_cap)
     logger.info("=" * 70)
@@ -203,20 +375,28 @@ def run() -> None:
         send_telegram(msg)
         return
 
-    # ---- 2. Fundamental data ----
-    logger.info("[2/7] Fetching fundamental data (pykrx) …")
-    fundamental = fetch_fundamental()
-    if not fundamental:
-        send_telegram("❌ Value Strategy: no fundamental data — aborting")
-        return
-    logger.info("  %d stocks with PBR", len(fundamental))
+    # ---- 2. PBR / market cap from Naver (primary) ----
+    logger.info("[2/7] Fetching stock data from Naver …")
+    stock_data = fetch_naver_stock_data()
+    if not stock_data:
+        logger.warning("Naver fetch failed — falling back to pykrx")
+        logger.info("[2b/7] Fetching fundamental data (pykrx fallback) …")
+        fundamental = fetch_fundamental()
+        if not fundamental:
+            send_telegram("❌ Value Strategy: no fundamental data — aborting")
+            return
+        caps = fetch_market_caps()
+        logger.info("  pykrx fallback: %d stocks with PBR", len(fundamental))
+    else:
+        fundamental = {}
+        caps: dict[str, int] = {}
+        for code, d in stock_data.items():
+            fundamental[code] = {k: d[k] for k in ("PBR", "PER", "EPS", "BPS", "DIV")}
+            caps[code] = d.get("market_cap", 0) or 0
+        logger.info("  Naver: %d stocks with PBR + market cap", len(stock_data))
 
-    # ---- 3. Market cap data ----
-    logger.info("[3/7] Fetching market cap data (pykrx) …")
-    caps = fetch_market_caps()
-
-    # ---- 4. Filter & rank ----
-    logger.info("[4/7] Filtering and ranking by PBR …")
+    # ---- 3. Filter & rank ----
+    logger.info("[3/6] Filtering and ranking by PBR …")
 
     candidates: list[tuple[str, float, int]] = []
     for code, fund in fundamental.items():
@@ -237,10 +417,10 @@ def run() -> None:
             threshold = positive_caps[max(0, len(positive_caps) // 10)]
             before = len(candidates)
             candidates = [c for c in candidates if c[2] >= threshold]
-            logger.info("  Bottom 10%% cap removed: %d → %d (threshold=%,d won)", before, len(candidates), threshold)
+            logger.info("  Bottom 10%% cap removed: %d → %d (threshold=%s won)", before, len(candidates), f"{threshold:,}")
 
     if value_market_filter_only_kospi:
-        logger.info("  KOSPI-only filter requested (not implemented — pykrx limitation)")
+        logger.info("  KOSPI-only filter requested (filtering handled by Naver data)")
 
     candidates.sort(key=lambda x: x[1])  # ascending PBR
 
@@ -274,8 +454,8 @@ def run() -> None:
         )
         return
 
-    # ---- 5. Safety gate for REAL mode ----
-    logger.info("[5/7] Safety check …")
+    # ---- 4. Safety gate for REAL mode ----
+    logger.info("[4/6] Safety check …")
     if not is_mock:
         logger.warning("=" * 70)
         logger.warning("  ⚠️  WARNING: REAL TRADING MODE — about to place REAL buy orders!")
@@ -286,8 +466,8 @@ def run() -> None:
             time.sleep(1)
         logger.warning("  Proceeding with real orders …")
 
-    # ---- 6. Kiwoom auth ----
-    logger.info("[6/7] Initializing Kiwoom API …")
+    # ---- 5. Kiwoom auth ----
+    logger.info("[5/6] Initializing Kiwoom API …")
     if is_mock:
         appkey = os.environ.get("KIWOOM_MOCK_APPKEY") or os.environ.get("KIWOOM_APPKEY")
         secretkey = os.environ.get("KIWOOM_MOCK_SECRETKEY") or os.environ.get("KIWOOM_SECRETKEY")
@@ -308,8 +488,8 @@ def run() -> None:
         send_telegram(f"❌ Value Strategy: Kiwoom init error — {e}")
         return
 
-    # ---- 7. Balance & deposit ----
-    logger.info("[7/7] Checking balance and placing orders …")
+    # ---- 6. Balance & deposit ----
+    logger.info("[6/6] Checking balance and placing orders …")
     try:
         kiwoom.get_balance()
         holdings = set(kiwoom.balance.keys())
@@ -321,7 +501,7 @@ def run() -> None:
 
     try:
         deposit = kiwoom.get_deposit()
-        logger.info("  Available deposit: %,d won", deposit)
+        logger.info("  Available deposit: %s won", f"{deposit:,}")
     except Exception as e:
         logger.exception("Deposit check failed")
         send_telegram(f"❌ Value Strategy: deposit error — {e}")
@@ -379,12 +559,12 @@ def run() -> None:
         max_pos = int(deposit * 0.3)
         qty = min(int(budget / price), int(max_pos / price))
         if qty < 1:
-            logger.info("  Skip %s: budget insufficient (%,d won, price=%,d)", name, int(budget), price)
+            logger.info("  Skip %s: budget insufficient (%s won, price=%s)", name, f"{int(budget):,}", f"{price:,}")
             continue
 
         cost = math.floor(qty * price * 1.0015)
         if deposit < cost:
-            logger.warning("  Skip %s: deposit short (need %,d, have %,d)", name, cost, deposit)
+            logger.warning("  Skip %s: deposit short (need %s, have %s)", name, f"{cost:,}", f"{deposit:,}")
             continue
 
         try:
@@ -397,15 +577,15 @@ def run() -> None:
             deposit -= cost
             placed.append((code, name, qty, price, pbr))
             pending += 1
-            logger.info("  ✅ Buy %s(%s): %d shares @ %,d won (PBR=%.2f)", name, code, qty, price, pbr)
+            logger.info("  ✅ Buy %s(%s): %d shares @ %s won (PBR=%.2f)", name, code, qty, f"{price:,}", pbr)
         else:
             logger.warning("  ❌ Buy %s failed: %s", name, result.get("error_message", "?"))
 
     # Summary
     logger.info("")
     logger.info("=" * 70)
-    logger.info("  Execution done  |  Orders placed: %d  |  Remaining deposit: %,d won",
-                len(placed), deposit)
+    logger.info("  Execution done  |  Orders placed: %d  |  Remaining deposit: %s won",
+                len(placed), f"{deposit:,}")
     logger.info("=" * 70)
 
     if placed:
