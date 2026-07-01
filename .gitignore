@@ -156,4 +156,10 @@ run
 cache/
 
 .env_approvals/
-.omo
+
+# OMO planning artifacts (track plans, evidence, but not session state)
+!.omo/
+.omo/*
+!.omo/drafts/
+!.omo/evidence/
+!.omo/plans/

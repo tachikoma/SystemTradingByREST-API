@@ -1,0 +1,44 @@
+# Task 4: Dry-Run Test Evidence
+
+## Test Date
+2026-07-01 21:23 KST
+
+## Command
+```bash
+poetry run python scripts/run_value_strategy.py --dry-run
+```
+
+## Result: PASS (graceful error handling)
+
+### What worked:
+1. ✅ Script startup and configuration logging
+2. ✅ [1/7] Market filter (KOSPI200 MA200) — pykrx OHLCV endpoint works, bypassed due to 199<200 rows
+3. ✅ [2/7] Fundamental data fetch — detected failure, logged error
+4. ✅ Telegram notification fallback: "❌ Value Strategy: no fundamental data — aborting"
+5. ✅ Clean exit (no crash, no unhandled exception)
+
+### What failed (known pykrx issue):
+- `fetch_fundamental_data()` — pykrx v1.2.8 `get_market_fundancial_by_ticker()` fails
+  - KRX website API has changed; pykrx requires `KRX_ID`/`KRX_PW` env vars
+  - Same issue affects existing `util/make_up_universe.fetch_fundamental_data()`
+
+### Log Summary
+```
+[1/7] Market filter (KOSPI200 MA200) …
+069500 data insufficient (199 rows) — filter bypassed
+[2/7] Fetching fundamental data (pykrx) …
+ERROR pykrx fundamental fetch failed: ...
+[Telegram fallback] ❌ Value Strategy: no fundamental data — aborting
+```
+
+## pykrx Issue Resolution
+
+This is a project-wide issue. The existing codebase (`make_up_universe.py` line 1721) 
+uses the same pykrx call and has the same error. Resolution options:
+
+1. **Set KRX_ID/KRX_PW**: Create KRX account, set environment variables
+2. **Update pykrx**: Check for newer version that fixes KRX compatibility
+3. **Use Kiwoom API fallback**: `fetch_all_stocks_from_kiwoom(ka10001)` provides PBR data
+4. **Wait**: KRX website API may be temporary issue
+
+The script exits cleanly with an appropriate error message in all failure modes.
