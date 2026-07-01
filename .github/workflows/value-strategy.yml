@@ -68,11 +68,11 @@ jobs:
 
       - name: Run value strategy
         run: |
-          DRY_RUN_FLAG="--dry-run"
-          if [[ "${{ inputs.dry_run == 'false' && github.event_name == 'workflow_dispatch' }}" == "true" ]]; then
-            DRY_RUN_FLAG="--no-dry-run"
+          if [[ "${{ inputs.dry_run }}" == "false" && "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            poetry run python scripts/run_value_strategy.py --no-dry-run
+          else
+            poetry run python scripts/run_value_strategy.py --dry-run
           fi
-          poetry run python scripts/run_value_strategy.py $DRY_RUN_FLAG
 
       - name: Upload logs
         if: always()
