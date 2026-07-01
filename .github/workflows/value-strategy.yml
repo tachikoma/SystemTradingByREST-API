@@ -68,9 +68,9 @@ jobs:
 
       - name: Run value strategy
         run: |
-          DRY_RUN_FLAG=""
-          if [[ "${{ inputs.dry_run != 'false' || github.event_name == 'schedule' }}" == "true" ]]; then
-            DRY_RUN_FLAG="--dry-run"
+          DRY_RUN_FLAG="--dry-run"
+          if [[ "${{ inputs.dry_run == 'false' && github.event_name == 'workflow_dispatch' }}" == "true" ]]; then
+            DRY_RUN_FLAG="--no-dry-run"
           fi
           poetry run python scripts/run_value_strategy.py $DRY_RUN_FLAG
 
