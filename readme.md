@@ -256,6 +256,66 @@ poetry run python -m backtest.run_backtest
 
 - 유니버스 캐시 및 강제 갱신 관련 상세 문서는 [docs/UNIVERSE_CACHE.md](docs/UNIVERSE_CACHE.md) 참고
 
+## GitHub Actions — 가치 전략 (Value Strategy) 일일 실행
+
+PBR 랭킹 기반 가치 전략을 GitHub Actions로 매일 09:00 KST에 1회 실행할 수 있습니다.
+실행 스크립트: `scripts/run_value_strategy.py`
+
+> **⚠️ 중요**: pykrx PBR 데이터는 **전일 기준**입니다. 09:00 KST 실행 시 전일 장 마감 기준 PBR로 리밸런싱됩니다.
+
+### GitHub Secrets 설정
+
+GitHub 저장소 → Settings → Secrets and variables → Actions 에서 다음 Secrets을 설정하세요:
+
+| Secret | 설명 | 출처 |
+|--------|------|------|
+| `KIWOOM_REAL_APPKEY` | 실전투자 앱키 | `.env`의 `KIWOOM_REAL_APPKEY` |
+| `KIWOOM_REAL_SECRETKEY` | 실전투자 시크릿키 | `.env`의 `KIWOOM_REAL_SECRETKEY` |
+| `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 | `.env`의 `TELEGRAM_BOT_TOKEN` |
+| `TELEGRAM_CHAT_ID` | 텔레그램 채팅방 ID | `.env`의 `TELEGRAM_CHAT_ID` |
+
+GitHub Variables (선택):
+
+| Variable | 기본값 | 설명 |
+|----------|--------|------|
+| `VALUE_HOLDINGS` | `10` | 목표 보유 종목 수 |
+| `VALUE_MAX_BUDGET` | `0` | 최대 투자 금액 (0=무제한) |
+| `VALUE_MIN_MARKET_CAP` | `0` | 최소 시가총액 (0=하위10%자동제외) |
+| `VALUE_MARKET_FILTER` | `true` | KOSPI200 MA200 시장 필터 |
+
+### Workflow 실행
+
+1. **자동 실행**: 평일 09:00 KST (`cron: 0 0 * * 1-5`)
+2. **수동 실행**: GitHub → Actions → Value Strategy Daily Run → **Run workflow**
+   - `mode`: `mock` (기본) 또는 `real`
+   - `dry_run`: `true` (기본, 순위표만 출력) 또는 `false` (실제 주문)
+
+> **🔒 안전장치**: `mode=real` + `dry_run=false` 조합은 workflow 레벨에서 차단됩니다.
+> 실전 전환은 README 하단 "실전 전환 절차"를 참고하세요.
+
+### 로컬 테스트
+
+```bash
+# Dry-run (PBR 순위표 출력)
+poetry run python scripts/run_value_strategy.py
+
+# Mock 모드 실제 주문
+KIWOOM_MODE=mock poetry run python scripts/run_value_strategy.py --no-dry-run
+
+# 실전 모드 (경고 카운트다운 후 진행)
+KIWOOM_MODE=real KIWOOM_REAL_APPKEY=... KIWOOM_REAL_SECRETKEY=... \
+  poetry run python scripts/run_value_strategy.py --no-dry-run
+```
+
+### 실전 전환 절차
+
+1. GitHub Secrets에 `KIWOOM_REAL_APPKEY`, `KIWOOM_REAL_SECRETKEY` 설정
+2. workflow_dispatch 실행 (mode=mock, dry_run=false) → 모의투자 주문 확인
+3. 모의투자 3일 이상 정상 동작 확인
+4. **README의 이 안내를 삭제한 후** mode=real 로 실행
+
+> **⚠️ 실전 전환은 신중히 진행하세요.**
+
 ## 기여
  - 버그 리포트 및 PR 환영합니다. 변경 시 간단한 설명과 재현 방법을 적어주시면 빠르게 리뷰하겠습니다.
 
