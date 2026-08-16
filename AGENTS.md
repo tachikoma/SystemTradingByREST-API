@@ -8,6 +8,11 @@
 
 키움증권 OpenAPI REST 기반 한국 주식 자동매매 봇. RSI + 이동평균 전략으로 KOSPI/KOSDAQ 종목 선정, 실시간 시세 모니터링, 자동 매매 실행. 백테스트 엔진 내장.
 
+> **⚠️ RSI(2) 급락매수 전략 검증 결과 (2026-08-16): 실사용 불가 판정.**
+> WFA/파라미터 안정성/몬테카를로(MC-A/B/C/D) 전체 검증에서 **신호가 무작위 매수와 통계적으로 구분되지 않음**(MC-D permutation,
+> SIGNAL_NO_INFO). 음수 수익의 원인은 신호 정보 부재 + 거래비용. 신호 패밀리 교체만이 개선 경로이며
+> 신규 전략 검증은 `feature/strategy-research` 브랜치에서 별도 진행. 상세: `backtest/reports/20260816_rsi2_validation/`.
+
 ## STRUCTURE
 
 ```
@@ -39,6 +44,7 @@
 | 알림 | `util/notifier.py` | 텔레그램 전송 (notify_on_exception 데코레이터) |
 | 백테스트 실행 | `backtest/run_backtest.py` | run_backtest → fetch_historical_data 선행 |
 | 백테스트 분석 | `backtest/analyze_*.py` | 리스크/수익성/MDD 분석 |
+| **전략 검증 (WFA/파라미터/MC)** | `backtest/run_wfa_validation.py` 등 | 신호 정보량 검증은 `run_monte_carlo.py` MC-D 포함 |
 | 테스트 실행 | `tests/` | `pytest` (integration 마커로 분리) |
 
 ## CONVENTIONS
@@ -74,6 +80,13 @@ poetry run pytest -m integration                    # 통합 테스트
 poetry run python -m backtest.fetch_historical_data  # 데이터 수집 (최초 1회)
 poetry run python -m backtest.run_backtest           # 백테스트 실행
 
+# 전략 검증 (gate)
+poetry run python -m backtest.run_wfa_validation --grid full --workers 2
+poetry run python -m backtest.run_parameter_stability --workers 2
+poetry run python -m backtest.run_monte_carlo --workers 2            # MC-A/B/C
+poetry run python -m backtest.run_monte_carlo --skip-a --skip-b --skip-c --mc-d-iters 30  # MC-D만
+poetry run python -m backtest.make_validation_charts                 # 차트 생성
+
 # 의존성
 poetry add <package>
 poetry install
@@ -84,6 +97,9 @@ poetry install
 - **Kiwoom REST API**는 모의(`mockapi.kiwoom.com`) / 실전(`api.kiwoom.com`) URL 분리.
 - **WebSocket** 재연결시 구독 자동 재등록. 로그인 중복 방지 Lock 적용.
 - **백테스트 출력물**은 `backtest/output/`에 누적됨 (467개 파일).
+- **검증 아카이브**는 `backtest/reports/<날짜>_<전략>/`에 트래킹 (output은 gitignored).
+- **백테스트 데이터** (2026-08-16 수집): FDR, 2,962종목, 2016-01-04~2026-08-14, 월별 유니버스 스냅샷 상위 250개/월 128개월. `data/backtest_data.db` + `cache/backtest_data_price_data.parquet`.
+- **신규 전략 검증**은 `feature/strategy-research` 브랜치(별도 worktree)에서 진행. develop의 RSIStrategy/backtest_engine은 수정 금지.
 - **거래 수수료/세금**은 모의/실전 각각 환경변수로 분리 (`TRADING_FEE_PERCENT_MOCK` 등).
 - **유니버스 캐시 모드:** `UNIVERSE_CACHE_MODE` (startup/eod/on_demand).
 - **실전투자 확인 프롬프트**는 `-y`/`--yes` 플래그로 스킵 가능 (자동화용).

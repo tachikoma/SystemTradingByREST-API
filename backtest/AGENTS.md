@@ -6,6 +6,9 @@
 ## OVERVIEW
 백테스트 엔진 및 전략 분석 스크립트 모음. 과거 시세를 바탕으로 RSIStrategy의 성과를 검증하고 리스크를 측정합니다.
 
+> **⚠️ RSI(2) 급락매수 전략 검증 관문 통과 실패 (2026-08-16):** 신호가 무작위 매수와 구분되지 않음(MC-D SIGNAL_NO_INFO).
+> 종합 보고서는 `reports/20260816_rsi2_validation/validation_report_20260816.md`. 신규 전략 검증은 `feature/strategy-research` 브랜치(별도 worktree)에서 진행.
+
 ## FILES
 | 파일 | 역할 |
 |------|------|
@@ -21,6 +24,22 @@
 | build_historical_universe.py | 시점별 과거 유니버스 재구축 |
 | test_cumulative_rsi.py | 누적 RSI 기반 진입 전략 테스트 |
 | test_mdd_reduction.py | MDD 개선 방안별 성능 테스트 |
+| validation_common.py | 검증 gate 공통 헬퍼 (데이터 로드, run_single, 지표 캐시) |
+| run_wfa_validation.py | Walk-Forward Analysis 검증 |
+| run_parameter_stability.py | 파라미터 안정성 검증 |
+| run_monte_carlo.py | 몬테카를로 MC-A/B/C + **MC-D 신호 permutation 검정** |
+| make_validation_charts.py | 자산곡선/낙폭/연도별 손익 차트 생성 |
+
+## VALIDATION GATE (전략 검증 관문)
+신규 전략은 아래 4단계를 순서대로 통과해야 실사용 후보로 승격된다. (RSI(2) 전략은 MC-D에서 탈락)
+
+1. `run_wfa_validation.py` — 표본 외(WFA OOS) 성과가 0보다 크고, IS 최적 파라미터가 윈도우별로 안정적인가
+2. `run_parameter_stability.py` — 단일 파라미터 변동에 성과가 요동치지 않고 고원(plateau)이 있는가
+3. `run_monte_carlo.py` (MC-A/B/C) — 표본 추출 분포에서 음수 수익 확률이 기준 이하인가
+4. `run_monte_carlo.py` (MC-D) — 매수 신호를 무작위로 치환한 permutation에서 baseline이 분포 안에
+   있으면 SIGNAL_NO_INFO (신호 정보 없음) → 신호 패밀리 교체 필요
+
+결과 아카이브: `reports/<날짜>_<전략>/` (output/은 gitignored라 트래킹 아카이브 사용)
 
 ## CONVENTIONS
 - 모든 출력물은 `backtest/output/` 디렉토리에 저장합니다.

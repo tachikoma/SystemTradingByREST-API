@@ -1,0 +1,345 @@
+{
+  "db": "backtest_data",
+  "period": {
+    "start": "2016-01-01",
+    "end": "2026-06-30"
+  },
+  "grid_name": "full",
+  "grid": {
+    "rsi_sell_threshold": [
+      70,
+      75,
+      80
+    ],
+    "profit_target_percent": [
+      0.0,
+      10.0
+    ],
+    "time_stop_loss_days": [
+      90,
+      180
+    ]
+  },
+  "windows": 8,
+  "full_period_baseline": {
+    "start": "20160104",
+    "end": "20260630",
+    "total_return": -29.32,
+    "annual_return": -3.34,
+    "mdd": -37.6,
+    "sharpe": -0.209,
+    "win_rate": 78.87,
+    "sell_trades": 710,
+    "avg_profit_rate": -0.19,
+    "total_profit": -1233364.3640500284,
+    "days": 2572
+  },
+  "oos_wfa_aggregated": {
+    "total_return": 0.78,
+    "annual_return": 0.11,
+    "mdd": -22.9,
+    "sharpe": 0.099,
+    "days": 1732,
+    "start": "20190102",
+    "end": "20260814"
+  },
+  "oos_baseline_aggregated": {
+    "total_return": -1.62,
+    "annual_return": -0.24,
+    "mdd": -32.71,
+    "sharpe": 0.08,
+    "days": 1732,
+    "start": "20190102",
+    "end": "20260814"
+  },
+  "window_records": [
+    {
+      "window": 1,
+      "is_start": "20160101",
+      "is_end": "20181201",
+      "os_start": "20190101",
+      "os_end": "20191201",
+      "is_best_combo": "SELL70_PT10.0_TSL180",
+      "is_best_sharpe": 0.09,
+      "is_best_return": 1.14,
+      "os_wfa": {
+        "start": "20190102",
+        "end": "20191129",
+        "total_return": -15.27,
+        "annual_return": -16.87,
+        "mdd": -21.51,
+        "sharpe": -1.238,
+        "win_rate": 54.55,
+        "sell_trades": 22,
+        "avg_profit_rate": -6.35,
+        "total_profit": -822937.9253500011,
+        "days": 226
+      },
+      "os_baseline": {
+        "start": "20190102",
+        "end": "20191129",
+        "total_return": -14.86,
+        "annual_return": -16.42,
+        "mdd": -16.31,
+        "sharpe": -1.501,
+        "win_rate": 77.59,
+        "sell_trades": 58,
+        "avg_profit_rate": -1.97,
+        "total_profit": -589268.9589000028,
+        "days": 226
+      }
+    },
+    {
+      "window": 2,
+      "is_start": "20170101",
+      "is_end": "20191201",
+      "os_start": "20200101",
+      "os_end": "20201201",
+      "is_best_combo": "SELL70_PT10.0_TSL180",
+      "is_best_sharpe": -0.681,
+      "is_best_return": -24.38,
+      "os_wfa": {
+        "start": "20200102",
+        "end": "20201201",
+        "total_return": 5.15,
+        "annual_return": 5.71,
+        "mdd": -22.75,
+        "sharpe": 0.413,
+        "win_rate": 81.25,
+        "sell_trades": 32,
+        "avg_profit_rate": 7.08,
+        "total_profit": 1107496.7963499986,
+        "days": 228
+      },
+      "os_baseline": {
+        "start": "20200102",
+        "end": "20201201",
+        "total_return": 24.49,
+        "annual_return": 27.39,
+        "mdd": -15.33,
+        "sharpe": 1.592,
+        "win_rate": 93.07,
+        "sell_trades": 101,
+        "avg_profit_rate": 6.13,
+        "total_profit": 3325462.3119499944,
+        "days": 228
+      }
+    },
+    {
+      "window": 3,
+      "is_start": "20180101",
+      "is_end": "20201201",
+      "os_start": "20210101",
+      "os_end": "20211201",
+      "is_best_combo": "SELL75_PT0.0_TSL90",
+      "is_best_sharpe": 0.516,
+      "is_best_return": 21.47,
+      "os_wfa": {
+        "start": "20210104",
+        "end": "20211201",
+        "total_return": -14.85,
+        "annual_return": -16.34,
+        "mdd": -17.58,
+        "sharpe": -1.15,
+        "win_rate": 72.41,
+        "sell_trades": 87,
+        "avg_profit_rate": -0.93,
+        "total_profit": -448911.48495000356,
+        "days": 227
+      },
+      "os_baseline": {
+        "start": "20210104",
+        "end": "20211201",
+        "total_return": -7.42,
+        "annual_return": -8.21,
+        "mdd": -12.03,
+        "sharpe": -0.622,
+        "win_rate": 82.09,
+        "sell_trades": 67,
+        "avg_profit_rate": 2.21,
+        "total_profit": 649816.9652999969,
+        "days": 227
+      }
+    },
+    {
+      "window": 4,
+      "is_start": "20190101",
+      "is_end": "20211201",
+      "os_start": "20220101",
+      "os_end": "20221201",
+      "is_best_combo": "SELL80_PT0.0_TSL180",
+      "is_best_sharpe": 0.464,
+      "is_best_return": 16.4,
+      "os_wfa": {
+        "start": "20220103",
+        "end": "20221201",
+        "total_return": -9.58,
+        "annual_return": -10.62,
+        "mdd": -17.98,
+        "sharpe": -0.71,
+        "win_rate": 82.46,
+        "sell_trades": 57,
+        "avg_profit_rate": 1.15,
+        "total_profit": 286742.97384999745,
+        "days": 226
+      },
+      "os_baseline": {
+        "start": "20220103",
+        "end": "20221201",
+        "total_return": -8.99,
+        "annual_return": -9.97,
+        "mdd": -19.3,
+        "sharpe": -0.636,
+        "win_rate": 85.07,
+        "sell_trades": 67,
+        "avg_profit_rate": 0.85,
+        "total_profit": 247497.77219999675,
+        "days": 226
+      }
+    },
+    {
+      "window": 5,
+      "is_start": "20200101",
+      "is_end": "20221201",
+      "os_start": "20230101",
+      "os_end": "20231201",
+      "is_best_combo": "SELL80_PT0.0_TSL180",
+      "is_best_sharpe": 0.764,
+      "is_best_return": 31.78,
+      "os_wfa": {
+        "start": "20230102",
+        "end": "20231201",
+        "total_return": 3.74,
+        "annual_return": 4.16,
+        "mdd": -10.87,
+        "sharpe": 0.389,
+        "win_rate": 87.84,
+        "sell_trades": 74,
+        "avg_profit_rate": 4.37,
+        "total_profit": 1637391.6987499967,
+        "days": 227
+      },
+      "os_baseline": {
+        "start": "20230102",
+        "end": "20231201",
+        "total_return": 0.55,
+        "annual_return": 0.61,
+        "mdd": -12.04,
+        "sharpe": 0.111,
+        "win_rate": 85.54,
+        "sell_trades": 83,
+        "avg_profit_rate": 2.62,
+        "total_profit": 1053200.6997499962,
+        "days": 227
+      }
+    },
+    {
+      "window": 6,
+      "is_start": "20210101",
+      "is_end": "20231201",
+      "os_start": "20240101",
+      "os_end": "20241201",
+      "is_best_combo": "SELL70_PT0.0_TSL180",
+      "is_best_sharpe": 0.116,
+      "is_best_return": 1.91,
+      "os_wfa": {
+        "start": "20240102",
+        "end": "20241129",
+        "total_return": -6.69,
+        "annual_return": -7.5,
+        "mdd": -15.17,
+        "sharpe": -0.533,
+        "win_rate": 81.69,
+        "sell_trades": 71,
+        "avg_profit_rate": 2.67,
+        "total_profit": 936924.4988499967,
+        "days": 224
+      },
+      "os_baseline": {
+        "start": "20240102",
+        "end": "20241129",
+        "total_return": -6.69,
+        "annual_return": -7.5,
+        "mdd": -15.17,
+        "sharpe": -0.533,
+        "win_rate": 81.69,
+        "sell_trades": 71,
+        "avg_profit_rate": 2.67,
+        "total_profit": 936924.4988499967,
+        "days": 224
+      }
+    },
+    {
+      "window": 7,
+      "is_start": "20220101",
+      "is_end": "20241201",
+      "os_start": "20250101",
+      "os_end": "20251201",
+      "is_best_combo": "SELL75_PT0.0_TSL90",
+      "is_best_sharpe": -0.37,
+      "is_best_return": -16.58,
+      "os_wfa": {
+        "start": "20250102",
+        "end": "20251201",
+        "total_return": -7.31,
+        "annual_return": -8.26,
+        "mdd": -15.17,
+        "sharpe": -0.546,
+        "win_rate": 70.79,
+        "sell_trades": 89,
+        "avg_profit_rate": -0.14,
+        "total_profit": -142368.72620000393,
+        "days": 222
+      },
+      "os_baseline": {
+        "start": "20250102",
+        "end": "20251201",
+        "total_return": -4.97,
+        "annual_return": -5.62,
+        "mdd": -15.76,
+        "sharpe": -0.37,
+        "win_rate": 78.95,
+        "sell_trades": 76,
+        "avg_profit_rate": 1.12,
+        "total_profit": 406598.9173999963,
+        "days": 222
+      }
+    },
+    {
+      "window": 8,
+      "is_start": "20230101",
+      "is_end": "20251201",
+      "os_start": "20260101",
+      "os_end": "20261201",
+      "is_best_combo": "SELL70_PT0.0_TSL90",
+      "is_best_sharpe": -0.036,
+      "is_best_return": -4.38,
+      "os_wfa": {
+        "start": "20260102",
+        "end": "20260814",
+        "total_return": 0.78,
+        "annual_return": 1.3,
+        "mdd": -22.2,
+        "sharpe": 0.176,
+        "win_rate": 84.21,
+        "sell_trades": 76,
+        "avg_profit_rate": 2.75,
+        "total_profit": 899727.8509999965,
+        "days": 152
+      },
+      "os_baseline": {
+        "start": "20260102",
+        "end": "20260814",
+        "total_return": -1.62,
+        "annual_return": -2.67,
+        "mdd": -19.49,
+        "sharpe": -0.029,
+        "win_rate": 94.92,
+        "sell_trades": 59,
+        "avg_profit_rate": 5.86,
+        "total_profit": 1645086.1694499974,
+        "days": 152
+      }
+    }
+  ]
+}
