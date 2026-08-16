@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Callable
 
 import pandas as pd
 from backtest.run_backtest import load_price_data_from_db, load_universe_availability, load_monthly_universe_snapshots
@@ -111,6 +111,7 @@ def simulate_trend_follow(
     use_market_filter: bool = True,
     min_stock_price: int = 1000,
     stock_selection: str = 'rs',
+    selection_patch: Optional[Callable] = None,
 ) -> Dict:
     import pandas as pd
 
@@ -216,7 +217,9 @@ def simulate_trend_follow(
                     universe_set = set(monthly_universe_map[yyyymm])
                     sorted_codes = [c for c in sorted_codes if c in universe_set]
 
-                if stock_selection == 'rs':
+                if selection_patch is not None:
+                    selected = selection_patch(sorted_codes, date, MAX_HOLDINGS)
+                elif stock_selection == 'rs':
                     selected = _select_stocks_by_rs(price_data, sorted_codes, date, lookback_months * 21, min_stock_price)
                 elif stock_selection == 'ma_bull':
                     selected = _select_stocks_by_ma_bull(price_data, sorted_codes, date, min_stock_price)

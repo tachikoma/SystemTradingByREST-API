@@ -65,8 +65,9 @@ def get_simulate(name):
 
 
 def supports_buy_patch(name):
-    """MC-D 신호 permutation 훅 지원 여부"""
-    return name in ('vb', 'vb_daily')
+    """MC-D 신호 permutation 훅 지원 여부
+    (vb/trend_follow는 selection_patch, vb_daily는 buy_patch)"""
+    return name in ('vb', 'vb_daily', 'trend_follow')
 
 
 # ---------------------------------------------------------------
@@ -124,7 +125,10 @@ def run_strategy(
     params = engine_defaults(engine_name)
     params.update(kwargs)
     if buy_patch is not None and supports_buy_patch(engine_name):
-        params['buy_patch'] = buy_patch
+        if engine_name in ('trend_follow', 'vb'):
+            params['selection_patch'] = buy_patch
+        else:
+            params['buy_patch'] = buy_patch
 
     results = sim(
         price_data=price_data,
@@ -158,16 +162,115 @@ def make_random_buy_patch(rng, buy_prob):
     return patch, counter
 
 
+def make_random_selection_patch(rng):
+    """월간 리밸런싱 시 유니버스에서 n개를 무작위 선정하는 null 패치 (trend_follow용)."""
+
+    def patch(sorted_codes, date, n):
+        if len(sorted_codes) <= n:
+            return list(sorted_codes)
+        return rng.choice(sorted_codes, size=n, replace=False).tolist()
+
+    return patch
+
+
+def run_mc_d_selection(
+    engine_name, price_data, availability_map, monthly_universe_map, symbol_names,
+    start_date, end_date, baseline_trades, n_iter=30, seed=42, engine_kwargs=None,
+):
+    """trend_follow 등 selection 기반 엔진의 MC-D.
+
+    null: 매월 리밸런싱 시 상대강도/MA 대신 유니버스에서 무작위 n개 선정.
+    Returns:
+        RSI MC-D와 동일 구조의 판정 딕셔너리.
+    """
+    rng = np.random.default_rng(seed)
+    annuals = []
+    for _ in range(n_iter):
+        patch = make_random_selection_patch(rng)
+        kw = dict(engine_kwargs or {})
+        kw['_buy_patch'] = patch
+        results, _ = run_strategy(
+            engine_name, price_data, availability_map, monthly_universe_map,
+            symbol_names, start_date, end_date, kw,
+        )
+        annuals.append(results.get('annual_return', 0) or 0)
+
+    arr = np.array(annuals)
+    kw_base = dict(engine_kwargs or {})
+    results_base, _ = run_strategy(
+        engine_name, price_data, availability_map, monthly_universe_map,
+        symbol_names, start_date, end_date, kw_base,
+    )
+    base_annual = results_base.get('annual_return', 0) or 0
+
+    n_worse = int((arr <= base_annual).sum())
+    p_worse = n_worse / len(arr)
+    p_better = 1 - p_worse
+    p5 = float(np.percentile(arr, 5))
+    p95 = float(np.percentile(arr, 95))
+
+    if p5 <= base_annual <= p95:
+        verdict = 'SIGNAL_NO_INFO'
+    elif base_annual > p95:
+        verdict = 'SIGNAL_HAS_POSITIVE_INFO'
+    else:
+        verdict = 'SIGNAL_HAS_NEGATIVE_INFO'
+
+    return {
+        'engine': engine_name,
+        'mode': 'random-selection',
+        'n_iter': n_iter,
+        'annual_mean': round(float(arr.mean()), 2),
+        'annual_std': round(float(arr.std()), 3),
+        'annual_p5': round(p5, 2),
+        'annual_p95': round(p95, 2),
+        'baseline_annual': round(base_annual, 2),
+        'baseline_trades': baseline_trades,
+        'p_worse': round(p_worse, 4),
+        'p_better': round(p_better, 4),
+        'verdict': verdict,
+    }
+
+
+def count_candidate_evals(engine_name, price_data, availability_map, monthly_universe_map,
+                          symbol_names, start_date, end_date, engine_kwargs=None):
+    """신호 조건에 도달하는 후보일 수(C)를 센다.
+
+    buy_patch를 항상 False를 반환하는 카운팅 패치로 교체해 실행하면
+    매수 신호 판단 지점에 도달한 (code, date) 쌍의 총 수를 얻는다.
+    (RSI MC-D의 estimate_candidate_days에 해당)
+    """
+    counter = [0]
+
+    def counting_patch(code, date, df, idx, holdings_count):
+        counter[0] += 1
+        return False
+
+    kw = dict(engine_kwargs or {})
+    kw['_buy_patch'] = counting_patch
+    run_strategy(
+        engine_name, price_data, availability_map, monthly_universe_map,
+        symbol_names, start_date, end_date, kw,
+    )
+    return counter[0]
+
+
 def calibrate_buy_prob(engine_name, price_data, availability_map, monthly_universe_map,
                        symbol_names, start_date, end_date, baseline_trades,
                        engine_kwargs=None, target_iters=2, seed=42):
-    """실현 거래수를 baseline과 맞추도록 buy_prob를 보정한다 (2회 반복 수렴).
+    """실현 거래수를 baseline과 맞추도록 buy_prob를 보정한다.
 
-    Returns:
-        보정된 buy_prob
+    후보일 C를 먼저 세어 p = baseline_trades / C로 초기화한 뒤,
+    실현 거래수 비율로 수렴 보정한다. (슬롯 포화 엔진에서 경계 포화 방지)
     """
     rng = np.random.default_rng(seed)
-    p = 0.5
+    C = count_candidate_evals(
+        engine_name, price_data, availability_map, monthly_universe_map,
+        symbol_names, start_date, end_date, engine_kwargs,
+    )
+    p = baseline_trades / max(C, 1)
+    p = min(max(p, 1e-6), 1.0)
+
     for _ in range(target_iters):
         patch, counter = make_random_buy_patch(rng, p)
         kw = dict(engine_kwargs or {})
@@ -177,9 +280,8 @@ def calibrate_buy_prob(engine_name, price_data, availability_map, monthly_univer
             symbol_names, start_date, end_date, kw,
         )
         realized = results.get('buy_trades', 0) or 0
-        evals = counter[0]
-        if evals > 0:
-            p *= baseline_trades / max(realized, 1)
+        if realized > 0:
+            p *= baseline_trades / realized
         p = min(max(p, 1e-6), 1.0)
     return p
 

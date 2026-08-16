@@ -35,6 +35,7 @@ def simulate_vb_backtest(
     stop_loss_pct: float = -5.0,
     hold_days: int = 1,
     buy_patch: Optional[Callable] = None,
+    selection_patch: Optional[Callable] = None,
 ) -> Dict:
     """변동성 돌파 백테스트
 
@@ -134,45 +135,65 @@ def simulate_vb_backtest(
                 universe_set = set(monthly_universe_map[yyyymm])
                 sorted_codes = [c for c in sorted_codes if c in universe_set]
 
-            for code in sorted_codes:
-                if len(buy_candidates) >= available_slots:
-                    break
-                if code in holdings:
-                    continue
-
-                df = price_data[code]
-                idx = df.index.get_loc(date)
-                if idx < 2:
-                    continue
-                row = df.iloc[idx]
-                prev = df.iloc[idx - 1]
-
-                open_p = row['open']
-                high = row['high']
-                prev_range = prev['high'] - prev['low']
-
-                if np.isnan(open_p) or np.isnan(high) or np.isnan(prev_range) or prev_range <= 0:
-                    continue
-
-                # 목표가 = 시가 + 전일 변동성 * k
-                target = open_p + prev_range * k
-
-                # 돌파 확인: 당일 고가 >= 목표가 (buy_patch 제공 시 신호 치환 — MC-D permutation용)
-                if buy_patch is not None:
-                    if not buy_patch(code, date, df, idx, len(holdings)):
+            if selection_patch is not None:
+                # 균등무작위 선정 null (MC-D permutation용):
+                # 유니버스에서 available_slots개를 무작위로 추출해 신호 판단 없이 매수
+                selected = selection_patch(sorted_codes, date, available_slots)
+                buy_candidates = []
+                for code in selected:
+                    if code in holdings:
                         continue
-                elif high < target:
-                    continue
-
-                # MA 필터
-                if ma_filter_period > 0:
-                    if idx < ma_filter_period:
+                    df = price_data[code]
+                    idx = df.index.get_loc(date)
+                    if idx < 2:
                         continue
-                    ma = df['close'].iloc[idx - ma_filter_period:idx].mean()
-                    if np.isnan(ma) or open_p <= ma:
+                    row = df.iloc[idx]
+                    prev = df.iloc[idx - 1]
+                    open_p = row['open']
+                    prev_range = prev['high'] - prev['low']
+                    if np.isnan(open_p) or np.isnan(prev_range) or prev_range <= 0:
+                        continue
+                    buy_candidates.append((code, open_p + prev_range * k))
+            else:
+                for code in sorted_codes:
+                    if len(buy_candidates) >= available_slots:
+                        break
+                    if code in holdings:
                         continue
 
-                buy_candidates.append((code, target))
+                    df = price_data[code]
+                    idx = df.index.get_loc(date)
+                    if idx < 2:
+                        continue
+                    row = df.iloc[idx]
+                    prev = df.iloc[idx - 1]
+
+                    open_p = row['open']
+                    high = row['high']
+                    prev_range = prev['high'] - prev['low']
+
+                    if np.isnan(open_p) or np.isnan(high) or np.isnan(prev_range) or prev_range <= 0:
+                        continue
+
+                    # 목표가 = 시가 + 전일 변동성 * k
+                    target = open_p + prev_range * k
+
+                    # 돌파 확인: 당일 고가 >= 목표가 (buy_patch 제공 시 신호 치환 — MC-D permutation용)
+                    if buy_patch is not None:
+                        if not buy_patch(code, date, df, idx, len(holdings)):
+                            continue
+                    elif high < target:
+                        continue
+
+                    # MA 필터
+                    if ma_filter_period > 0:
+                        if idx < ma_filter_period:
+                            continue
+                        ma = df['close'].iloc[idx - ma_filter_period:idx].mean()
+                        if np.isnan(ma) or open_p <= ma:
+                            continue
+
+                    buy_candidates.append((code, target))
 
             # 매수 실행 (돌파 당일 종가 or 목표가로 체결)
             if buy_candidates:
