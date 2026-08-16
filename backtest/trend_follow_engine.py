@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 import numpy as np
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Callable
-
 import pandas as pd
 from backtest.run_backtest import load_price_data_from_db, load_universe_availability, load_monthly_universe_snapshots
 from util.db_helper import execute_sql, resolve_date_column
@@ -24,6 +23,14 @@ COMMISSION = 0.00015
 TAX = 0.0020
 SLIPPAGE = 0.002
 MARKET_CODE = '069500'
+
+
+def _prev_yyyymm(yyyymm: str) -> str:
+    """YYYYMM → 직전 월 (201601 → 201512)."""
+    y, m = int(yyyymm[:4]), int(yyyymm[4:6]) - 1
+    if m == 0:
+        y, m = y - 1, 12
+    return f"{y}{m:02d}"
 
 
 def get_market_df(price_data: Dict) -> 'pd.DataFrame':
@@ -112,6 +119,7 @@ def simulate_trend_follow(
     min_stock_price: int = 1000,
     stock_selection: str = 'rs',
     selection_patch: Optional[Callable] = None,
+    snapshot_alignment: str = 'prev_month',
 ) -> Dict:
     import pandas as pd
 
@@ -213,9 +221,14 @@ def simulate_trend_follow(
                     c for c in price_data
                     if c in availability_map and c != MARKET_CODE
                 )
-                if monthly_universe_map and yyyymm in monthly_universe_map:
-                    universe_set = set(monthly_universe_map[yyyymm])
-                    sorted_codes = [c for c in sorted_codes if c in universe_set]
+                if monthly_universe_map:
+                    snap_key = _prev_yyyymm(yyyymm) if snapshot_alignment == 'prev_month' else yyyymm
+                    date_codes = monthly_universe_map.get(snap_key)
+                    if date_codes is None:
+                        date_codes = monthly_universe_map.get(yyyymm)
+                    if date_codes:
+                        universe_set = set(date_codes)
+                        sorted_codes = [c for c in sorted_codes if c in universe_set]
 
                 if selection_patch is not None:
                     selected = selection_patch(sorted_codes, date, MAX_HOLDINGS)

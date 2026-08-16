@@ -24,6 +24,14 @@ TAX = 0.0020          # 거래세
 SLIPPAGE = 0.002      # 슬리피지
 
 
+def _prev_yyyymm(yyyymm: str) -> str:
+    """YYYYMM → 직전 월 (201601 → 201512)."""
+    y, m = int(yyyymm[:4]), int(yyyymm[4:6]) - 1
+    if m == 0:
+        y, m = y - 1, 12
+    return f"{y}{m:02d}"
+
+
 def simulate_vb_backtest(
     price_data: Dict,
     availability_map: Dict,
@@ -36,6 +44,7 @@ def simulate_vb_backtest(
     hold_days: int = 1,
     buy_patch: Optional[Callable] = None,
     selection_patch: Optional[Callable] = None,
+    snapshot_alignment: str = 'prev_month',
 ) -> Dict:
     """변동성 돌파 백테스트
 
@@ -44,6 +53,7 @@ def simulate_vb_backtest(
         ma_filter_period: 0=비활성, 5=종가>5MA 조건, 20=종가>20MA 조건
         stop_loss_pct: 손절 % (0=비활성)
         hold_days: 강제 보유일 수 (0=RSI 매도 조건 사용x, 단순 익일 청산)
+        snapshot_alignment: 유니버스 스냅샷 정렬 (prev_month=룩어헤드 방지 기본, same_month=당월)
     """
     cash = float(INITIAL_CAPITAL)
     holdings: Dict[str, Dict] = {}  # code -> {qty, avg_price, buy_date}
@@ -130,10 +140,20 @@ def simulate_vb_backtest(
                           if c in availability_map
                           and c in price_data and date in price_data[c].index]
 
-            # 유니버스 필터: 상장 상태
-            if monthly_universe_map and yyyymm in monthly_universe_map:
-                universe_set = set(monthly_universe_map[yyyymm])
-                sorted_codes = [c for c in sorted_codes if c in universe_set]
+            # 유니버스 필터: 상장 상태 (snapshot_alignment에 따라 이전/당월 스냅샷 사용)
+            if monthly_universe_map:
+                yyyymm = date[:6]
+                if snapshot_alignment == 'prev_month':
+                    snap_key = _prev_yyyymm(yyyymm)
+                    date_codes = monthly_universe_map.get(snap_key)
+                    if date_codes is None:
+                        # 데이터 범위 첫 월 등에서는 현재 월로 폴백 (실전 전략과 동일)
+                        date_codes = monthly_universe_map.get(yyyymm)
+                else:
+                    date_codes = monthly_universe_map.get(yyyymm)
+                if date_codes:
+                    universe_set = set(date_codes)
+                    sorted_codes = [c for c in sorted_codes if c in universe_set]
 
             if selection_patch is not None:
                 # 균등무작위 선정 null (MC-D permutation용):

@@ -1,0 +1,15 @@
+{
+  "engine": "vb_daily",
+  "buy_prob": 0.004014626346006174,
+  "n_iter": 30,
+  "annual_mean": -49.69,
+  "annual_std": 3.168,
+  "annual_p5": -54.92,
+  "annual_p95": -44.84,
+  "baseline_annual": -57.89,
+  "baseline_trades": 1754,
+  "p_worse": 0.0,
+  "p_better": 1.0,
+  "verdict": "SIGNAL_HAS_NEGATIVE_INFO",
+  "elapsed_s": 1639.0
+}

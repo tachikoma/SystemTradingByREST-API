@@ -1,0 +1,15 @@
+{
+  "engine": "trend_follow",
+  "mode": "random-selection",
+  "n_iter": 30,
+  "annual_mean": -17.21,
+  "annual_std": 4.104,
+  "annual_p5": -25.3,
+  "annual_p95": -12.14,
+  "baseline_annual": -35.75,
+  "baseline_trades": 436,
+  "p_worse": 0.0,
+  "p_better": 1.0,
+  "verdict": "SIGNAL_HAS_NEGATIVE_INFO",
+  "elapsed_s": 107.3
+}

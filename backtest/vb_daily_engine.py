@@ -22,6 +22,14 @@ TAX = 0.0020
 SLIPPAGE = 0.002
 
 
+def _prev_yyyymm(yyyymm: str) -> str:
+    """YYYYMM → 직전 월 (201601 → 201512)."""
+    y, m = int(yyyymm[:4]), int(yyyymm[4:6]) - 1
+    if m == 0:
+        y, m = y - 1, 12
+    return f"{y}{m:02d}"
+
+
 def simulate_vb_daily(
     price_data: Dict,
     availability_map: Dict,
@@ -33,6 +41,7 @@ def simulate_vb_daily(
     stop_loss_pct: float = -8.0,
     hold_days: int = 5,
     buy_patch: Optional[Callable] = None,
+    snapshot_alignment: str = 'prev_month',
 ) -> Dict:
     cash = float(INITIAL_CAPITAL)
     holdings: Dict[str, Dict] = {}
@@ -143,9 +152,14 @@ def simulate_vb_daily(
                 c for c in price_data
                 if c in availability_map and date in price_data[c].index
             )
-            if monthly_universe_map and yyyymm in monthly_universe_map:
-                universe_set = set(monthly_universe_map[yyyymm])
-                sorted_codes = [c for c in sorted_codes if c in universe_set]
+            if monthly_universe_map:
+                snap_key = _prev_yyyymm(yyyymm) if snapshot_alignment == 'prev_month' else yyyymm
+                date_codes = monthly_universe_map.get(snap_key)
+                if date_codes is None:
+                    date_codes = monthly_universe_map.get(yyyymm)
+                if date_codes:
+                    universe_set = set(date_codes)
+                    sorted_codes = [c for c in sorted_codes if c in universe_set]
 
             for code in sorted_codes:
                 if len(signals) >= available_slots:

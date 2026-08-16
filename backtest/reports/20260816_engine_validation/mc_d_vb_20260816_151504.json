@@ -1,0 +1,15 @@
+{
+  "engine": "vb",
+  "mode": "random-selection",
+  "n_iter": 30,
+  "annual_mean": -57.81,
+  "annual_std": 2.725,
+  "annual_p5": -59.69,
+  "annual_p95": -53.05,
+  "baseline_annual": -58.61,
+  "baseline_trades": 6330,
+  "p_worse": 0.3667,
+  "p_better": 0.6333,
+  "verdict": "SIGNAL_NO_INFO",
+  "elapsed_s": 505.0
+}

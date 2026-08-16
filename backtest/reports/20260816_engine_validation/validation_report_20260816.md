@@ -1,83 +1,100 @@
-# 신규 전략 엔진 검증 보고서 (2026-08-16)
+# 신규 전략 엔진 검증 보고서 (2026-08-16, rev.2)
 
 **목적:** `feature/strategy-research` 브랜치의 독립 엔진(vb/vb_daily/trend_follow)을
-RSI(2) 검증 gate의 핵심 테스트인 **MC-D(신호 정보량 permutation)** 로 검증.
-기존 RSI(2)이 SIGNAL_NO_INFO(무작위와 구분 불가)로 실사용 불가 판정된 뒤의 신호 패밀리 후보들이다.
+검증 gate의 핵심 테스트(MC-D)로 검증. value 엔진은 pykrx 미설치로 보류.
 
 **데이터:** FDR, 2,962종목, 2016-01-04~2026-08-14, 월별 유니버스 스냅샷(상위 250종목/월, 128개월).
-trend_follow은 시장 필터용 069500(KODEX200)을 별도 주입(2,852행, 2015~2026).
-수수료/세금/슬리피지: 모의 기준.
+trend_follow은 069500(KODEX200) 별도 주입(2,852행).
 
-## 1. Baseline (전체 유니버스, 신호 그대로)
+> ⚠️ **rev.1 → rev.2 변경**: 유니버스 룩어헤드 편향 수정. rev.1 결과는 전부 아티팩트였음.
+> 상세는 아래 "2. 룩어헤드 편향 발견" 참조.
 
-| 엔진 | 파라미터 | 총수익 | 연환산 | MDD | Sharpe | 매수 | 매도 | 소요 |
-|------|----------|--------|--------|------|--------|------|------|------|
-| vb | k=0.5, hold=1, SL=-5% | -87.7% | -18.38% | -92.45% | -0.44 | 12,960 | - | 22s |
-| vb_daily | k=0.5, hold=5, SL=-8% | -96.8% | -28.43% | -97.76% | -0.68 | 3,301 | - | 13s |
-| trend_follow | RS 상위5, 200MA 필터 | -95.3% | -25.56% | -95.67% | -0.67 | 451 | 448 | 4s |
-| value | (pykrx 미설치) | - | - | - | - | - | - | 보류 |
+---
 
-> 3개 엔진 모두 10년 전체에서 -18%/yr 이하로 **절대 수익 자체가 실사용 불가 수준**이다.
-> RSI(2) baseline(연 -3.34%)보다도 크게 나쁘다.
+## 1. baseline (전체 유니버스, 신호 그대로)
 
-## 2. MC-D (신호 정보량 permutation)
+**snapshot_alignment = prev_month** (실전 전략과 동일, 룩어헤드 방지).
 
-### 방법론
-- **vb / trend_follow**: 신호가 조밀(매일 5종목 풀, 월간 리밸런싱)해 Bernoulli null이 구조적으로
-  성립 불가 → **균등무작위 선정(selection) null** 사용: 매일/매월 유니버스에서 같은 수를 무작위 추출.
-- **vb_daily**: 신호가 희소(연 330회)해 RSI식 **후보일 C 기반 Bernoulli null** 사용
-  (p = baseline 거래수 / C = 0.0101).
-- null 30회, baseline은 90% 중심 구간(P5~P95)에 들어가면 NO_INFO.
+| 엔진 | 총수익 | 연환산 | MDD | Sharpe | 매수 |
+|------|--------|--------|------|--------|------|
+| vb | -99.99% | -58.6% | -99.99% | -2.99 | 6,330 |
+| vb_daily | -99.99% | -57.9% | -99.99% | -2.15 | 1,754 |
+| trend_follow | -98.97% | -35.7% | -98.99% | -1.21 | 436 |
+| value | — | — | — | — | 보류 |
 
-### 결과
+---
 
-| 엔진 | null 연평균 ± std | P5 | P95 | baseline 연 | P(무작위≥baseline) | **판정** |
-|------|-------------------|----|----|-------------|--------------------|----------|
-| **vb** | -57.16% ± 2.45 | -59.22 | -52.68 | -18.38% | 1.0000 | **POSITIVE_INFO** |
-| **vb_daily** | -20.09% ± 9.92 | -36.02 | -4.14 | -28.43% | 0.2000 | **NO_INFO** |
-| **trend_follow** | +31.22% ± 10.62 | +18.15 | +48.11 | -25.56% | 0.0000 | **NEGATIVE_INFO** |
+## 2. 룩어헤드 편향 발견 (중대)
 
-### 해석
-- **vb**: 돌파 신호는 무작위 매수보다 연 +39pp 우월(P95 초과, 30/30). 신호에 **양의 정보량이 존재**한다.
-  그러나 신호 자체가 -18%/yr, MDD -92%로 절대 성과가 참담 — 정보가 있어도 전략이 성립하지 않는다.
-- **vb_daily**: baseline(-28.4%)은 null 90% 구간(-36.0~-4.1) 안 → 신호가 무작위와 **통계적으로 구분 불가**(NO_INFO).
-- **trend_follow**: **RS 상위 5종목 선정이 적극적으로 해롭다**. 같은 캐던스로 무작위 5종목을 사면
-  연 +31%인데 RS 상위 선정은 -25.6%. 상대강도 랭킹 상위(모멘텀 정점 추종)가 추세반전에 노출.
+세 엔진 모두 스냅샷을 **당월(same-month)** 으로 적용했습니다.
+스냅샷은 당월 전체 거래대금 랭킹으로 산정되므로, 당월 상반기 매수 시
+이미 존재하지 않는 정보(당월 후반 거래대금)를 이용하는 룩어헤드가 발생합니다.
 
-## 3. 종합 판정
+| 항목 | same-month (rev.1) | prev_month (rev.2, 정직) |
+|------|-------------------|-------------------------|
+| vb baseline 연 | -18.4% (편향) | **-58.6%** |
+| vb_daily baseline 연 | -28.4% (편향) | **-57.9%** |
+| trend_follow baseline 연 | -25.6% (편향) | **-35.7%** |
+| vb MC-D 판정 | POSITIVE_INFO (아티팩트) | **NO_INFO** |
+
+vb의 WFA(k∈{0.5..0.9}×MA{0..20}, 8개 윈도우)와 파라미터 안정성 표면(+148%/yr at k0.9/MA5)
+역시 전부 이 편향에 기반한 것입니다. prev_month 정렬에서는 전부 동일 수준(-58%대)으로 수렴.
+
+**근본 원인**: backtest_engine(RSI 실전)은 `UNIVERSE_SNAPSHOT_ALIGNMENT=prev_month` 기본값으로
+이 편향을 이미 해결했으나, 신규 엔진들이 이를 도입하지 않았습니다. 3엔진 모두 수정 완료.
+
+---
+
+## 3. MC-D (신호 정보량 permutation) — 정직한 결과
+
+**snapshot_alignment = prev_month** 적용 상태.
+
+| 엔진 | null 연평균 ± std | P5 | P95 | baseline 연 | **판정** |
+|------|-------------------|----|----|-------------|----------|
+| **vb** | -57.8% ± 2.7 | -59.7 | -53.0 | -58.6% | **NO_INFO** |
+| **vb_daily** | -49.7% ± 3.2 | -54.9 | -44.8 | -57.9% | **NEGATIVE_INFO** |
+| **trend_follow** | -17.2% ± 4.1 | -25.3 | -12.1 | -35.8% | **NEGATIVE_INFO** |
+
+- **vb**: 신호가 무작위 선정과 구분 불가(NO_INFO). baseline(-58.6%)이 null 90% CI(-59.7~-53.0) 안에 있음.
+- **vb_daily**: 신호가 무작위보다 유의미하게 나쁨(NEGATIVE_INFO). baseline(-57.9%)이 null P5(-54.9) 아래.
+- **trend_follow**: RS 선정이 무작위보다 적극적으로 해롭다(NEGATIVE_INFO). 무작위 월간 5종목(-17.2%)
+  대비 RS 상위 5종목(-35.8%).
+
+---
+
+## 4. 종합 판정
 
 | 엔진 | MC-D | 실사용 |
 |------|------|--------|
-| vb | POSITIVE_INFO | ❌ 불가 (연 -18%, MDD -92%) |
-| vb_daily | NO_INFO | ❌ 불가 |
+| vb | NO_INFO | ❌ 불가 |
+| vb_daily | NEGATIVE_INFO | ❌ 불가 |
 | trend_follow | NEGATIVE_INFO | ❌ 불가 |
-| value | - | 보류 (pykrx 미설치) |
+| value | — | 보류 (pykrx) |
 
-**결론: 신규 엔진 3종 모두 실사용 불가.** RSI(2)의 SIGNAL_NO_INFO와 달리 vb만 신호 정보가
-존재하나 절대 성과가 워낙 나빠 파라미터 최적화 여지로만 남는다(단, 12,960회/10년의 고회전 구조
-상 거래비용이 성과를 크게 잠식).
+**결론: 신규 엔진 3종 모두 실사용 불가.** 룩어헤드 편향 제거 후 신호 정보량은
+vb는 NO_INFO, 나머지는 NEGATIVE_INFO. WFA/파라미터 안정성 추가 검증 불필요.
 
-## 4. 권고
+---
 
-1. **vb의 신호 정보가 유일한 후속 연구 지점**: k/보유기간/회전율 제한 등 파라미터 재검토.
-   단, 현재 구조(매일 5종목 풀 회전)로는 비용 문제가 본질적.
-2. trend_follow의 RS 선정은 폐기 권장(역방향 정보). 무작위보다 나쁘다.
-3. value 엔진은 pykrx 의존 + 과거 PER/PBR 데이터 확보 문제로 보류 유지.
-4. RSI(2)와 동일하게, **신호 패밀리 교체만으로는 부족** — 거래비용·회전율을 통제하는
-   구조 설계가 병행되어야 한다.
+## 5. 교훈
 
-## 5. 명령어 / 산출물
+1. 유니버스 스냅샷 정렬: `prev_month` 사용이 필수(당월 스냅샷은 룩어헤드).
+2. 인샘플 파라미터 표면이 매끄럽더라도, 공정하지 않은 유니버스로 만들어진 결과는
+   전적으로 무효하다(+148%/yr → -58%/yr 붕괴).
+3. 신규 엔진이 실전 전략(backtest_engine)의 컨벤션을 물려받지 못한 설계가 근본 원인.
+
+---
+
+## 6. 산출물
 
 ```bash
-# baseline (전체 유니버스)
+# baseline
 .venv/bin/python backtest/run_strategy_baseline.py
-# MC-D (엔진별)
+# MC-D
 .venv/bin/python backtest/run_strategy_mc_d.py --engine vb --mc-d-iters 30
 .venv/bin/python backtest/run_strategy_mc_d.py --engine vb_daily --mc-d-iters 30
 .venv/bin/python backtest/run_strategy_mc_d.py --engine trend_follow --mc-d-iters 30
 ```
 
-- `backtest/run_strategy_baseline.py` — 엔진별 전체 유니버스 baseline 러너
-- `backtest/run_strategy_mc_d.py` — 엔진별 MC-D 러너
-- `backtest/validation_strategy_adapter.py` — 엔진 레지스트리/정규화/selection null/MC-D
-- `backtest/reports/20260816_engine_validation/mc_d_*.json` — MC-D raw 결과 (본 보고서와 동일 디렉터리)
+- `backtest/reports/20260816_engine_validation/mc_d_*.json` — MC-D raw 결과 (prev_month 기준)
+- `backtest/reports/20260816_engine_validation/validation_report_20260816.md` — 본 보고서
