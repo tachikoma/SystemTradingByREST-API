@@ -1,0 +1,648 @@
+{
+  "period": {
+    "start": "2016-01-01",
+    "end": "2026-06-30"
+  },
+  "baseline": {
+    "params": {
+      "rsi_buy_threshold": 3,
+      "entry_price_filter_enabled": false,
+      "entry_price_filter_pct": -5.0,
+      "use_ma20_filter": false,
+      "use_ma200_filter": true,
+      "rsi_sell_threshold": 70,
+      "profit_target_percent": 0.0,
+      "enable_time_stop_loss": true,
+      "time_stop_loss_days": 180,
+      "cash_reserve_ratio": 0.2,
+      "rsi_period": 2
+    },
+    "metrics": {
+      "start": "20160104",
+      "end": "20260630",
+      "total_return": -29.32,
+      "annual_return": -3.34,
+      "mdd": -37.6,
+      "sharpe": -0.209,
+      "win_rate": 78.87,
+      "sell_trades": 710,
+      "avg_profit_rate": -0.19,
+      "total_profit": -1233364.3640500284,
+      "days": 2572
+    }
+  },
+  "results": {
+    "baseline": {
+      "params": {
+        "rsi_buy_threshold": 3,
+        "entry_price_filter_enabled": false,
+        "entry_price_filter_pct": -5.0,
+        "use_ma20_filter": false,
+        "use_ma200_filter": true,
+        "rsi_sell_threshold": 70,
+        "profit_target_percent": 0.0,
+        "enable_time_stop_loss": true,
+        "time_stop_loss_days": 180,
+        "cash_reserve_ratio": 0.2,
+        "rsi_period": 2
+      },
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -29.32,
+        "annual_return": -3.34,
+        "mdd": -37.6,
+        "sharpe": -0.209,
+        "win_rate": 78.87,
+        "sell_trades": 710,
+        "avg_profit_rate": -0.19,
+        "total_profit": -1233364.3640500284,
+        "days": 2572
+      }
+    },
+    "rsi_buy_threshold=2": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -22.37,
+        "annual_return": -2.45,
+        "mdd": -32.61,
+        "sharpe": -0.144,
+        "win_rate": 78.25,
+        "sell_trades": 676,
+        "avg_profit_rate": 0.01,
+        "total_profit": -555850.6248000296,
+        "days": 2572
+      }
+    },
+    "rsi_buy_threshold=4": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -13.11,
+        "annual_return": -1.37,
+        "mdd": -32.31,
+        "sharpe": -0.05,
+        "win_rate": 79.59,
+        "sell_trades": 730,
+        "avg_profit_rate": 0.31,
+        "total_profit": 536952.8678999661,
+        "days": 2572
+      }
+    },
+    "rsi_buy_threshold=5": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": 4.97,
+        "annual_return": 0.48,
+        "mdd": -26.59,
+        "sharpe": 0.101,
+        "win_rate": 79.95,
+        "sell_trades": 758,
+        "avg_profit_rate": 0.86,
+        "total_profit": 2818374.7510999613,
+        "days": 2572
+      }
+    },
+    "price_drop_threshold=-8.0": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": 0.25,
+        "annual_return": 0.02,
+        "mdd": -25.54,
+        "sharpe": 0.065,
+        "win_rate": 78.78,
+        "sell_trades": 655,
+        "avg_profit_rate": 0.7,
+        "total_profit": 1823001.5393499674,
+        "days": 2572
+      }
+    },
+    "price_drop_threshold=-6.0": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -35.73,
+        "annual_return": -4.24,
+        "mdd": -41.85,
+        "sharpe": -0.286,
+        "win_rate": 77.22,
+        "sell_trades": 676,
+        "avg_profit_rate": -0.56,
+        "total_profit": -2218643.2355500245,
+        "days": 2572
+      }
+    },
+    "price_drop_threshold=-4.0": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -18.92,
+        "annual_return": -2.03,
+        "mdd": -33.45,
+        "sharpe": -0.106,
+        "win_rate": 79.14,
+        "sell_trades": 748,
+        "avg_profit_rate": 0.07,
+        "total_profit": -275832.8047000308,
+        "days": 2572
+      }
+    },
+    "rsi_sell_threshold=65": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -16.33,
+        "annual_return": -1.73,
+        "mdd": -34.35,
+        "sharpe": -0.079,
+        "win_rate": 79.87,
+        "sell_trades": 765,
+        "avg_profit_rate": 0.22,
+        "total_profit": 163027.3471999671,
+        "days": 2572
+      }
+    },
+    "rsi_sell_threshold=75": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -14.61,
+        "annual_return": -1.54,
+        "mdd": -35.54,
+        "sharpe": -0.059,
+        "win_rate": 80.0,
+        "sell_trades": 685,
+        "avg_profit_rate": 0.35,
+        "total_profit": 485417.0861999707,
+        "days": 2572
+      }
+    },
+    "rsi_sell_threshold=80": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -20.27,
+        "annual_return": -2.2,
+        "mdd": -38.66,
+        "sharpe": -0.112,
+        "win_rate": 77.97,
+        "sell_trades": 622,
+        "avg_profit_rate": 0.14,
+        "total_profit": -130582.65800002517,
+        "days": 2572
+      }
+    },
+    "profit_target_percent=5.0": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -17.51,
+        "annual_return": -1.87,
+        "mdd": -36.67,
+        "sharpe": -0.08,
+        "win_rate": 77.92,
+        "sell_trades": 539,
+        "avg_profit_rate": 0.54,
+        "total_profit": 540577.8250999758,
+        "days": 2572
+      }
+    },
+    "profit_target_percent=10.0": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": 13.09,
+        "annual_return": 1.21,
+        "mdd": -32.05,
+        "sharpe": 0.162,
+        "win_rate": 69.32,
+        "sell_trades": 339,
+        "avg_profit_rate": 2.22,
+        "total_profit": 3703794.7244499833,
+        "days": 2572
+      }
+    },
+    "time_stop_loss_days=90": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -23.6,
+        "annual_return": -2.6,
+        "mdd": -41.51,
+        "sharpe": -0.111,
+        "win_rate": 75.59,
+        "sell_trades": 1053,
+        "avg_profit_rate": -0.07,
+        "total_profit": -1059178.82050004,
+        "days": 2572
+      }
+    },
+    "time_stop_loss_days=360": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -25.77,
+        "annual_return": -2.88,
+        "mdd": -37.15,
+        "sharpe": -0.216,
+        "win_rate": 81.15,
+        "sell_trades": 451,
+        "avg_profit_rate": -0.02,
+        "total_profit": -363685.4602500184,
+        "days": 2572
+      }
+    },
+    "use_ma20_filter=True": {
+      "params": null,
+      "metrics": {
+        "start": "20160104",
+        "end": "20260630",
+        "total_return": -36.3,
+        "annual_return": -4.32,
+        "mdd": -46.06,
+        "sharpe": -0.299,
+        "win_rate": 77.76,
+        "sell_trades": 670,
+        "avg_profit_rate": -0.63,
+        "total_profit": -2223756.9705000245,
+        "days": 2572
+      }
+    }
+  },
+  "stability": {
+    "rsi_buy_threshold": {
+      "rows": [
+        {
+          "value": 2,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -22.37,
+          "annual_return": -2.45,
+          "mdd": -32.61,
+          "sharpe": -0.144,
+          "win_rate": 78.25,
+          "sell_trades": 676,
+          "avg_profit_rate": 0.01,
+          "total_profit": -555850.6248000296,
+          "days": 2572
+        },
+        {
+          "value": 3,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -29.32,
+          "annual_return": -3.34,
+          "mdd": -37.6,
+          "sharpe": -0.209,
+          "win_rate": 78.87,
+          "sell_trades": 710,
+          "avg_profit_rate": -0.19,
+          "total_profit": -1233364.3640500284,
+          "days": 2572
+        },
+        {
+          "value": 4,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -13.11,
+          "annual_return": -1.37,
+          "mdd": -32.31,
+          "sharpe": -0.05,
+          "win_rate": 79.59,
+          "sell_trades": 730,
+          "avg_profit_rate": 0.31,
+          "total_profit": 536952.8678999661,
+          "days": 2572
+        },
+        {
+          "value": 5,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": 4.97,
+          "annual_return": 0.48,
+          "mdd": -26.59,
+          "sharpe": 0.101,
+          "win_rate": 79.95,
+          "sell_trades": 758,
+          "avg_profit_rate": 0.86,
+          "total_profit": 2818374.7510999613,
+          "days": 2572
+        }
+      ],
+      "return_range_pct": 34.29,
+      "return_cv": 86.0,
+      "mdd_range_pct": 11.01,
+      "sharpe_range": 0.31,
+      "sharpe_cv": 154.3,
+      "best_total_return": 4.97,
+      "worst_total_return": -29.32,
+      "best_sharpe": 0.101,
+      "worst_sharpe": -0.209
+    },
+    "price_drop_threshold": {
+      "rows": [
+        {
+          "value": -8.0,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": 0.25,
+          "annual_return": 0.02,
+          "mdd": -25.54,
+          "sharpe": 0.065,
+          "win_rate": 78.78,
+          "sell_trades": 655,
+          "avg_profit_rate": 0.7,
+          "total_profit": 1823001.5393499674,
+          "days": 2572
+        },
+        {
+          "value": -6.0,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -35.73,
+          "annual_return": -4.24,
+          "mdd": -41.85,
+          "sharpe": -0.286,
+          "win_rate": 77.22,
+          "sell_trades": 676,
+          "avg_profit_rate": -0.56,
+          "total_profit": -2218643.2355500245,
+          "days": 2572
+        },
+        {
+          "value": -5.0,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -29.32,
+          "annual_return": -3.34,
+          "mdd": -37.6,
+          "sharpe": -0.209,
+          "win_rate": 78.87,
+          "sell_trades": 710,
+          "avg_profit_rate": -0.19,
+          "total_profit": -1233364.3640500284,
+          "days": 2572
+        },
+        {
+          "value": -4.0,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -18.92,
+          "annual_return": -2.03,
+          "mdd": -33.45,
+          "sharpe": -0.106,
+          "win_rate": 79.14,
+          "sell_trades": 748,
+          "avg_profit_rate": 0.07,
+          "total_profit": -275832.8047000308,
+          "days": 2572
+        }
+      ],
+      "return_range_pct": 35.98,
+      "return_cv": 65.1,
+      "mdd_range_pct": 16.31,
+      "sharpe_range": 0.351,
+      "sharpe_cv": 98.1,
+      "best_total_return": 0.25,
+      "worst_total_return": -35.73,
+      "best_sharpe": 0.065,
+      "worst_sharpe": -0.286
+    },
+    "rsi_sell_threshold": {
+      "rows": [
+        {
+          "value": 65,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -16.33,
+          "annual_return": -1.73,
+          "mdd": -34.35,
+          "sharpe": -0.079,
+          "win_rate": 79.87,
+          "sell_trades": 765,
+          "avg_profit_rate": 0.22,
+          "total_profit": 163027.3471999671,
+          "days": 2572
+        },
+        {
+          "value": 70,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -29.32,
+          "annual_return": -3.34,
+          "mdd": -37.6,
+          "sharpe": -0.209,
+          "win_rate": 78.87,
+          "sell_trades": 710,
+          "avg_profit_rate": -0.19,
+          "total_profit": -1233364.3640500284,
+          "days": 2572
+        },
+        {
+          "value": 75,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -14.61,
+          "annual_return": -1.54,
+          "mdd": -35.54,
+          "sharpe": -0.059,
+          "win_rate": 80.0,
+          "sell_trades": 685,
+          "avg_profit_rate": 0.35,
+          "total_profit": 485417.0861999707,
+          "days": 2572
+        },
+        {
+          "value": 80,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -20.27,
+          "annual_return": -2.2,
+          "mdd": -38.66,
+          "sharpe": -0.112,
+          "win_rate": 77.97,
+          "sell_trades": 622,
+          "avg_profit_rate": 0.14,
+          "total_profit": -130582.65800002517,
+          "days": 2572
+        }
+      ],
+      "return_range_pct": 14.71,
+      "return_cv": 28.2,
+      "mdd_range_pct": 4.31,
+      "sharpe_range": 0.15,
+      "sharpe_cv": 50.2,
+      "best_total_return": -14.61,
+      "worst_total_return": -29.32,
+      "best_sharpe": -0.059,
+      "worst_sharpe": -0.209
+    },
+    "profit_target_percent": {
+      "rows": [
+        {
+          "value": 0.0,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -29.32,
+          "annual_return": -3.34,
+          "mdd": -37.6,
+          "sharpe": -0.209,
+          "win_rate": 78.87,
+          "sell_trades": 710,
+          "avg_profit_rate": -0.19,
+          "total_profit": -1233364.3640500284,
+          "days": 2572
+        },
+        {
+          "value": 5.0,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -17.51,
+          "annual_return": -1.87,
+          "mdd": -36.67,
+          "sharpe": -0.08,
+          "win_rate": 77.92,
+          "sell_trades": 539,
+          "avg_profit_rate": 0.54,
+          "total_profit": 540577.8250999758,
+          "days": 2572
+        },
+        {
+          "value": 10.0,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": 13.09,
+          "annual_return": 1.21,
+          "mdd": -32.05,
+          "sharpe": 0.162,
+          "win_rate": 69.32,
+          "sell_trades": 339,
+          "avg_profit_rate": 2.22,
+          "total_profit": 3703794.7244499833,
+          "days": 2572
+        }
+      ],
+      "return_range_pct": 42.41,
+      "return_cv": 158.9,
+      "mdd_range_pct": 5.55,
+      "sharpe_range": 0.371,
+      "sharpe_cv": 363.3,
+      "best_total_return": 13.09,
+      "worst_total_return": -29.32,
+      "best_sharpe": 0.162,
+      "worst_sharpe": -0.209
+    },
+    "time_stop_loss_days": {
+      "rows": [
+        {
+          "value": 90,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -23.6,
+          "annual_return": -2.6,
+          "mdd": -41.51,
+          "sharpe": -0.111,
+          "win_rate": 75.59,
+          "sell_trades": 1053,
+          "avg_profit_rate": -0.07,
+          "total_profit": -1059178.82050004,
+          "days": 2572
+        },
+        {
+          "value": 180,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -29.32,
+          "annual_return": -3.34,
+          "mdd": -37.6,
+          "sharpe": -0.209,
+          "win_rate": 78.87,
+          "sell_trades": 710,
+          "avg_profit_rate": -0.19,
+          "total_profit": -1233364.3640500284,
+          "days": 2572
+        },
+        {
+          "value": 360,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -25.77,
+          "annual_return": -2.88,
+          "mdd": -37.15,
+          "sharpe": -0.216,
+          "win_rate": 81.15,
+          "sell_trades": 451,
+          "avg_profit_rate": -0.02,
+          "total_profit": -363685.4602500184,
+          "days": 2572
+        }
+      ],
+      "return_range_pct": 5.72,
+      "return_cv": 9.0,
+      "mdd_range_pct": 4.36,
+      "sharpe_range": 0.105,
+      "sharpe_cv": 26.8,
+      "best_total_return": -23.6,
+      "worst_total_return": -29.32,
+      "best_sharpe": -0.111,
+      "worst_sharpe": -0.216
+    },
+    "use_ma20_filter": {
+      "rows": [
+        {
+          "value": false,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -29.32,
+          "annual_return": -3.34,
+          "mdd": -37.6,
+          "sharpe": -0.209,
+          "win_rate": 78.87,
+          "sell_trades": 710,
+          "avg_profit_rate": -0.19,
+          "total_profit": -1233364.3640500284,
+          "days": 2572
+        },
+        {
+          "value": true,
+          "start": "20160104",
+          "end": "20260630",
+          "total_return": -36.3,
+          "annual_return": -4.32,
+          "mdd": -46.06,
+          "sharpe": -0.299,
+          "win_rate": 77.76,
+          "sell_trades": 670,
+          "avg_profit_rate": -0.63,
+          "total_profit": -2223756.9705000245,
+          "days": 2572
+        }
+      ],
+      "return_range_pct": 6.98,
+      "return_cv": 10.6,
+      "mdd_range_pct": 8.46,
+      "sharpe_range": 0.09,
+      "sharpe_cv": 17.7,
+      "best_total_return": -29.32,
+      "worst_total_return": -36.3,
+      "best_sharpe": -0.209,
+      "worst_sharpe": -0.299
+    }
+  }
+}

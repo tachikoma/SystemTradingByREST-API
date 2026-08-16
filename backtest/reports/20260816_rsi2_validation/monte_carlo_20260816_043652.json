@@ -1,0 +1,124 @@
+{
+  "period": {
+    "start": "2016-01-01",
+    "end": "2026-06-30"
+  },
+  "seed": 42,
+  "baseline": {
+    "start": "20160104",
+    "end": "20260630",
+    "total_return": -29.32,
+    "annual_return": -3.34,
+    "mdd": -37.6,
+    "sharpe": -0.209,
+    "win_rate": 78.87,
+    "sell_trades": 710,
+    "avg_profit_rate": -0.19,
+    "total_profit": -1233364.3640500284,
+    "days": 2572
+  },
+  "mc_a": {
+    "method": "block_bootstrap(block=20, iters=2000)",
+    "n_iter": 2000,
+    "cagr": {
+      "p5": -9.57,
+      "p25": -5.97,
+      "p50": -3.36,
+      "p75": -0.63,
+      "p95": 3.31
+    },
+    "mdd": {
+      "p5": -69.35,
+      "p25": -56.99,
+      "p50": -47.0,
+      "p75": -37.03,
+      "p95": -26.16
+    },
+    "sharpe": {
+      "p5": -0.74,
+      "p25": -0.43,
+      "p50": -0.21,
+      "p75": 0.01,
+      "p95": 0.32
+    },
+    "prob_negative_cagr": 80.2,
+    "prob_mdd_below_30": 89.4,
+    "prob_mdd_below_50": 42.95
+  },
+  "mc_b": {
+    "method": "trade_bootstrap(iters=5000)",
+    "n_trades": 710,
+    "total_profit": {
+      "p5": -4856158.01,
+      "p25": -2644859.21,
+      "p50": -1238267.57,
+      "p75": 221850.04,
+      "p95": 2156102.36
+    },
+    "win_rate": {
+      "p5": 76.34,
+      "p50": 78.87,
+      "p95": 81.27
+    },
+    "max_loss_streak": {
+      "p50": 4.0,
+      "p95": 5.0,
+      "max": 9
+    },
+    "prob_total_profit_negative": 71.48,
+    "prob_total_profit_less_than_half": 61.46
+  },
+  "mc_c": {
+    "method": "universe_subsample(frac=0.8, iters=20)",
+    "n_iter": 20,
+    "full_universe_metrics": {
+      "start": "20160104",
+      "end": "20260630",
+      "total_return": -29.32,
+      "annual_return": -3.34,
+      "mdd": -37.6,
+      "sharpe": -0.209,
+      "win_rate": 78.87,
+      "sell_trades": 710,
+      "avg_profit_rate": -0.19,
+      "total_profit": -1233364.3640500284,
+      "days": 2572
+    },
+    "total_return": {
+      "p5": -34.58,
+      "p50": -22.12,
+      "p95": 5.65,
+      "min": -36.7,
+      "max": 9.51
+    },
+    "mdd": {
+      "p5": -42.99,
+      "p50": -36.88,
+      "p95": -32.72,
+      "min": -45.92,
+      "max": -29.99
+    },
+    "sharpe": {
+      "p5": -0.27,
+      "p50": -0.14,
+      "p95": 0.11,
+      "min": -0.31,
+      "max": 0.13
+    },
+    "annual_return": {
+      "p5": -4.08,
+      "p50": -2.42,
+      "p95": 0.54,
+      "min": -4.38,
+      "max": 0.89
+    },
+    "win_rate": {
+      "p5": 77.4,
+      "p50": 78.53,
+      "p95": 80.39,
+      "min": 77.26,
+      "max": 81.13
+    },
+    "prob_negative_total_return": 90.0
+  }
+}
