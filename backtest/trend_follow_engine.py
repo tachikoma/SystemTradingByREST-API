@@ -284,6 +284,7 @@ def simulate_trend_follow(
         'total_trades': total_buys + total_sells,
         'win_rate': win_rate,
         'buy_hold_return': buy_hold_return,
+        'daily_values': pd.DataFrame(daily_values),
     }
 
 

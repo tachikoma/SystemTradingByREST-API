@@ -9,8 +9,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Callable
 
 from backtest.run_backtest import load_price_data_from_db, load_universe_availability, load_monthly_universe_snapshots
 
@@ -31,6 +32,7 @@ def simulate_vb_daily(
     ma_filter_period: int = 0,
     stop_loss_pct: float = -8.0,
     hold_days: int = 5,
+    buy_patch: Optional[Callable] = None,
 ) -> Dict:
     cash = float(INITIAL_CAPITAL)
     holdings: Dict[str, Dict] = {}
@@ -167,7 +169,11 @@ def simulate_vb_daily(
 
                 target = open_p + prev_range * k
 
-                if close < target:
+                # 돌파 확인: 당일 종가 >= 목표가 (buy_patch 제공 시 신호 치환 — MC-D permutation용)
+                if buy_patch is not None:
+                    if not buy_patch(code, date, df, idx, len(holdings)):
+                        continue
+                elif close < target:
                     continue
 
                 # MA 필터 (당일 시가 기준)
@@ -208,6 +214,7 @@ def simulate_vb_daily(
         'total_return': total_return, 'annual_return': annual_return,
         'mdd': max_drawdown, 'total_trades': total_buys, 'buy_trades': total_buys,
         'win_rate': win_rate,
+        'daily_values': pd.DataFrame(daily_values),
     }
 
 

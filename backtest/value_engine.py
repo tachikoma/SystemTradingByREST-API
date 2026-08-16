@@ -336,6 +336,7 @@ def simulate_value_strategy(
         'total_return': tr, 'annual_return': ar, 'mdd': max_drawdown,
         'buy_trades': total_buys, 'total_trades': total_buys + total_sells,
         'win_rate': wr, 'buy_hold_return': bh,
+        'daily_values': pd.DataFrame(daily_values),
     }
 
 

@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Callable
 
 from backtest.run_backtest import load_price_data_from_db, load_universe_availability, load_monthly_universe_snapshots
 
@@ -34,6 +34,7 @@ def simulate_vb_backtest(
     ma_filter_period: int = 0,
     stop_loss_pct: float = -5.0,
     hold_days: int = 1,
+    buy_patch: Optional[Callable] = None,
 ) -> Dict:
     """변동성 돌파 백테스트
 
@@ -156,8 +157,11 @@ def simulate_vb_backtest(
                 # 목표가 = 시가 + 전일 변동성 * k
                 target = open_p + prev_range * k
 
-                # 돌파 확인: 당일 고가 >= 목표가
-                if high < target:
+                # 돌파 확인: 당일 고가 >= 목표가 (buy_patch 제공 시 신호 치환 — MC-D permutation용)
+                if buy_patch is not None:
+                    if not buy_patch(code, date, df, idx, len(holdings)):
+                        continue
+                elif high < target:
                     continue
 
                 # MA 필터
@@ -225,6 +229,7 @@ def simulate_vb_backtest(
         'total_trades': total_buys,
         'buy_trades': total_buys,
         'win_rate': win_rate,
+        'daily_values': pd.DataFrame(daily_values),
     }
 
 
