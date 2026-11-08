@@ -7,7 +7,7 @@ FinanceDataReader의 KRX-DESC(현재상장) + KRX-DELISTING(상장폐지) 데이
 
 import sys
 from pathlib import Path
-from datetime import datetime, date
+from datetime import datetime
 
 import pandas as pd
 import FinanceDataReader as fdr
@@ -16,8 +16,91 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from util.logging_config import get_logger
+from util.time_helper import get_korea_time
 
 logger = get_logger('build_historical_universe')
+
+# FDR KRX 캐시(GitHub)는 KRX 영업일 기준 1~2일 시차로 게시되어 당일 파일이 404일 수 있다.
+# 예: 2026-09-09 장중에는 09-07 파일까지만 존재. 당일 404 시 최근 파일로 폴백한다.
+FDR_KRX_CACHE_BASE = (
+    'https://raw.githubusercontent.com/FinanceData'
+    '/fdr_krx_data_cache/refs/heads/master/data'
+)
+CACHE_FALLBACK_DAYS = 10
+
+
+def _read_fdr_cache_csv(subdir: str, dtype: dict, label: str) -> pd.DataFrame:
+    """FDR KRX 캐시 CSV를 당일부터 과거로 최대 N일간 거슬러 읽는다."""
+    from datetime import timedelta
+
+    last_err = None
+    for back in range(CACHE_FALLBACK_DAYS):
+        day = (get_korea_time().date() - timedelta(days=back)).strftime('%Y-%m-%d')
+        url = f'{FDR_KRX_CACHE_BASE}/{subdir}/{day}.csv'
+        try:
+            df = pd.read_csv(url, dtype=dtype)
+            if back:
+                logger.warning(
+                    "%s 캐시 당일분 없음 → %d일 전(%s) 파일로 폴백", label, back, day
+                )
+            else:
+                logger.info("%s 캐시 당일분(%s) 사용", label, day)
+            return df
+        except Exception as e:  # 404 등 → 이전 날짜 시도
+            last_err = e
+    raise RuntimeError(f"{label} 캐시 로드 실패 ({CACHE_FALLBACK_DAYS}일간): {last_err}")
+
+
+def _listing_krx_desc() -> pd.DataFrame:
+    """현재상장 목록. fdr 우선, 404 등 실패 시 캐시 직접 폴백 (FDR 파싱과 동일 규격)."""
+    try:
+        return fdr.StockListing('KRX-DESC')
+    except Exception as e:
+        logger.warning("fdr.StockListing('KRX-DESC') 실패(%s) → 캐시 직접 폴백", e)
+    df = _read_fdr_cache_csv('listing/desc', {'Code': str}, 'KRX-DESC')
+    df['ListingDate'] = pd.to_datetime(df['ListingDate'], errors='coerce')
+    return df
+
+
+def _listing_krx_marcap() -> pd.DataFrame:
+    """시총/상장주식수 목록. fdr 우선, 실패 시 캐시 직접 폴백."""
+    try:
+        return fdr.StockListing('KRX')
+    except Exception as e:
+        logger.warning("fdr.StockListing('KRX') 실패(%s) → 캐시 직접 폴백", e)
+    df = _read_fdr_cache_csv(
+        'listing/krx',
+        {'Code': str, 'Dept': str, 'ChangeCode': str, 'MarketId': str},
+        'KRX',
+    )
+    df['Stocks'] = pd.to_numeric(
+        df['Stocks'].astype(str).str.replace(',', ''), errors='coerce'
+    )
+    return df
+
+
+def _listing_krx_delisting() -> pd.DataFrame:
+    """상장폐지 목록. fdr 우선(단, FDR은 실패 시 빈 DF를 반환하므로 empty도 폴백),
+    실패 시 캐시 직접 폴백 (FDR의 날짜 파싱/기간 필터와 동일 규격)."""
+    try:
+        df = fdr.StockListing('KRX-DELISTING')
+        if len(df) > 0:
+            return df
+        logger.warning("fdr.StockListing('KRX-DELISTING') 빈 결과 → 캐시 직접 폴백")
+    except Exception as e:
+        logger.warning("fdr.StockListing('KRX-DELISTING') 실패(%s) → 캐시 직접 폴백", e)
+    df = _read_fdr_cache_csv(
+        'listing/delisting', {'Symbol': str, 'ToSymbol': str}, 'KRX-DELISTING'
+    )
+    df['ListingDate'] = pd.to_datetime(df['ListingDate'], format='%Y-%m-%d', errors='coerce')
+    df['DelistingDate'] = pd.to_datetime(df['DelistingDate'], format='%Y-%m-%d', errors='coerce')
+    df['ListingShares'] = pd.to_numeric(
+        df['ListingShares'].astype(str).str.replace(',', ''), errors='coerce'
+    )
+    start = datetime(1960, 1, 1)
+    end = get_korea_time().replace(tzinfo=None)
+    df = df[(start <= df['DelistingDate']) & (df['DelistingDate'] <= end)]
+    return df.reset_index(drop=True)
 
 # 실전 전략과 동일한 종목명 제외 키워드
 NAME_EXCLUDE_KEYWORDS = [
@@ -50,7 +133,7 @@ def build_complete_universe(
 
     # 1) 현재 상장 종목
     logger.info("KRX-DESC 로드 중...")
-    current = fdr.StockListing('KRX-DESC')
+    current = _listing_krx_desc()
     current_df = pd.DataFrame({
         'code': current['Code'],
         'name': current['Name'],
@@ -63,7 +146,7 @@ def build_complete_universe(
 
     # 2) 상장폐지 종목 중 6-digit 보통주만
     logger.info("KRX-DELISTING 로드 중...")
-    delisted = fdr.StockListing('KRX-DELISTING')
+    delisted = _listing_krx_delisting()
     delisted_common = delisted[
         (delisted['Kind'] == '보통주') &
         (delisted['Symbol'].str.len() == 6)
@@ -82,10 +165,10 @@ def build_complete_universe(
     #    - 현재상장: fdr.StockListing('KRX')의 Stocks 컬럼
     #    - 상장폐지: KRX-DELISTING의 ListingShares 컬럼
     logger.info("상장주식수 정보 수집 중...")
-    krx_listing = fdr.StockListing('KRX')
+    krx_listing = _listing_krx_marcap()
     stocks_map = dict(zip(krx_listing['Code'].astype(str), krx_listing['Stocks']))
 
-    delisted_raw = fdr.StockListing('KRX-DELISTING')
+    delisted_raw = delisted  # 2)에서 로드한 원본 재사용 (재요청 방지)
     listing_shares_map = dict(
         zip(delisted_raw['Symbol'].astype(str), delisted_raw['ListingShares'])
     )
