@@ -117,6 +117,8 @@ def make_shadow_strategy(**overrides):
     s.deposit = 10_000_000
     s.mock_trade_blacklist = set()
     s._buy_pause_log_date = None
+    s._shadow_signal_date = None
+    s._shadow_signal_keys = set()
     s.sent_messages = []
     s._queue_or_send = lambda msg: s.sent_messages.append(msg)  # noqa: E731
     s.resolve_stock_name = lambda code: "테스트종목"  # noqa: E731
@@ -201,3 +203,105 @@ def test_shadow_flag_env_parsing(monkeypatch):
     flag = os.getenv("SHADOW_MODE", os.getenv("DRY_RUN", "0"))
     # SHADOW_MODE가 우선하므로 0 → 비활성
     assert str(flag).lower() not in ("1", "true", "yes")
+
+
+def _make_sell_ready_strategy(monkeypatch):
+    s = make_shadow_strategy()
+    s.kiwoom.balance = {"005930": {"보유수량": 10, "매매가능수량": 10, "매입가": 70000}}
+    s.kiwoom.universe_realtime_transaction_info = {
+        "005930": {"(최우선)매도호가": 71000, "현재가": 71000}
+    }
+    logged = []
+    monkeypatch.setattr(trade_logger, "log_trade", lambda **kw: logged.append(kw))
+    return s, logged
+
+
+def test_shadow_sell_records_only_once_per_day(monkeypatch):
+    s, logged = _make_sell_ready_strategy(monkeypatch)
+
+    s.order_sell("005930", sell_reason="TEST")
+    s.order_sell("005930", sell_reason="TEST")
+    s.order_sell("005930", sell_reason="TEST")
+
+    assert len(logged) == 1
+    assert len(s.sent_messages) == 1
+
+
+def test_shadow_buy_records_only_once_per_day(monkeypatch):
+    import util.time_helper as time_helper
+
+    s = make_shadow_strategy()
+    s.kiwoom.universe_realtime_transaction_info = {
+        "005930": {"(최우선)매수호가": 70000, "현재가": 70000}
+    }
+    s.universe = {
+        "005930": {
+            "code_name": "테스트종목",
+            "close_count": 250,
+            "ma_latest": {"ma20": 100.0, "ma60": 100.0, "ma200": 80.0},
+        }
+    }
+    df = _FakeFrame(
+        [
+            {"close": 100.0, "RSI(2)": 50.0},
+            {"close": 100.0, "RSI(2)": 50.0},
+            {"close": 94.0, "RSI(2)": 2.0},
+        ]
+    )
+    monkeypatch.setattr(s, "calculate_rsi", lambda code: (df, 94.0))
+    monkeypatch.setattr(time_helper, "is_buy_window_open", lambda: True)
+    monkeypatch.setattr(time_helper, "is_morning_buy_fallback_window", lambda: False)
+    logged = []
+    monkeypatch.setattr(trade_logger, "log_trade", lambda **kw: logged.append(kw))
+
+    assert s.check_buy_signal_and_order("005930") is True
+    assert s.check_buy_signal_and_order("005930") is True
+    assert s.check_buy_signal_and_order("005930") is True
+
+    assert len(logged) == 1
+    assert len(s.sent_messages) == 1
+
+
+def test_shadow_dedupe_resets_on_new_day(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    import strategy.RSIStrategy as rsi_module
+
+    s = make_shadow_strategy()
+    assert s._shadow_should_record("005930", "BUY") is True
+    assert s._shadow_should_record("005930", "BUY") is False
+
+    # 날짜가 바뀌면 같은 종목/액션이라도 다시 기록 대상이 된다
+    monkeypatch.setattr(
+        rsi_module,
+        "get_korea_time",
+        lambda: datetime(2030, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Seoul")),
+    )
+    assert s._shadow_should_record("005930", "BUY") is True
+    assert s._shadow_should_record("005930", "BUY") is False
+
+
+def test_load_shadow_keys_reads_only_today(monkeypatch, tmp_path):
+    from util.time_helper import get_korea_time
+
+    monkeypatch.setenv("LOG_DIR", str(tmp_path))
+    today = get_korea_time().strftime("%Y-%m-%d")
+
+    trade_logger.log_trade(
+        mode="real", action="BUY", code="005930", name="테스트종목",
+        price=70000, quantity=1, order_no="SHADOW",
+    )
+    trade_logger.log_trade(
+        mode="real", action="SELL", code="005930", name="테스트종목",
+        price=71000, quantity=1, order_no="SHADOW",
+    )
+    # 실주문 이력은 섀도우 키로 취급하지 않는다
+    trade_logger.log_trade(
+        mode="real", action="BUY", code="000660", name="실주문종목",
+        price=100000, quantity=1, order_no="12345",
+    )
+
+    assert trade_logger.load_shadow_keys(today) == {("005930", "BUY"), ("005930", "SELL")}
+    assert trade_logger.load_shadow_keys("1999-01-01") == set()
+

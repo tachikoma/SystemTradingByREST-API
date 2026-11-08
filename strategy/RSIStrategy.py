@@ -144,8 +144,22 @@ class RSIStrategy(threading.Thread):
         # SHADOW_MODE=1 또는 DRY_RUN=1 이면 매수/매도 send_order 호출을 스킵하고 로그+CSV로만 기록
         shadow_flag = os.getenv('SHADOW_MODE', os.getenv('DRY_RUN', '0'))
         self.shadow_mode = str(shadow_flag).lower() in ('1', 'true', 'yes')
+        # 섀도우 신호는 (KST 날짜, 종목코드, action) 당 1회만 알림/기록한다.
+        # 재시작 직후 당일 신호가 다시 쏟아지지 않도록 CSV 이력을 프리로드한다.
+        self._shadow_signal_date = None
+        self._shadow_signal_keys = set()
         if self.shadow_mode:
             logger.warning("섀도우 모드 활성화: SHADOW_MODE=1 — 실주문 차단, 신호 관찰만 수행")
+            try:
+                self._shadow_signal_date = get_korea_time().strftime('%Y-%m-%d')
+                self._shadow_signal_keys = trade_logger.load_shadow_keys(self._shadow_signal_date)
+                if self._shadow_signal_keys:
+                    logger.info(
+                        "섀도우 신호 이력 프리로드: %d건 (당일 중복 알림 방지)",
+                        len(self._shadow_signal_keys),
+                    )
+            except Exception as e:
+                logger.warning("섀도우 신호 이력 프리로드 실패 (무시): %s", e)
         # 긴급 청산 자동 모드(운영 안전장치)
         self.enable_emergency_liquidation = str(os.getenv('RSI_EMERGENCY_LIQUIDATION_ENABLED', '0')).lower() in ('1', 'true', 'yes')
         try:
@@ -2196,6 +2210,35 @@ class RSIStrategy(threading.Thread):
             logger.error("매도 신호 확인 중 예상치 못한 오류 (%s): %s", code, e)
             return False
 
+    def _shadow_should_record(self, code, action):
+        """섀도우 신호를 오늘 첫 발화에만 기록/알림할지 판단한다.
+
+        키는 (KST 날짜, 종목코드, action)이며 날짜가 바뀌면 자동으로 초기화된다.
+
+        Returns:
+            bool: True면 기록 대상(당일 첫 신호), False면 중복 신호
+        """
+        try:
+            today = get_korea_time().strftime('%Y-%m-%d')
+        except Exception:
+            # 시간 조회 실패 시 기록 누락을 막기 위해 항상 기록 허용
+            return True
+
+        if getattr(self, '_shadow_signal_date', None) != today:
+            self._shadow_signal_date = today
+            self._shadow_signal_keys = set()
+
+        keys = getattr(self, '_shadow_signal_keys', None)
+        if keys is None:
+            keys = set()
+            self._shadow_signal_keys = keys
+
+        key = (code, action)
+        if key in keys:
+            return False
+        keys.add(key)
+        return True
+
     @notify_on_exception(fallback_return=None)
     def order_sell(self, code, quantity=None, sell_reason=None):
         """매도 주문 접수 함수"""
@@ -2234,6 +2277,10 @@ class RSIStrategy(threading.Thread):
 
             # 섀도우 모드: 실주문 차단, 신호만 기록 (예수금 차감 없음)
             if getattr(self, 'shadow_mode', False):
+                if not self._shadow_should_record(code, 'SELL'):
+                    logger.debug("SHADOW_MODE: 중복 매도 신호 기록 생략: %s", display)
+                    self._last_sell_reason = previous_sell_reason
+                    return
                 sell_amount = quantity * ask
                 estimated_proceeds = math.floor(sell_amount / self.SELL_FEE_RATE)
                 total_fee = sell_amount - estimated_proceeds
@@ -2243,7 +2290,7 @@ class RSIStrategy(threading.Thread):
                 estimated_profit_rate = (estimated_profit / purchase_amount * 100) if purchase_amount > 0 else 0.0
                 shadow_msg = "👁 <b>SHADOW 매도 신호 (주문 미전송)</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)\n예상수익률: {:.2f}%\n사유: {}".format(
                     display, quantity, ask, estimated_proceeds, total_fee, estimated_profit_rate, self._last_sell_reason)
-                logger.warning("SHADOW_MODE: 실매도 차단, 신호만 기록: %s %d주 @%d원 (사유=%s)",
+                logger.warning("SHADOW_MODE: 실매도 차단, 신호 기록: %s %d주 @%d원 (사유=%s)",
                                display, quantity, ask, self._last_sell_reason)
                 self._queue_or_send(shadow_msg)
                 try:
@@ -2640,9 +2687,12 @@ class RSIStrategy(threading.Thread):
             if getattr(self, 'shadow_mode', False):
                 name = self.resolve_stock_name(code)
                 display = f"{name}({code})" if name else code
+                if not self._shadow_should_record(code, 'BUY'):
+                    logger.debug("SHADOW_MODE: 중복 매수 신호 기록 생략: %s", display)
+                    return True
                 shadow_msg = "👁 <b>SHADOW 매수 신호 (주문 미전송)</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n예상비용(수수료+세금): {:,}원".format(
                     display, quantity, bid, total_cost)
-                logger.warning("SHADOW_MODE: 실매수 차단, 신호만 기록: %s %d주 @%d원", display, quantity, bid)
+                logger.warning("SHADOW_MODE: 실매수 차단, 신호 기록: %s %d주 @%d원", display, quantity, bid)
                 self._queue_or_send(shadow_msg)
                 try:
                     trade_logger.log_trade(

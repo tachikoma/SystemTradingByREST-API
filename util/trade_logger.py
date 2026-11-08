@@ -130,3 +130,36 @@ def log_trade(
     except Exception as e:
         # 기록 실패는 매매 흐름에 영향을 주지 않도록 경고만 출력
         logger.warning("매매 이력 CSV 기록 실패 (무시): %s", e)
+
+
+def load_shadow_keys(day: str) -> set[tuple[str, str]]:
+    """지정일(KST)에 이미 기록된 섀도우 신호 키를 반환한다.
+
+    프로세스 재시작 후에도 당일 중복 알림/기록이 발생하지 않도록
+    trade_history.csv의 SHADOW 행을 읽어 (code, action) 집합을 복원한다.
+
+    Args:
+        day: 'YYYY-MM-DD' 형식의 KST 날짜
+
+    Returns:
+        {(code, action), ...} — 기록이 없거나 읽기 실패 시 빈 집합
+    """
+    keys: set[tuple[str, str]] = set()
+    csv_path = _get_csv_path()
+    if not csv_path.exists():
+        return keys
+    try:
+        with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("order_no") != "SHADOW":
+                    continue
+                if not (row.get("timestamp") or "").startswith(day):
+                    continue
+                code = row.get("code") or ""
+                action = row.get("action") or ""
+                if code and action:
+                    keys.add((code, action))
+    except Exception as e:
+        logger.warning("섀도우 신호 이력 로드 실패 (무시): %s", e)
+    return keys
