@@ -110,11 +110,19 @@ if __name__ == '__main__':
                 logger.exception("Failed to apply non-sensitive env changes")
 
         # 민감 변경: 자동 적용 대신 승인 요청을 생성하고 텔레그램으로 승인/거부를 받습니다.
+        # 동일 봇 토큰을 다른 인스턴스(클론)와 공유하면 getUpdates 폴링이 충돌(409)하므로,
+        # ENV_APPROVER_ENABLED=0 으로 한쪽의 승인 폴링을 끌 수 있습니다.
+        # 끈 쪽은 민감 변경 시 수동 재시작이 필요합니다.
+        approver_enabled = str(os.environ.get('ENV_APPROVER_ENABLED', '1')).lower() in ('1', 'true', 'yes')
         try:
             from util.env_approver import EnvApprover
-            approver = EnvApprover(apply_callback=getattr(rsi_strategy, 'apply_sensitive_updates', None))
-            approver.start()
-            shutdown.register_cleanup(lambda: approver.stop())
+            approver = None
+            if approver_enabled:
+                approver = EnvApprover(apply_callback=getattr(rsi_strategy, 'apply_sensitive_updates', None))
+                approver.start()
+                shutdown.register_cleanup(lambda: approver.stop())
+            else:
+                logger.warning("EnvApprover 비활성화됨(ENV_APPROVER_ENABLED=0): 민감 변경은 수동 재시작 필요")
         except Exception:
             approver = None
 
@@ -125,7 +133,7 @@ if __name__ == '__main__':
                     rid = approver.create_request(changed)
                     logger.info(f"민감한 환경변수 변경 요청 생성: {rid} (승인 필요)")
                 else:
-                    msg = "민감한 .env 변경이 감지되었습니다. approver 미구성 - 수동 확인 또는 프로세스 재시작이 필요합니다:\n" + ", ".join([f"{k}" for k in changed.keys()])
+                    msg = "민감한 .env 변경이 감지되었습니다. 승인 폴링 비활성화(ENV_APPROVER_ENABLED=0) 또는 approver 미구성 - 수동 확인 후 프로세스 재시작이 필요합니다:\n" + ", ".join([f"{k}" for k in changed.keys()])
                     try:
                         send_message(msg)
                     except Exception:
