@@ -164,3 +164,6 @@ cache/
 !.omo/evidence/
 !.omo/plans/
 .opencode/
+
+# 유니버스 빈 결과 가드 테스트 (test*.py 패턴 예외)
+!tests/test_universe_empty_guard.py

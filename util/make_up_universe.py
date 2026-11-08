@@ -30,6 +30,9 @@ MOCK_TRADE_BLACKLIST_CODES = [
 
 logger = get_logger(__name__)
 
+# Universe 최소 종목 수 (빈 결과/비정상 데이터로 기존 유니버스를 덮어쓰는 것을 방지)
+MIN_UNIVERSE_SIZE = 10
+
 
 ETF_NAME_PREFIXES = (
     '1Q',
@@ -340,9 +343,17 @@ def _normalize_units(df, source_hint: Optional[str] = None, save_canonical: bool
 
     if save_canonical:
         try:
-            canonical_path = os.path.join(DB_DIR, 'all_stocks_canonical.parquet')
-            df_norm.to_parquet(canonical_path, index=True)
-            logger.info(f"Canonical Parquet saved: {Path(canonical_path).resolve()}")
+            # 빈/희소 데이터를 canonical로 저장하면 이후 30일간 "유효한 캐시"로
+            # 오인되어 유니버스가 계속 비어 있게 된다. 최소 기준 미만은 저장하지 않는다.
+            if len(df_norm) < MIN_UNIVERSE_SIZE:
+                logger.warning(
+                    "Canonical Parquet 저장 생략: 유효 종목 %d개 < 최소 기준 %d개",
+                    len(df_norm), MIN_UNIVERSE_SIZE,
+                )
+            else:
+                canonical_path = os.path.join(DB_DIR, 'all_stocks_canonical.parquet')
+                df_norm.to_parquet(canonical_path, index=True)
+                logger.info(f"Canonical Parquet saved: {Path(canonical_path).resolve()}")
         except Exception as e:
             logger.warning(f"Canonical save failed: {e}")
 
@@ -1192,6 +1203,10 @@ def _try_load_cache():
                 except Exception as e:
                     logger.warning(f"Parquet 읽기 실패: {e}")
                     raise
+                # 빈 캐시(주말/휴장 중 수집 실패 산출물)는 건너뛰고 다음 소스를 시도한다.
+                if len(df) == 0:
+                    logger.warning(f"캐시 파일이 비어 있음(0행): {cache_file} — 다음 소스를 시도합니다.")
+                    continue
                 # 파일 수정시간 조회는 실패할 수 있으므로 개별로 처리
                 try:
                     file_mod_time = datetime.fromtimestamp(
@@ -1261,8 +1276,11 @@ def _filter_and_create_universe(
     
     # 음수 등락률 절대값 처리 필요 (등락률은 이미 숫자)
     if len(df) == 0:
-        logger.warning("필터링 후 데이터가 없습니다.")
-        return []
+        # 빈 결과를 그대로 반환하면 호출측이 정상 결과로 오인해 기존 유니버스를
+        # 빈 목록으로 덮어쓴다. 실패로 처리해 폴백(기존 유니버스 유지)을 유도한다.
+        error_msg = "필터링 후 데이터가 없습니다. (빈 결과로 Universe를 생성할 수 없습니다)"
+        logger.error(error_msg)
+        raise Exception(error_msg)
     
     # 종목코드가 있는 경우 모의투자 제한 종목 제외
     if '종목코드' in df.columns:
@@ -1535,7 +1553,6 @@ def _filter_and_create_universe(
         df = df.loc[: max_codes - 1]
     
     # Universe 최소 개수 검증 (비정상 데이터 방지)
-    MIN_UNIVERSE_SIZE = 10
     if len(df) < MIN_UNIVERSE_SIZE:
         error_msg = f"Universe 크기가 너무 작습니다 ({len(df)}개). 최소 {MIN_UNIVERSE_SIZE}개 필요."
         logger.error(error_msg)

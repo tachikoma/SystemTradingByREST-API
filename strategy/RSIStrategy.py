@@ -129,6 +129,7 @@ class RSIStrategy(threading.Thread):
         # Universe 재구성 관련 변수
         self.last_universe_update = get_korea_time()
         self.UNIVERSE_UPDATE_DAYS = 30  # 30일마다 재구성
+        self.UNIVERSE_EMPTY_RETRY_SEC = 600  # 유니버스가 비었을 때 장중 재시도 간격(초)
         self.universe_updated_today = False
         
         # 전체 데이터 캐싱 관련 변수 (30일 주기)
@@ -592,6 +593,26 @@ class RSIStrategy(threading.Thread):
         except Exception:
             logger.exception("apply_sensitive_updates failed")
 
+    def _is_parquet_empty(self, path):
+        """Parquet 파일이 0행인지 판정한다.
+
+        주말/휴장 중 수집에 실패하면 빈 canonical 파일이 생성될 수 있는데,
+        mtime만으로 신선도를 판정하면 최대 30일간 빈 캐시를 신뢰하게 된다.
+        읽기 실패 시에는 기존 동작을 유지하도록 False(비어있지 않음)를 반환한다.
+
+        Args:
+            path: Parquet 파일 경로
+
+        Returns:
+            bool: 0행이면 True
+        """
+        try:
+            df = pd.read_parquet(path)
+            return len(df) == 0
+        except Exception as e:
+            logger.warning("Parquet 행 수 확인 실패 (캐시 판정은 기존 로직 유지): %s (%s)", path, e)
+            return False
+
     @notify_on_exception(fallback_return=None)
     def check_and_cache_if_needed(self):
         """캐시 상태 체크 및 필요 시 전체 캐싱"""
@@ -627,12 +648,14 @@ class RSIStrategy(threading.Thread):
             days_old = (now.date() - file_mod_time.date()).days
             logger.info(f"Canonical 캐시 발견: {canonical_file}, {days_old}일 전 데이터")
             # UNIVERSE_UPDATE_DAYS 이내면 canonical 사용
-            if days_old < self.UNIVERSE_UPDATE_DAYS:
+            if days_old < self.UNIVERSE_UPDATE_DAYS and not self._is_parquet_empty(canonical_file):
                 logger.info(f"✅ Canonical 파일 사용 가능 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 이내)")
                 self.last_full_cache_time = file_mod_time
                 return
-            else:
+            elif days_old >= self.UNIVERSE_UPDATE_DAYS:
                 logger.warning(f"⚠️ Canonical 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
+            else:
+                logger.warning(f"⚠️ Canonical 파일이 비어 있음(0행): {canonical_file} — 캐시로 사용하지 않습니다.")
 
         # canonical이 없거나 오래되었으면 기존 키움 캐시를 확인
         if os.path.exists(cache_file):
@@ -1047,6 +1070,9 @@ class RSIStrategy(threading.Thread):
                     max_codes=self.REALTIME_MAX_CODES + self.POLLING_MAX_CODES,
                 )
                 logger.info("Universe list: %s", universe_list)
+                # 빈 결과를 정상 생성으로 취급하면 DB의 기존 유니버스를 0건으로 덮어쓴다.
+                if not universe_list:
+                    raise Exception("Universe 생성 결과가 비어 있습니다. (기존 유니버스를 유지합니다)")
             except Exception as e:
                 error_msg = f"Universe 생성 실패: {e}"
                 logger.error(error_msg)
@@ -1475,6 +1501,30 @@ class RSIStrategy(threading.Thread):
                     logger.info("장시간이 아니므로 5분간 대기합니다.")
                     self._stop_event.wait(5 * 60)
                     continue
+
+                # (0-1) 유니버스가 비어 있으면 장중 주기적으로 재생성을 시도한다.
+                # 주말/휴장 중 기동하면 유니버스 생성이 실패해 빈 상태로 남을 수 있는데,
+                # 개장 후 자동으로 복구해 재시작 없이 정상 동작하도록 한다.
+                if not self.universe:
+                    now_ts = time.time()
+                    if now_ts - getattr(self, '_universe_empty_retry_ts', 0) >= self.UNIVERSE_EMPTY_RETRY_SEC:
+                        self._universe_empty_retry_ts = now_ts
+                        logger.warning("유니버스가 비어 있습니다. 재생성을 시도합니다.")
+                        try:
+                            self.check_and_get_universe(force_update=True)
+                        except Exception as e:
+                            logger.error("유니버스 재생성 실패: %s", e)
+                        if self.universe:
+                            try:
+                                self.set_universe_real_time()
+                            except Exception as e:
+                                logger.error("실시간 등록 재수행 실패: %s", e)
+                            logger.info("✅ 유니버스 자동 복구 완료 (종목 수: %d)", len(self.universe))
+                            self._queue_or_send(f"🔄 유니버스 자동 복구 완료\n종목 수: {len(self.universe)}")
+                    if not self.universe:
+                        logger.warning("유니버스가 여전히 비어 있습니다. 60초 후 다시 시도합니다.")
+                        self._stop_event.wait(60)
+                        continue
 
                 # 주기적 동기화 체크 (웹소켓 실시간 데이터 보완용)
                 current_time = time.time()
