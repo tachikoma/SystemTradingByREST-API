@@ -1216,19 +1216,22 @@ def _try_load_cache():
                     logger.info(f"캐시 파일 발견: {cache_file} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
                 except Exception:
                     logger.info(f"캐시 파일 읽음: {cache_file} (수정시간 없음)")
-                    logger.info(f"⚠️  캐시 파일 사용: {cache_file}")
-                    # 보장: 필터링에서 기대하는 컬럼들이 없으면 NaN 컬럼을 추가하여 KeyError 방지
-                    required_cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '종목코드', '시장구분']
-                    for rc in required_cols:
-                        if rc not in df.columns:
-                            df[rc] = np.nan
-                    # 캐시에서 읽은 데이터는 단위 정규화 옵션에 따라 canonical로 저장될 수 있음
-                    try:
-                        save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
-                        df = _normalize_units(df, save_canonical=save_canonical)
-                    except Exception as e:
-                        logger.warning(f"캐시 정규화 실패: {e}")
-                    return df
+
+                # 보장: 필터링에서 기대하는 컬럼들이 없으면 NaN 컬럼을 추가하여 KeyError 방지
+                required_cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '종목코드', '시장구분']
+                for rc in required_cols:
+                    if rc not in df.columns:
+                        df[rc] = np.nan
+                # 캐시에서 읽은 데이터는 단위 정규화 옵션에 따라 canonical로 저장될 수 있음
+                try:
+                    save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
+                    df = _normalize_units(df, save_canonical=save_canonical)
+                except Exception as e:
+                    logger.warning(f"캐시 정규화 실패: {e}")
+                # 수정시간 조회 성공/실패와 무관하게 로드한 캐시를 반환한다.
+                # (이전 구현은 getmtime 성공 시 return이 없어 항상 None을 반환했다)
+                logger.info(f"⚠️  캐시 파일 사용: {cache_file} ({len(df)}개 종목)")
+                return df
             except Exception as e:
                 logger.warning(f"{cache_path} 읽기 실패: {e}")
                 continue
