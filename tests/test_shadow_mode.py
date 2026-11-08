@@ -305,3 +305,48 @@ def test_load_shadow_keys_reads_only_today(monkeypatch, tmp_path):
     assert trade_logger.load_shadow_keys(today) == {("005930", "BUY"), ("005930", "SELL")}
     assert trade_logger.load_shadow_keys("1999-01-01") == set()
 
+
+def test_send_order_killswitch_blocks_without_http(monkeypatch):
+    """전역 킬스위치: 어떤 경로에서 호출하든 섀도우 모드면 HTTP 요청이 없어야 한다."""
+    import api.Kiwoom as kiwoom_module
+
+    monkeypatch.setenv("SHADOW_MODE", "1")
+    monkeypatch.delenv("DRY_RUN", raising=False)
+
+    client = kiwoom_module.Kiwoom.__new__(kiwoom_module.Kiwoom)
+    client.mock = False
+    client.order = {}
+    called = []
+    monkeypatch.setattr(
+        client, "_request", lambda *a, **k: (called.append(1), ({}, None))[1]
+    )
+
+    result = client.send_order("rq", "1001", 0, "005930", 1, 70000, "00")
+
+    assert result["success"] is False
+    assert result["shadow_blocked"] is True
+    assert result["error_code"] == "SHADOW_MODE"
+    assert called == []
+
+
+def test_send_order_passes_through_when_shadow_disabled(monkeypatch):
+    import api.Kiwoom as kiwoom_module
+
+    monkeypatch.delenv("SHADOW_MODE", raising=False)
+    monkeypatch.delenv("DRY_RUN", raising=False)
+
+    client = kiwoom_module.Kiwoom.__new__(kiwoom_module.Kiwoom)
+    client.mock = False
+    client.order = {}
+    called = []
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *a, **k: (called.append(1), ({"ord_no": "12345"}, None))[1],
+    )
+
+    result = client.send_order("rq", "1001", 0, "005930", 1, 70000, "00")
+
+    assert called == [1]
+    assert result["success"] is True
+    assert result["order_no"] == "12345"

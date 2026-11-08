@@ -3,6 +3,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import json
 import datetime
+import os
 from zoneinfo import ZoneInfo
 import time
 import pandas as pd
@@ -22,6 +23,15 @@ RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
 # 참고: 로깅 설정은 애플리케이션(`main.py`)에서 환경변수 로드 후 초기화해야 합니다.
 # 모듈 임포트 시점에 `configure_logging()`을 호출하면 초기화 순서가 불명확해질 수 있으므로 지양합니다.
 logger = get_logger('kiwoom')
+
+
+def _shadow_mode_enabled() -> bool:
+    """SHADOW_MODE(또는 구 별칭 DRY_RUN) 활성 여부를 호출 시점에 판정한다.
+
+    환경변수를 매 호출마다 읽으므로 EnvWatcher를 통한 런타임 토글도 즉시 반영된다.
+    """
+    flag = os.environ.get('SHADOW_MODE', os.environ.get('DRY_RUN', '0'))
+    return str(flag).lower() in ('1', 'true', 'yes')
 
 
 class Kiwoom:
@@ -489,6 +499,24 @@ class Kiwoom:
                 - error_message (str): 에러메시지 (실패 시)
                 - raw_response (dict): API 원본 응답
         """
+        # 전역 킬스위치: 섀도우 모드에서는 어떤 경로에서 호출하든 실주문을 전송하지 않는다.
+        if _shadow_mode_enabled():
+            logger.warning(
+                "SHADOW_MODE: 주문 전송 차단 rqname=%s type=%s code=%s qty=%s price=%s class=%s",
+                rqname, order_type, code, order_quantity, order_price, order_classification,
+            )
+            return {
+                'success': False,
+                'shadow_blocked': True,
+                'code': code,
+                'order_type': order_type,
+                'quantity': order_quantity,
+                'price': order_price,
+                'order_classification': order_classification,
+                'error_code': 'SHADOW_MODE',
+                'error_message': '섀도우 모드 활성화: 실주문이 차단되었습니다',
+            }
+
         path = "/api/dostk/ordr"
         
         # 기본 결과 딕셔너리

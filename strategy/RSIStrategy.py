@@ -1624,7 +1624,16 @@ class RSIStrategy(threading.Thread):
                 try:
                     code_name = holding_info[code].get('code_name', 'N/A')
                     quantity = self.kiwoom.balance[code]['보유수량']
-                    
+
+                    # 섀도우 모드에서는 청산 주문도 보내지 않는다 (전역 킬스위치의 1차 방어선)
+                    if getattr(self, 'shadow_mode', False):
+                        logger.warning(
+                            "SHADOW_MODE: 유니버스 제외 종목 청산 차단: %s(%s) %d주",
+                            code_name, code, quantity,
+                        )
+                        self.universe[code] = holding_info[code]
+                        continue
+
                     logger.info("청산 주문: %s(%s) %d주", code_name, code, quantity)
                     
                     # 시장가 매도 (order_classification='03')
