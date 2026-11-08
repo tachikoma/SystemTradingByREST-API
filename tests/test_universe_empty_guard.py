@@ -80,3 +80,49 @@ def test_is_parquet_empty_returns_false_on_read_error(tmp_path):
     broken.write_text('not a parquet', encoding='utf-8')
 
     assert strategy._is_parquet_empty(str(broken)) is False
+
+
+def _sample_all_stocks_df():
+    return pd.DataFrame(
+        {
+            '종목코드': ['005930', '000660', '035720'],
+            '종목명': ['삼성전자', 'SK하이닉스', '카카오'],
+            '시장구분': ['코스피', '코스피', '코스닥'],
+            '현재가': [70000, 150000, 45000],
+            '거래량': [12345678, 9876543, 2345678],
+            '거래대금': [864197, 1481481, 10555],
+            '시가총액': [4170000, 1090000, 195000],
+            '등락률': [1.2, -0.5, -1.2],
+            '외국인비율': [52.3, 49.1, 42.1],
+            '상장주식수': [5969782550, 728002365, 433457612],
+        }
+    )
+
+
+def test_try_load_cache_returns_df_when_mtime_succeeds(monkeypatch, tmp_path):
+    """mtime 조회가 성공해도 캐시를 반환해야 한다 (이전 구현은 None 반환 버그)"""
+    import util.make_up_universe as mu
+
+    _sample_all_stocks_df().to_parquet(tmp_path / 'all_stocks_kiwoom.parquet')
+    monkeypatch.setattr(mu, 'DB_DIR', str(tmp_path))
+    monkeypatch.setenv('SAVE_CANONICAL', '0')
+
+    result = mu._try_load_cache()
+
+    assert result is not None
+    assert len(result) == 3
+
+
+def test_try_load_cache_skips_empty_file_and_uses_next(monkeypatch, tmp_path):
+    """0행 캐시는 건너뛰고 다음 캐시(네이버)를 사용한다"""
+    import util.make_up_universe as mu
+
+    pd.DataFrame({'종목코드': []}).to_parquet(tmp_path / 'all_stocks_kiwoom.parquet')
+    _sample_all_stocks_df().to_parquet(tmp_path / 'all_stocks_naver.parquet')
+    monkeypatch.setattr(mu, 'DB_DIR', str(tmp_path))
+    monkeypatch.setenv('SAVE_CANONICAL', '0')
+
+    result = mu._try_load_cache()
+
+    assert result is not None
+    assert len(result) == 3
