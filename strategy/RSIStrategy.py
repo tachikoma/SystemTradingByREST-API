@@ -140,6 +140,12 @@ class RSIStrategy(threading.Thread):
         self._buy_pause_log_date = None
         if self.pause_new_buys:
             logger.warning("신규 매수 중단 모드 활성화: RSI_PAUSE_NEW_BUYS=1")
+        # 섀도우 모드: 실계좌 연결 상태에서 실주문을 차단하고 신호만 관찰
+        # SHADOW_MODE=1 또는 DRY_RUN=1 이면 매수/매도 send_order 호출을 스킵하고 로그+CSV로만 기록
+        shadow_flag = os.getenv('SHADOW_MODE', os.getenv('DRY_RUN', '0'))
+        self.shadow_mode = str(shadow_flag).lower() in ('1', 'true', 'yes')
+        if self.shadow_mode:
+            logger.warning("섀도우 모드 활성화: SHADOW_MODE=1 — 실주문 차단, 신호 관찰만 수행")
         # 긴급 청산 자동 모드(운영 안전장치)
         self.enable_emergency_liquidation = str(os.getenv('RSI_EMERGENCY_LIQUIDATION_ENABLED', '0')).lower() in ('1', 'true', 'yes')
         try:
@@ -472,6 +478,9 @@ class RSIStrategy(threading.Thread):
                 try:
                     if ku == 'ALLOW_KIWOOM_CALLS':
                         self.allow_kiwoom_calls = str(new).lower() in ('1', 'true', 'yes')
+                        applied.append(ku)
+                    elif ku in ('SHADOW_MODE', 'DRY_RUN'):
+                        self.shadow_mode = str(new).lower() in ('1', 'true', 'yes')
                         applied.append(ku)
                     elif ku == 'RSI_METHOD':
                         rm = str(new).strip().lower()
@@ -2223,6 +2232,41 @@ class RSIStrategy(threading.Thread):
             if sell_reason:
                 self._last_sell_reason = sell_reason
 
+            # 섀도우 모드: 실주문 차단, 신호만 기록 (예수금 차감 없음)
+            if getattr(self, 'shadow_mode', False):
+                sell_amount = quantity * ask
+                estimated_proceeds = math.floor(sell_amount / self.SELL_FEE_RATE)
+                total_fee = sell_amount - estimated_proceeds
+                purchase_price = self.kiwoom.balance[code].get('매입가', 0)
+                purchase_amount = purchase_price * quantity
+                estimated_profit = estimated_proceeds - purchase_amount
+                estimated_profit_rate = (estimated_profit / purchase_amount * 100) if purchase_amount > 0 else 0.0
+                shadow_msg = "👁 <b>SHADOW 매도 신호 (주문 미전송)</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n예상수령: {:,}원 (수수료+세금: {:,}원)\n예상수익률: {:.2f}%\n사유: {}".format(
+                    display, quantity, ask, estimated_proceeds, total_fee, estimated_profit_rate, self._last_sell_reason)
+                logger.warning("SHADOW_MODE: 실매도 차단, 신호만 기록: %s %d주 @%d원 (사유=%s)",
+                               display, quantity, ask, self._last_sell_reason)
+                self._queue_or_send(shadow_msg)
+                try:
+                    trade_logger.log_trade(
+                        mode='mock' if self.kiwoom.mock else 'real',
+                        action='SELL',
+                        code=code,
+                        name=name or code,
+                        price=ask,
+                        quantity=quantity,
+                        fee=total_fee,
+                        net_amount=estimated_proceeds,
+                        purchase_price=purchase_price,
+                        profit=estimated_profit,
+                        profit_rate=estimated_profit_rate,
+                        sell_reason=self._last_sell_reason,
+                        order_no='SHADOW',
+                    )
+                except Exception:
+                    pass
+                self._last_sell_reason = previous_sell_reason
+                return
+
             order_result = self.kiwoom.send_order('send_sell_order', '1001', 1, code, quantity, ask, '00')
 
             # 주문 결과 확인 (딕셔너리 형식)
@@ -2592,7 +2636,31 @@ class RSIStrategy(threading.Thread):
                 logger.warning("예수금 부족: deposit=%d, estimated_cost=%d", self.deposit, estimated_cost)
                 return
 
-            # (9)계산을 바탕으로 지정가 매수 주문 접수
+            # (9)섀도우 모드: 실주문 차단, 신호만 기록 (예수금 차감 없음)
+            if getattr(self, 'shadow_mode', False):
+                name = self.resolve_stock_name(code)
+                display = f"{name}({code})" if name else code
+                shadow_msg = "👁 <b>SHADOW 매수 신호 (주문 미전송)</b>\n종목: {}\n수량: {}주\n가격: {:,}원\n예상비용(수수료+세금): {:,}원".format(
+                    display, quantity, bid, total_cost)
+                logger.warning("SHADOW_MODE: 실매수 차단, 신호만 기록: %s %d주 @%d원", display, quantity, bid)
+                self._queue_or_send(shadow_msg)
+                try:
+                    trade_logger.log_trade(
+                        mode='mock' if self.kiwoom.mock else 'real',
+                        action='BUY',
+                        code=code,
+                        name=name or code,
+                        price=bid,
+                        quantity=quantity,
+                        fee=total_cost,
+                        net_amount=estimated_cost,
+                        order_no='SHADOW',
+                    )
+                except Exception:
+                    pass
+                return True
+
+            # (10)계산을 바탕으로 지정가 매수 주문 접수
             order_result = self.kiwoom.send_order('send_buy_order', '1001', 0, code, quantity, bid, '00')
 
             # 주문 성공 시에만 예수금 차감 (딕셔너리 형식)

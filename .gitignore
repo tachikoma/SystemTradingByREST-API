@@ -130,6 +130,8 @@ logs/
 
 # main.py
 test*.py
+# 섀도우 모드 테스트는 커밋 대상 (test*.py 패턴 예외)
+!tests/test_shadow_mode.py
 chart*.py
 
 *.csv

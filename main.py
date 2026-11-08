@@ -56,6 +56,10 @@ if __name__ == '__main__':
         sys.exit(1)
     
     print(f"🚀 Starting System Trading in {mode_name} mode...")
+    shadow_flag = os.environ.get('SHADOW_MODE', os.environ.get('DRY_RUN', '0'))
+    shadow_mode = str(shadow_flag).lower() in ('1', 'true', 'yes')
+    if shadow_mode:
+        print("👁 SHADOW MODE: 실주문 차단 — 매수/매도 신호는 로그+CSV로만 기록됩니다.")
     if not is_mock:
         print("⚠️  WARNING: Running in REAL trading mode! Real money is at risk.")
         if not args.yes:
