@@ -1268,7 +1268,9 @@ def get_universe(
     except Exception as filter_err:
         # 소스가 검증은 통과했지만 필터 단계에서 실패한 경우에도 유효한 캐시로 폴백
         logger.warning(f"Universe 필터링 실패: {filter_err}. 캐시 폴백을 시도합니다.")
-        cached_df = _try_load_cache()
+        # 이미 사용해 실패한 캐시(df가 캐시에서 온 경우)는 제외하고 다음 후보를 시도
+        tried = {df.attrs.get('cache_file')} - {None}
+        cached_df = _try_load_cache(exclude=tried)
         if cached_df is None:
             raise
         universe = _filter_and_create_universe(
@@ -1285,7 +1287,7 @@ def get_universe(
     return universe
 
 
-def _try_load_cache():
+def _try_load_cache(exclude=None):
     """
     폴백용 캐시를 로드하는 내부 함수 (우선순위: 키움 API 캐시 → 네이버 크롤링 캐시)
 
@@ -1293,9 +1295,13 @@ def _try_load_cache():
     - CACHE_MAX_AGE_DAYS보다 오래된 캐시는 사용하지 않습니다.
     - 읽기 전용: 폴백 로드 과정에서 어떤 캐시/canonical 파일도 쓰지 않습니다.
 
+    Args:
+        exclude: 건너뛸 캐시 파일명 집합 (이미 사용해 실패한 캐시를 재선택하지 않기 위함)
+
     Returns:
-        DataFrame or None: 유효한 캐시 데이터 또는 None
+        DataFrame or None: 유효한 캐시 데이터 또는 None (df.attrs['cache_file']에 사용한 파일명 기록)
     """
+    exclude = set(exclude or ())
     cache_files = [
         'all_stocks_kiwoom.parquet',  # 키움 API 전체 종목 (우선)
         'all_stocks_naver.parquet'     # 네이버 크롤링 전체 종목
@@ -1303,6 +1309,8 @@ def _try_load_cache():
     now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
 
     for cache_file in cache_files:
+        if cache_file in exclude:
+            continue
         cache_path = cache_file if os.path.isabs(cache_file) else os.path.join(DB_DIR, cache_file)
         if not os.path.exists(cache_path):
             continue
@@ -1321,6 +1329,7 @@ def _try_load_cache():
                 df = _normalize_units(df, save_canonical=False)
             except Exception as e:
                 logger.warning(f"캐시 정규화 실패: {e}")
+            df.attrs['cache_file'] = cache_file
             return df
         except Exception as e:
             logger.warning(f"폴백 캐시 사용 불가 {cache_file}: {e}")
