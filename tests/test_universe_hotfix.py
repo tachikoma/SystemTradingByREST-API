@@ -528,3 +528,43 @@ def test_all_caches_invalid_triggers_recache_not_trust(env, monkeypatch):
     st.check_and_cache_if_needed()
     assert calls == [1]                                  # 유효 캐시가 없으므로 재수집 경로
     assert st.kiwoom.orders_sent == []
+
+
+# ---------------------------------------------------------------- Codex 5차 반영
+def test_empty_universe_table_is_rebuilt_on_startup(env, monkeypatch):
+    """과거 장애로 0행이 된 DB universe 테이블은 그대로 로드하지 않고 재생성한다."""
+    st = make_strategy(env, monkeypatch, existing=0)
+    st.universe = {}
+    monkeypatch.setattr(rs, 'get_universe', lambda **k: [f'종목{i}' for i in range(0, 120)])
+    assert st.check_and_get_universe(force_update=False) is True
+    assert len(db_codes(st)) == 120 and len(st.universe) == 120
+
+
+def test_empty_universe_table_and_failed_build_is_not_success(env, monkeypatch):
+    """빈 테이블 + 생성 실패: '기존 Universe 유지'로 위장하지 않고 성공(True)이 아니어야 한다.
+    (check_and_get_universe는 notify_on_exception 데코레이터로 예외를 알리고 None을 반환)"""
+    st = make_strategy(env, monkeypatch, existing=0)
+    st.universe = {}
+    monkeypatch.setattr(rs, 'get_universe', lambda **k: (_ for _ in ()).throw(UniverseDataError("x")))
+    assert st.check_and_get_universe(force_update=False) is not True
+    assert st.universe == {} and db_codes(st) == set()
+    assert st.kiwoom.orders_sent == []
+
+
+def test_large_existing_db_does_not_block_normal_shrink_to_cap(env, monkeypatch):
+    """기존 DB가 2,962건이어도 상한(max_codes=300)에 맞춘 정상 후보는 거부되지 않는다."""
+    st = make_strategy(env, monkeypatch, existing=2962)
+    st.universe = {}
+    st.REALTIME_MAX_CODES, st.POLLING_MAX_CODES = 100, 200
+    monkeypatch.setattr(rs, 'get_universe', lambda **k: [f'종목{i}' for i in range(0, 250)])
+    assert st.check_and_get_universe(force_update=True) is True
+    assert len(db_codes(st)) == 250
+
+
+def test_far_too_small_vs_cap_still_rejected(env, monkeypatch):
+    st = make_strategy(env, monkeypatch, existing=2962)
+    st.REALTIME_MAX_CODES, st.POLLING_MAX_CODES = 100, 200  # 기준 min(2962,300)*0.5=150
+    before = db_codes(st)
+    monkeypatch.setattr(rs, 'get_universe', lambda **k: [f'종목{i}' for i in range(0, 40)])
+    assert st.check_and_get_universe(force_update=True) is False
+    assert db_codes(st) == before

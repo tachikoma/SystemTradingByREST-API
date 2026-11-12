@@ -1049,6 +1049,16 @@ class RSIStrategy(threading.Thread):
 
         self.last_universe_rebuild_error = None
         table_exists = check_table_exist(self.strategy_name, 'universe')
+        if table_exists:
+            # 과거 장애로 0행이 된 universe 테이블은 "존재하지 않는 것"으로 보고 재생성한다.
+            # (그대로 로드하면 빈 Universe가 성공으로 처리되어 다음 정기 갱신까지 매수 대상이 없어짐)
+            try:
+                existing_rows = execute_sql(self.strategy_name, "select count(*) from universe").fetchone()[0]
+            except Exception:
+                existing_rows = None
+            if existing_rows == 0:
+                logger.warning("기존 universe 테이블이 비어 있습니다(0행). 새로 생성합니다.")
+                table_exists = False
         
         if force_update or not table_exists:
             # 명확한 로그: 강제 갱신 요청인지, 테이블이 존재하지 않아 생성하는지 구분 출력
@@ -1095,7 +1105,10 @@ class RSIStrategy(threading.Thread):
                 if table_exists:
                     # 기준은 메모리(누적됨)가 아니라 DB에 저장된 기존 Universe 행 수
                     existing_count = execute_sql(self.strategy_name, "select count(*) from universe").fetchone()[0]
-                    min_expected = int(existing_count * self.UNIVERSE_MIN_RATIO)
+                    # 새 Universe 크기는 max_codes로 상한이 있으므로, 기존 DB가 그보다 커도
+                    # 정상 후보가 영구 거부되지 않도록 기준을 min(기존, 상한)으로 한다.
+                    cap = self.REALTIME_MAX_CODES + self.POLLING_MAX_CODES
+                    min_expected = int(min(existing_count, cap) * self.UNIVERSE_MIN_RATIO)
                     if len(temp_universe) < min_expected:
                         raise ValueError(
                             f"새 Universe({len(temp_universe)}개)가 기존({existing_count}개)의 "
