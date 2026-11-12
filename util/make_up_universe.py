@@ -17,6 +17,7 @@ DB_DIR = os.getenv("DB_DIR", "./data")
 Path(DB_DIR).mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://finance.naver.com/sise/sise_market_sum.nhn?sosok='
+CRAWL_TIMEOUT_SEC = 15
 CODES = [0, 1]  # KOSPI:0, KOSDAQ:1
 START_PAGE = 1
 now = datetime.now(ZoneInfo("Asia/Seoul"))
@@ -29,6 +30,9 @@ MOCK_TRADE_BLACKLIST_CODES = [
 ]
 
 logger = get_logger(__name__)
+
+# Universe 최소 종목 수 (빈 결과/비정상 데이터로 기존 유니버스를 덮어쓰는 것을 방지)
+MIN_UNIVERSE_SIZE = 10
 
 
 ETF_NAME_PREFIXES = (
@@ -52,6 +56,79 @@ ETF_NAME_PREFIXES = (
     'WON',
 )
 _FDR_ETF_SYMBOLS = None
+
+
+# ---------------------------------------------------------------------------
+# 소스 데이터(네이버 크롤링 / 키움 캐시 / canonical) 검증 및 안전 저장
+# ---------------------------------------------------------------------------
+# Universe 구성에 반드시 필요한 컬럼. 하나라도 없으면 캐시/Universe 갱신에 사용 금지.
+REQUIRED_SOURCE_COLUMNS = ['종목코드', '종목명', '시장구분', '거래량', '거래대금', '시가총액', '등락률', '외국인비율']
+_NUMERIC_SOURCE_COLUMNS = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율']
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# 전체 종목 소스의 최소 행 수 (KOSPI+KOSDAQ 실제 약 2,800~4,300). 환경변수로 조정 가능.
+MIN_SOURCE_ROWS = _env_int('UNIVERSE_MIN_SOURCE_ROWS', 500)
+# 네이버 크롤링 시 시장(KOSPI/KOSDAQ)별 최소 행 수
+MIN_CRAWL_ROWS_PER_MARKET = _env_int('UNIVERSE_MIN_CRAWL_ROWS_PER_MARKET', 100)
+# 폴백 캐시로 허용하는 최대 경과 일수
+CACHE_MAX_AGE_DAYS = _env_int('UNIVERSE_CACHE_MAX_AGE_DAYS', 30)
+# 수치 컬럼에서 유효(파싱 가능) 값이 차지해야 하는 최소 비율
+_MIN_VALID_NUMERIC_RATIO = 0.5
+
+
+class UniverseDataError(Exception):
+    """Universe 소스 데이터가 비정상(빈 결과/컬럼 누락/파싱 불가 등)일 때 발생."""
+
+
+def validate_source_df(df, label='source', min_rows=None):
+    """Universe 소스 DataFrame 검증. 비정상이면 UniverseDataError를 발생시킨다.
+
+    검증 항목: DataFrame 여부, 최소 행 수, 필수 컬럼, 수치 컬럼 유효 비율, 종목코드 비어있음 여부.
+    (검증 실패 데이터는 캐시/canonical/universe 파일에 저장하거나 폴백으로 사용하면 안 된다.)
+    """
+    if min_rows is None:
+        min_rows = MIN_SOURCE_ROWS
+    if df is None or not isinstance(df, pd.DataFrame):
+        raise UniverseDataError(f"{label}: DataFrame이 아닙니다.")
+    if len(df) == 0:
+        raise UniverseDataError(f"{label}: 0건 (빈 결과)")
+    if len(df) < min_rows:
+        raise UniverseDataError(f"{label}: 행 수 부족 ({len(df)}건 < 최소 {min_rows}건)")
+    missing = [c for c in REQUIRED_SOURCE_COLUMNS if c not in df.columns]
+    if missing:
+        raise UniverseDataError(f"{label}: 필수 컬럼 누락 {missing}")
+    for col in _NUMERIC_SOURCE_COLUMNS:
+        cleaned = df[col].astype(str).str.replace(r'[^0-9.\-]', '', regex=True)
+        valid_ratio = float(pd.to_numeric(cleaned, errors='coerce').notna().mean())
+        if valid_ratio < _MIN_VALID_NUMERIC_RATIO:
+            raise UniverseDataError(f"{label}: '{col}' 유효 값 비율 {valid_ratio:.0%} (비정상 데이터)")
+    code_ok = float(df['종목코드'].astype(str).str.strip().ne('').mean())
+    if code_ok < 0.9:
+        raise UniverseDataError(f"{label}: 종목코드 유효 비율 {code_ok:.0%} (비정상 데이터)")
+    return True
+
+
+def _atomic_to_parquet(df, path, index=True):
+    """임시 파일에 쓴 뒤 os.replace로 교체하여, 쓰기 실패 시 기존 파일이 손상되지 않게 한다."""
+    path = str(path)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        df.to_parquet(tmp_path, index=index)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
 
 def _normalize_code(code):
     """종목코드 정규화: 숫자만 추출하여 선행 0까지 포함한 문자열 반환"""
@@ -341,8 +418,12 @@ def _normalize_units(df, source_hint: Optional[str] = None, save_canonical: bool
     if save_canonical:
         try:
             canonical_path = os.path.join(DB_DIR, 'all_stocks_canonical.parquet')
-            df_norm.to_parquet(canonical_path, index=True)
+            # 0건/컬럼 누락/비정상 데이터로 기존 canonical을 덮어쓰지 않는다.
+            validate_source_df(df_norm, 'canonical')
+            _atomic_to_parquet(df_norm, canonical_path, index=True)
             logger.info(f"Canonical Parquet saved: {Path(canonical_path).resolve()}")
+        except UniverseDataError as e:
+            logger.warning(f"Canonical 저장 건너뜀 (기존 파일 보존): {e}")
         except Exception as e:
             logger.warning(f"Canonical save failed: {e}")
 
@@ -752,9 +833,12 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
         if days_old < 30:
             logger.info(f"캐시 파일 사용: {Path(cache_path).resolve()} ({days_old}일 전 데이터, 30일 이내)")
             try:
-                return pd.read_parquet(cache_path)
+                cached = pd.read_parquet(cache_path)
+                validate_source_df(cached, f'키움 캐시({Path(cache_path).name})')
+                cached.attrs['cache_file'] = Path(cache_path).name
+                return cached
             except Exception as e:
-                logger.warning(f"캐시 Parquet 읽기 실패: {e}. API로 새로 조회합니다.")
+                logger.warning(f"캐시 Parquet 읽기/검증 실패: {e}. API로 새로 조회합니다.")
         else:
             logger.warning(f"캐시 파일이 너무 오래됨: {days_old}일 전. API로 새로 조회합니다.")
     
@@ -823,6 +907,12 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     
     # DataFrame 생성
     df = pd.DataFrame(stock_data)
+
+    # 비정상 결과(대량 실패/빈 결과/컬럼 누락)는 캐시·canonical·master_list에 반영하지 않고 실패 처리
+    total_listed = len(all_stocks)
+    if total_listed and failed_count / total_listed > 0.2:
+        raise UniverseDataError(f"키움 종목 상세 조회 실패 비율 과다 ({failed_count}/{total_listed})")
+    validate_source_df(df, '키움 API 수집 결과')
     # --- master_list DB에 코드/종목명 저장(캐시 초기화용) ---
     try:
         from util.db_helper import upsert_stock_name
@@ -841,8 +931,9 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
     # 캐시 저장
     if save_cache:
         try:
-            # Prefer Parquet for compactness and speed
-            df.to_parquet(cache_path, index=True)
+            # Prefer Parquet for compactness and speed (검증 통과분만, 원자적 교체)
+            _atomic_to_parquet(df, cache_path, index=True)
+            df.attrs['cache_file'] = Path(cache_path).name  # 이 df가 곧 해당 캐시 내용
             logger.info(f"캐시 파일 저장: {Path(cache_path).resolve()}")
         except Exception as e:
             logger.error(f"캐시 Parquet 저장 실패: {e}")
@@ -895,7 +986,8 @@ def execute_crawler(output_file='all_stocks_naver.parquet'):
         # 전체 페이지 개수를 가져오기 위한 코드 (마켓별로 `code` 사용)
         # lazy import BeautifulSoup to avoid requiring bs4 unless crawling
         from bs4 import BeautifulSoup
-        res = requests.get(BASE_URL + str(code))
+        res = requests.get(BASE_URL + str(code), timeout=CRAWL_TIMEOUT_SEC)
+        res.raise_for_status()
         page_soup = BeautifulSoup(res.text, 'lxml')
 
         # '맨뒤'에 해당하는 태그를 기준으로 전체 페이지 개수 추출하기
@@ -922,22 +1014,33 @@ def execute_crawler(output_file='all_stocks_naver.parquet'):
 
         # page마다 존재하는 모든 종목들의 항목정보를 크롤링해서 result에 저장
         result = []
+        failed_pages = 0
         for page in range(1, total_page_num + 1):
             try:
                 page_df = crawler(code, str(page), fields)
                 if page_df is not None and not page_df.empty:
                     result.append(page_df)
+                else:
+                    failed_pages += 1
             except Exception as e:
+                failed_pages += 1
                 logger.warning(f"페이지 크롤링 실패 (market={code}, page={page}): {e}")
 
         # 전체 페이지를 저장한 result를 하나의 데이터프레임으로 만듬
-        if result:
-            df = pd.concat(result, axis=0, ignore_index=True)
-        else:
-            df = pd.DataFrame()
+        # 빈 결과/다수 페이지 실패는 비정상 응답(구조 변경·차단)으로 보고 저장 없이 실패 처리
+        if not result:
+            raise UniverseDataError(f"네이버 크롤링 결과 0건 (market={code}, pages={total_page_num})")
+        if failed_pages / total_page_num > 0.1:
+            raise UniverseDataError(
+                f"네이버 크롤링 페이지 실패 과다 (market={code}, {failed_pages}/{total_page_num})"
+            )
+        df = pd.concat(result, axis=0, ignore_index=True)
         
         # 시장구분 컬럼 추가 (0=코스피, 1=코스닥)
         df['시장구분'] = '코스피' if code == 0 else '코스닥'
+
+        # 시장별로 스키마/행 수/수치 유효성 검증 (합산 후에는 한쪽 시장의 결손이 가려지므로)
+        validate_source_df(df, f'네이버 크롤링(market={code})', min_rows=MIN_CRAWL_ROWS_PER_MARKET)
 
         # 변수 df는 KOSPI, KOSDAQ별로 크롤링한 종목 정보이고 이를 하나로 합치기 위해 df_total에 추가
         df_total.append(df)
@@ -948,10 +1051,13 @@ def execute_crawler(output_file='all_stocks_naver.parquet'):
     # 합친 데이터프레임의 index 번호를 새로 매김
     df_total.reset_index(inplace=True, drop=True)
 
-    # 전체 크롤링 결과를 Parquet로 저장
+    # 필수 컬럼 누락/비정상 데이터는 저장하지 않고 실패 처리 (기존 캐시 보존)
+    validate_source_df(df_total, '네이버 크롤링 결과')
+
+    # 전체 크롤링 결과를 Parquet로 저장 (검증 통과분만, 원자적 교체)
     out_path = output_file if os.path.isabs(output_file) else os.path.join(DB_DIR, output_file)
     try:
-        df_total.to_parquet(out_path, index=True)
+        _atomic_to_parquet(df_total, out_path, index=True)
         try:
             logger.info(f"크롤링 결과 저장: {Path(out_path).resolve()}")
         except Exception:
@@ -977,12 +1083,15 @@ def crawler(code, page, fields):
     # lazy import BeautifulSoup only when crawler runs
     from bs4 import BeautifulSoup
     # 네이버로 요청을 전달(post방식)
-    res = requests.post('https://finance.naver.com/sise/field_submit.nhn', data=data)
+    res = requests.post('https://finance.naver.com/sise/field_submit.nhn', data=data, timeout=CRAWL_TIMEOUT_SEC)
+    res.raise_for_status()
 
     page_soup = BeautifulSoup(res.text, 'lxml')
 
     # 크롤링할 table의 html 가져오는 코드(크롤링 대상 요소의 클래스는 브라우저에서 확인)
     table_html = page_soup.select_one('div.box_type_l')
+    if table_html is None:
+        raise UniverseDataError("응답에서 시세 테이블(div.box_type_l)을 찾을 수 없습니다 (차단/구조 변경 의심)")
 
     # column명을 가공
     header_data = [item.get_text().strip() for item in table_html.select('thead th')][1:-1]
@@ -1049,8 +1158,10 @@ def get_universe(
     if kiwoom_client and (use_kiwoom_api or check_transaction_closed()):
         mode = "강제 모드" if use_kiwoom_api else "장 종료 후 자동 갱신"
         logger.info(f"키움 API로 유니버스 생성을 시도합니다... ({mode})")
+        src_cache = None  # 이번 시도에서 사용한 캐시 파일명 (폴백 시 재선택 방지)
         try:
             df = fetch_all_stocks_from_kiwoom(kiwoom_client)
+            src_cache = df.attrs.get('cache_file')
             logger.info(f"✅ 키움 API로 {len(df)}개 종목 정보 획득 및 캐싱 완료")
             universe = _filter_and_create_universe(
                 df,
@@ -1070,20 +1181,14 @@ def get_universe(
                 logger.info("네이버 크롤링으로 fallback합니다...")
             else:  # 장 종료 후 자동 모드였다면 캐시 우선 시도
                 logger.info("캐시 파일 확인합니다...")
-                cached_df = _try_load_cache()
-                if cached_df is not None:
-                    logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
-                    universe = _filter_and_create_universe(
-                        cached_df,
-                        max_codes=max_codes,
-                        universe_output_file=universe_output_file,
-                        etf_policy_overrides=etf_policy_overrides,
-                    )
-                    try:
-                        del cached_df
-                        gc.collect()
-                    except Exception:
-                        pass
+                universe, _ = _filter_from_cache_fallback(
+                    exclude={src_cache} - {None},
+                    max_codes=max_codes,
+                    universe_output_file=universe_output_file,
+                    etf_policy_overrides=etf_policy_overrides,
+                )
+                if universe is not None:
+                    logger.info(f"✅ 캐시 파일로 Universe 생성: {len(universe)}개 종목")
                     return universe
             # 아래 네이버 크롤링 로직으로 계속 진행
     all_stock_cache_file = 'all_stocks_naver.parquet'
@@ -1102,11 +1207,9 @@ def get_universe(
             print(f"오늘 생성된 {all_stock_cache_path} 파일을 사용합니다.")
             try:
                 df = pd.read_parquet(all_stock_cache_path)
-                # 읽어온 Parquet에 필수 컬럼이 없는 경우 NaN 컬럼으로 보완
-                required_cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '종목코드', '시장구분']
-                for rc in required_cols:
-                    if rc not in df.columns:
-                        df[rc] = np.nan
+                # 필수 컬럼 누락/0건 등 비정상 캐시는 NaN으로 보완하지 않고 폐기(크롤링 재시도)
+                validate_source_df(df, '오늘자 네이버 캐시')
+                df.attrs['cache_file'] = Path(all_stock_cache_path).name
                 # 네이버 캐시로부터 읽은 데이터는 정규화 후(옵션) canonical로 저장할 수 있습니다.
                 try:
                     save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
@@ -1115,8 +1218,8 @@ def get_universe(
                 except Exception as e:
                     logger.warning(f"네이버 캐시 정규화 실패: {e}")
             except Exception as e:
-                logger.error(f"Parquet 파일 읽기 실패: {e}. 크롤링을 시도합니다.")
-                file_is_today = False  # 파일 읽기 실패하면 크롤링 시도
+                logger.error(f"네이버 캐시 읽기/검증 실패: {e}. 크롤링을 시도합니다.")
+                file_is_today = False  # 파일 읽기/검증 실패하면 크롤링 시도
     
     # 크롤링 스킵: 평일 08:00-09:00에는 네이버 크롤링 데이터가 신뢰 불가
     from util.time_helper import is_market_closed_day
@@ -1157,12 +1260,25 @@ def get_universe(
                 logger.error(f"크롤링 실패이고 사용 가능한 캐시도 없습니다.")
                 raise Exception(f"크롤링 실패이고 사용 가능한 캐시도 없습니다: {e}")
 
-    universe = _filter_and_create_universe(
-        df,
-        max_codes=max_codes,
-        universe_output_file=universe_output_file,
-        etf_policy_overrides=etf_policy_overrides,
-    )
+    try:
+        universe = _filter_and_create_universe(
+            df,
+            max_codes=max_codes,
+            universe_output_file=universe_output_file,
+            etf_policy_overrides=etf_policy_overrides,
+        )
+    except Exception as filter_err:
+        # 소스가 검증은 통과했지만 필터 단계에서 실패한 경우에도 유효한 캐시로 폴백
+        logger.warning(f"Universe 필터링 실패: {filter_err}. 캐시 폴백을 시도합니다.")
+        # 이미 사용해 실패한 캐시(df가 캐시에서 온 경우)는 제외하고 다음 후보를 시도
+        universe, _ = _filter_from_cache_fallback(
+            exclude={df.attrs.get('cache_file')} - {None},
+            max_codes=max_codes,
+            universe_output_file=universe_output_file,
+            etf_policy_overrides=etf_policy_overrides,
+        )
+        if universe is None:
+            raise
     try:
         del df
         gc.collect()
@@ -1171,53 +1287,77 @@ def get_universe(
     return universe
 
 
-def _try_load_cache():
+def _filter_from_cache_fallback(exclude=None, **filter_kwargs):
+    """유효한 폴백 캐시 후보를 순서대로 시도해 Universe를 만든다.
+
+    소스 검증은 통과했지만 필터 단계에서 실패한 캐시는 제외하고 다음 후보로 넘어간다.
+    Returns: (universe_list or None, last_error or None). 후보가 모두 실패/없으면 (None, last_error).
     """
-    캐시 파일을 로드하는 내부 함수 (우선순위: 키움 API 캐시 → 네이버 크롤링 캐시)
-    
+    tried = set(exclude or ())
+    last_err = None
+    while True:
+        cached_df = _try_load_cache(exclude=tried)
+        if cached_df is None:
+            return None, last_err
+        name = cached_df.attrs.get('cache_file')
+        try:
+            return _filter_and_create_universe(cached_df, **filter_kwargs), None
+        except Exception as e:
+            last_err = e
+            logger.warning(f"폴백 캐시({name}) 필터링 실패: {e}. 다음 캐시를 시도합니다.")
+            if name is None or name in tried:
+                return None, last_err
+            tried.add(name)
+
+
+def _try_load_cache(exclude=None):
+    """
+    폴백용 캐시를 로드하는 내부 함수 (우선순위: 키움 API 캐시 → 네이버 크롤링 캐시)
+
+    - 각 캐시는 validate_source_df로 검증하며, 0건/필수 컬럼 누락/비정상 데이터는 건너뜁니다.
+    - CACHE_MAX_AGE_DAYS보다 오래된 캐시는 사용하지 않습니다.
+    - 읽기 전용: 폴백 로드 과정에서 어떤 캐시/canonical 파일도 쓰지 않습니다.
+
+    Args:
+        exclude: 건너뛸 캐시 파일명 집합 (이미 사용해 실패한 캐시를 재선택하지 않기 위함)
+
     Returns:
-        DataFrame or None: 캐시 데이터 또는 None (실패 시)
+        DataFrame or None: 유효한 캐시 데이터 또는 None (df.attrs['cache_file']에 사용한 파일명 기록)
     """
+    exclude = set(exclude or ())
     cache_files = [
         'all_stocks_kiwoom.parquet',  # 키움 API 전체 종목 (우선)
         'all_stocks_naver.parquet'     # 네이버 크롤링 전체 종목
     ]
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
 
     for cache_file in cache_files:
+        if cache_file in exclude:
+            continue
         cache_path = cache_file if os.path.isabs(cache_file) else os.path.join(DB_DIR, cache_file)
-        if os.path.exists(cache_path):
-            try:
-                try:
-                    df = pd.read_parquet(cache_path)
-                except Exception as e:
-                    logger.warning(f"Parquet 읽기 실패: {e}")
-                    raise
-                # 파일 수정시간 조회는 실패할 수 있으므로 개별로 처리
-                try:
-                    file_mod_time = datetime.fromtimestamp(
-                        os.path.getmtime(cache_path), 
-                        tz=ZoneInfo("Asia/Seoul")
-                    )
-                    logger.info(f"캐시 파일 발견: {cache_file} (생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})")
-                except Exception:
-                    logger.info(f"캐시 파일 읽음: {cache_file} (수정시간 없음)")
-                    logger.info(f"⚠️  캐시 파일 사용: {cache_file}")
-                    # 보장: 필터링에서 기대하는 컬럼들이 없으면 NaN 컬럼을 추가하여 KeyError 방지
-                    required_cols = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '종목코드', '시장구분']
-                    for rc in required_cols:
-                        if rc not in df.columns:
-                            df[rc] = np.nan
-                    # 캐시에서 읽은 데이터는 단위 정규화 옵션에 따라 canonical로 저장될 수 있음
-                    try:
-                        save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
-                        df = _normalize_units(df, save_canonical=save_canonical)
-                    except Exception as e:
-                        logger.warning(f"캐시 정규화 실패: {e}")
-                    return df
-            except Exception as e:
-                logger.warning(f"{cache_path} 읽기 실패: {e}")
+        if not os.path.exists(cache_path):
+            continue
+        try:
+            file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_path), tz=ZoneInfo("Asia/Seoul"))
+            days_old = (now_kst.date() - file_mod_time.date()).days
+            if days_old > CACHE_MAX_AGE_DAYS:
+                logger.warning(f"폴백 캐시 제외(오래됨): {cache_file} ({days_old}일 전 > {CACHE_MAX_AGE_DAYS}일)")
                 continue
-    
+            df = pd.read_parquet(cache_path)
+            validate_source_df(df, f'폴백 캐시({cache_file})')
+            logger.info(
+                f"폴백 캐시 사용: {cache_file} ({len(df)}건, 생성: {file_mod_time.strftime('%Y-%m-%d %H:%M:%S')})"
+            )
+            try:
+                df = _normalize_units(df, save_canonical=False)
+            except Exception as e:
+                logger.warning(f"캐시 정규화 실패: {e}")
+            df.attrs['cache_file'] = cache_file
+            return df
+        except Exception as e:
+            logger.warning(f"폴백 캐시 사용 불가 {cache_file}: {e}")
+            continue
+
     return None
 
 
@@ -1239,6 +1379,11 @@ def _filter_and_create_universe(
         universe_output_file: Parquet 출력 파일 경로
         etf_policy_overrides: ETF 정책 오버라이드 딕셔너리
     """
+    # 필수 컬럼 검증: 누락 시 KeyError 대신 명확한 오류로 실패 (Universe 덮어쓰기 방지)
+    _missing = [c for c in ['거래량', '거래대금', '시가총액', '등락률', '외국인비율', '종목명', '시장구분'] if c not in df.columns]
+    if _missing or len(df) == 0:
+        raise UniverseDataError(f"Universe 입력 데이터 비정상 (행 {len(df)}건, 누락 컬럼 {_missing})")
+
     # 데이터 정제
     mapping = {',': '', 'N/A': '0', '%': ''}
     df.replace(mapping, regex=True, inplace=True)
@@ -1261,8 +1406,9 @@ def _filter_and_create_universe(
     
     # 음수 등락률 절대값 처리 필요 (등락률은 이미 숫자)
     if len(df) == 0:
+        # 빈 리스트를 반환하면 호출측이 기존 Universe를 빈 값으로 덮어쓸 수 있으므로 실패 처리
         logger.warning("필터링 후 데이터가 없습니다.")
-        return []
+        raise UniverseDataError("필터링 후 데이터가 없습니다.")
     
     # 종목코드가 있는 경우 모의투자 제한 종목 제외
     if '종목코드' in df.columns:
@@ -1535,7 +1681,6 @@ def _filter_and_create_universe(
         df = df.loc[: max_codes - 1]
     
     # Universe 최소 개수 검증 (비정상 데이터 방지)
-    MIN_UNIVERSE_SIZE = 10
     if len(df) < MIN_UNIVERSE_SIZE:
         error_msg = f"Universe 크기가 너무 작습니다 ({len(df)}개). 최소 {MIN_UNIVERSE_SIZE}개 필요."
         logger.error(error_msg)
@@ -1667,7 +1812,7 @@ def _filter_and_create_universe(
                 else os.path.join(DB_DIR, universe_output_file)
             )
             try:
-                df.to_parquet(out_universe, index=True)
+                _atomic_to_parquet(df, out_universe, index=True)
                 try:
                     logger.info(f"Universe 저장: {Path(out_universe).resolve()}")
                 except Exception:

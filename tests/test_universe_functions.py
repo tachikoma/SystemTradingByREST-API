@@ -96,6 +96,14 @@ def sample_all_stocks_df():
     })
 
 
+@pytest.fixture(autouse=True)
+def _isolated_universe_env(tmp_path, monkeypatch):
+    """운영 data/ 오염 방지(임시 DB_DIR) + 3행짜리 샘플이 검증을 통과하도록 최소 행 수 완화."""
+    import util.make_up_universe as _mu
+    monkeypatch.setattr(_mu, 'DB_DIR', str(tmp_path))
+    monkeypatch.setattr(_mu, 'MIN_SOURCE_ROWS', 1)
+
+
 class TestCacheDailyData:
     """cache_daily_data 함수 테스트"""
     
@@ -135,7 +143,7 @@ class TestFetchAllStocksFromKiwoom:
         assert '시장구분' in df.columns
         
         # 캐시 저장 확인
-        mock_to_parquet.assert_called_once()
+        mock_to_parquet.assert_called()  # 캐시(+canonical) 저장
     
     @patch('util.make_up_universe.time.sleep')
     def test_fetch_all_stocks_market_separation(self, mock_sleep, mock_kiwoom_client):
@@ -182,9 +190,10 @@ class TestFilterAndCreateUniverse:
 class TestTryLoadCache:
     """_try_load_cache 함수 테스트"""
     
+    @patch('util.make_up_universe.os.path.getmtime', side_effect=lambda p: __import__('time').time())
     @patch('util.make_up_universe.os.path.exists')
     @patch('util.make_up_universe.pd.read_parquet')
-    def test_load_kiwoom_cache_first(self, mock_read_parquet, mock_exists, sample_all_stocks_df):
+    def test_load_kiwoom_cache_first(self, mock_read_parquet, mock_exists, mock_mtime, sample_all_stocks_df):
         """키움 캐시 우선 로드 테스트"""
         mock_exists.return_value = True
         mock_read_parquet.return_value = sample_all_stocks_df
