@@ -248,7 +248,7 @@ def make_strategy(env, monkeypatch, kiwoom=None, existing=260):
     st.universe_updated_today = False
     st.universe_update_attempted_today = False
     st.last_universe_rebuild_error = None
-    st.universe_liquidation_mode = 'live'
+    st.universe_liquidation_mode = 'live'  # (테스트 기본: 기존 시나리오 유지)
     st.UNIVERSE_MIN_RATIO = 0.5
     st.REALTIME_MAX_CODES = 100
     st.POLLING_MAX_CODES = 200

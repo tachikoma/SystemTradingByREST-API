@@ -68,6 +68,12 @@ def log_rsi_debug(symbol, stage, payload):
     except Exception:
         logger.info("RSI_DEBUG (fallback): %s %s", symbol, stage)
 
+def _parse_liquidation_mode(raw):
+    """UNIVERSE_LIQUIDATION_MODE 해석. 명시적으로 'live'일 때만 실주문을 허용한다(기본/오타/미설정은 dry_run)."""
+    value = str(raw if raw is not None else '').strip().lower().replace('-', '_')
+    return 'live' if value == 'live' else 'dry_run'
+
+
 class RSIStrategy(threading.Thread):
     # 전략 상수 정의 (백테스트 최적화 반영: 2026-01-01)
     MAX_HOLDINGS = 10  # 최대 보유 종목 수
@@ -131,8 +137,8 @@ class RSIStrategy(threading.Thread):
         self.universe_updated_today = False  # 오늘 Universe 재구성이 "성공"했는지
         self.universe_update_attempted_today = False  # 오늘 재구성을 이미 시도했는지 (실패 시 재시도 폭주 방지)
         self.last_universe_rebuild_error = None  # 마지막 재구성 실패 사유
-        # Universe 청산 모드: 'live'(기본, 기존 동작) | 'dry_run'(주문 전송 없이 로그/알림만)
-        self.universe_liquidation_mode = str(os.getenv('UNIVERSE_LIQUIDATION_MODE', 'live')).strip().lower().replace('-', '_')
+        # Universe 청산 모드: 'dry_run'(기본, 주문 전송 없이 로그/알림만) | 'live'(명시 설정 시에만 실주문)
+        self.universe_liquidation_mode = _parse_liquidation_mode(os.getenv('UNIVERSE_LIQUIDATION_MODE'))
         # 새 Universe가 기존 대비 이 비율 미만이면 비정상으로 보고 교체하지 않음
         self.UNIVERSE_MIN_RATIO = float(os.getenv('UNIVERSE_MIN_RATIO', '0.5'))
         
@@ -1174,10 +1180,14 @@ class RSIStrategy(threading.Thread):
             insert_df_to_db(self.strategy_name, 'universe', universe_df)
             
             # 생성한 데이터를 바로 self.universe에 저장 (불필요한 DB 읽기 방지)
-            for code, code_name in temp_universe.items():
-                self.universe[code] = {
-                    'code_name': code_name
-                }
+            # 기존에는 새 종목을 추가만 해서 제외된 종목이 매수 후보/시세 등록 대상에 남았다.
+            # 새 Universe 기준으로 교체하되, 이미 로드된 종목의 가격 데이터(compact 등)는 보존한다.
+            # (보유/미체결 주문 종목의 감시 유지는 update_universe_with_holdings에서 처리)
+            previous = self.universe
+            self.universe = {
+                code: {**previous.get(code, {}), 'code_name': code_name}
+                for code, code_name in temp_universe.items()
+            }
             
             # Universe 생성 시간을 메모리에 저장 (DB의 created_at과 동기화)
             self.last_universe_update = get_korea_time()
@@ -1650,6 +1660,18 @@ class RSIStrategy(threading.Thread):
         holding_info = {code: self.universe.get(code, {'code_name': 'N/A'}) for code in holding_codes}
         
         logger.info("현재 보유 종목 수: %d", len(holding_codes))
+
+        # 미체결 주문 종목의 재구성 전 메모리 정보 (감시 유지용, API 호출 없음)
+        try:
+            pending_info = {code: self.universe.get(code) for code in self.kiwoom.order.keys()}
+        except Exception:
+            pending_info = {}
+
+        # 비교용: 재구성 전 DB Universe (주문과 무관한 읽기 전용 조회)
+        try:
+            old_db_codes = {r[0] for r in execute_sql(self.strategy_name, "select code from universe").fetchall()}
+        except Exception:
+            old_db_codes = set()
         
         # 새로운 universe 생성 (force_update=True)
         rebuilt = self.check_and_get_universe(force_update=True)
@@ -1658,9 +1680,19 @@ class RSIStrategy(threading.Thread):
             logger.error("Universe 재구성 실패: 기존 Universe 유지, 보유 종목 청산 생략 (%s)", self.last_universe_rebuild_error)
             return False
         
+        # 이 시점의 self.universe는 새 Universe와 정확히 일치한다.
+        new_codes = set(self.universe.keys())
         # 새 universe에 없는 보유 종목 찾기
-        codes_to_liquidate = holding_codes - set(self.universe.keys())
+        codes_to_liquidate = holding_codes - new_codes
+        self._report_universe_diff(old_db_codes, new_codes, holding_codes, codes_to_liquidate, holding_info)
         self._liquidate_excluded_holdings(codes_to_liquidate, holding_info)
+
+        # 미체결 주문 종목은 체결/취소 확인을 위해 감시 목록에 유지한다 (보유 종목은 위 청산 처리에서 유지됨)
+        try:
+            for code in set(self.kiwoom.order.keys()) - set(self.universe.keys()):
+                self.universe[code] = holding_info.get(code) or pending_info.get(code) or {'code_name': code}
+        except Exception as e:
+            logger.warning("미체결 주문 종목 감시 유지 중 경고: %s", e)
         
         # 가격 데이터 업데이트
         self.check_and_get_price_data()
@@ -1668,6 +1700,22 @@ class RSIStrategy(threading.Thread):
         # 실시간 체결정보 재등록
         self.set_universe_real_time()
         return True
+
+    def _report_universe_diff(self, old_db_codes, new_codes, holding_codes, excluded_holdings, holding_info):
+        """재구성 결과 비교 요약(주문 없음): 기존/신규 Universe, 추가/제거, 제외된 보유종목."""
+        added, removed = len(new_codes - old_db_codes), len(old_db_codes - new_codes)
+        names = ", ".join(
+            f"{holding_info.get(c, {}).get('code_name', 'N/A')}({c})" for c in sorted(excluded_holdings)
+        ) or "없음"
+        msg = (
+            "📊 Universe 재구성 비교\n"
+            f"기존 {len(old_db_codes)}개 → 신규 {len(new_codes)}개 (추가 {added}, 제거 {removed})\n"
+            f"보유 {len(holding_codes)}종목 중 신규 Universe 제외: {len(excluded_holdings)}개\n"
+            f"제외 보유종목: {names}\n"
+            f"청산 모드: {self.universe_liquidation_mode}"
+        )
+        logger.info(msg.replace("\n", " | "))
+        self._queue_or_send(msg)
 
     def _liquidate_excluded_holdings(self, codes_to_liquidate, holding_info):
         """새 Universe에서 제외된 보유 종목을 시장가 청산한다.
