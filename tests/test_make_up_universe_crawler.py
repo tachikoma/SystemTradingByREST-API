@@ -34,6 +34,9 @@ class DummyResp:
     def __init__(self, text):
         self.text = text
 
+    def raise_for_status(self):
+        return None
+
 
 def test_crawler_parses_table(monkeypatch):
     # Patch requests.post used by crawler to return SAMPLE_HTML

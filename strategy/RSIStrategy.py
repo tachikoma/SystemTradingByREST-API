@@ -128,7 +128,13 @@ class RSIStrategy(threading.Thread):
         # Universe 재구성 관련 변수
         self.last_universe_update = get_korea_time()
         self.UNIVERSE_UPDATE_DAYS = 30  # 30일마다 재구성
-        self.universe_updated_today = False
+        self.universe_updated_today = False  # 오늘 Universe 재구성이 "성공"했는지
+        self.universe_update_attempted_today = False  # 오늘 재구성을 이미 시도했는지 (실패 시 재시도 폭주 방지)
+        self.last_universe_rebuild_error = None  # 마지막 재구성 실패 사유
+        # Universe 청산 모드: 'live'(기본, 기존 동작) | 'dry_run'(주문 전송 없이 로그/알림만)
+        self.universe_liquidation_mode = str(os.getenv('UNIVERSE_LIQUIDATION_MODE', 'live')).strip().lower()
+        # 새 Universe가 기존 대비 이 비율 미만이면 비정상으로 보고 교체하지 않음
+        self.UNIVERSE_MIN_RATIO = float(os.getenv('UNIVERSE_MIN_RATIO', '0.5'))
         
         # 전체 데이터 캐싱 관련 변수 (30일 주기)
         self.last_full_cache_time = None
@@ -1016,8 +1022,14 @@ class RSIStrategy(threading.Thread):
         
         Args:
             force_update: True이면 기존 universe를 무시하고 새로 생성
+
+        Returns:
+            bool: 새 Universe를 생성/저장했거나 DB에서 정상 로드했으면 True.
+                  재구성(force_update)에 실패해 기존 Universe를 그대로 유지했으면 False.
+                  (이 경우 self.last_universe_rebuild_error에 사유가 기록됨)
         """
 
+        self.last_universe_rebuild_error = None
         table_exists = check_table_exist(self.strategy_name, 'universe')
         
         if force_update or not table_exists:
@@ -1036,7 +1048,41 @@ class RSIStrategy(threading.Thread):
                     max_codes=self.REALTIME_MAX_CODES + self.POLLING_MAX_CODES,
                 )
                 logger.info("Universe list: %s", universe_list)
+
+                temp_universe = {}
+                # 오늘 날짜를 20210101 형태로 지정
+                now = get_korea_time().strftime("%Y%m%d")
+
+                # KOSPI(0)에 상장된 모든 종목 코드를 가져와 kospi_code_list에 저장
+                kospi_code_list = self.kiwoom.get_code_list_by_market("0")
+
+                # KOSDAQ(10)에 상장된 모든 종목 코드를 가져와 kosdaq_code_list에 저장
+                kosdaq_code_list = self.kiwoom.get_code_list_by_market("10")
+
+                for code_dict in kospi_code_list + kosdaq_code_list:
+                    # 모든 종목 코드를 바탕으로 반복문 수행
+                    code_name = code_dict["name"]
+
+                    # 얻어온 종목명이 유니버스에 포함되어 있다면 딕셔너리에 추가
+                    if code_name in universe_list:
+                        # 모의투자일 때 블랙리스트 체크
+                        if self.kiwoom.mock and code_dict["code"] in self.mock_trade_blacklist:
+                            logger.info("블랙리스트 종목 제외: %s(%s)", code_name, code_dict["code"])
+                            continue
+                        temp_universe[code_dict["code"]] = code_name
+
+                # 비정상(빈/지나치게 작은) Universe로 기존 Universe/DB를 덮어쓰지 않도록 검증
+                if len(temp_universe) < 10:
+                    raise ValueError(f"Universe 종목 수가 비정상적으로 적습니다 ({len(temp_universe)}개)")
+                if table_exists and self.universe:
+                    min_expected = int(len(self.universe) * self.UNIVERSE_MIN_RATIO)
+                    if len(temp_universe) < min_expected:
+                        raise ValueError(
+                            f"새 Universe({len(temp_universe)}개)가 기존({len(self.universe)}개)의 "
+                            f"{self.UNIVERSE_MIN_RATIO:.0%} 미만입니다"
+                        )
             except Exception as e:
+                self.last_universe_rebuild_error = str(e)
                 error_msg = f"Universe 생성 실패: {e}"
                 logger.error(error_msg)
                 self._queue_or_send(f"❌ Universe 생성 실패\n{html.escape(str(e))}")
@@ -1075,37 +1121,13 @@ class RSIStrategy(threading.Thread):
                         except Exception:
                             self.last_universe_update = get_korea_time()
                     
-                    return  # 기존 universe 사용하고 종료
+                    return False  # 기존 universe 사용하고 종료 (재구성 실패)
                 else:
                     # 기존 universe도 없으면 치명적 오류
                     logger.critical("Universe 생성 실패이고 기존 universe도 없습니다.")
                     self._queue_or_send(f"🚨 치명적 오류: Universe 없음\n{e}", parse_mode=None)
                     raise Exception(f"Universe 생성 실패이고 기존 데이터도 없습니다: {e}")
             
-            temp_universe = {}
-            # 오늘 날짜를 20210101 형태로 지정
-            now = get_korea_time().strftime("%Y%m%d")
-
-            # KOSPI(0)에 상장된 모든 종목 코드를 가져와 kospi_code_list에 저장
-            kospi_code_list = self.kiwoom.get_code_list_by_market("0")
-
-            # KOSDAQ(10)에 상장된 모든 종목 코드를 가져와 kosdaq_code_list에 저장
-            kosdaq_code_list = self.kiwoom.get_code_list_by_market("10")
-
-            for code_dict in kospi_code_list + kosdaq_code_list:
-                # 모든 종목 코드를 바탕으로 반복문 수행
-                # time.sleep(0.5) # To avoid rate limiting
-                # TODO code_name = self.kiwoom.get_master_code_name(code_dict["code"])
-                code_name = code_dict["name"]
-
-                # 얻어온 종목명이 유니버스에 포함되어 있다면 딕셔너리에 추가
-                if code_name in universe_list:
-                    # 모의투자일 때 블랙리스트 체크
-                    if self.kiwoom.mock and code_dict["code"] in self.mock_trade_blacklist:
-                        logger.info("블랙리스트 종목 제외: %s(%s)", code_name, code_dict["code"])
-                        continue
-                    temp_universe[code_dict["code"]] = code_name
-
             # 보유 종목 병합은 주기적 검토 함수(`ensure_holdings_in_universe`)에서 처리합니다.
             # 여기서는 유니버스 생성 결과만을 DB에 저장하고 메모리에 로드합니다.
             # 코드, 종목명, 생성일자자를 열로 가지는 DaaFrame 생성
@@ -1166,6 +1188,7 @@ class RSIStrategy(threading.Thread):
             else:
                 logger.warning("No universe created_at found, using current time")
                 self.last_universe_update = get_korea_time()
+        return True
 
     @notify_on_exception(fallback_return=None)
     def check_and_get_price_data(self):
@@ -1332,6 +1355,7 @@ class RSIStrategy(threading.Thread):
                         try:
                             # 일일 리셋 플래그: universe/캐시/매수 윈도우
                             self.universe_updated_today = False
+                            self.universe_update_attempted_today = False
                             self.full_cache_done_today = False
                             self.buy_window_done_today = False
                             # MA200 집계 날짜 초기화
@@ -1416,23 +1440,14 @@ class RSIStrategy(threading.Thread):
                 from datetime import timedelta as _td
                 from util.time_helper import MARKET_HOLIDAYS_2026 as _MH
                 prev_day = now.date() - _td(days=1)
-                if now.hour == 3 and now.minute < 10 and not self.universe_updated_today and prev_day.weekday() < 5 and prev_day not in _MH:
+                if now.hour == 3 and now.minute < 10 and not self.universe_updated_today and not self.universe_update_attempted_today and prev_day.weekday() < 5 and prev_day not in _MH:
                     days_since_update = (now.date() - self.last_universe_update.date()).days
                     
                     if days_since_update >= self.UNIVERSE_UPDATE_DAYS:
                         logger.info("🔄 Universe 재구성 시작 (마지막 업데이트: %d일 전)", days_since_update)
                         self._queue_or_send(f"🔄 Universe 재구성 시작\n마지막 업데이트: {days_since_update}일 전")
                         
-                        try:
-                            self.update_universe_with_holdings()
-                            self.last_universe_update = now
-                            self.universe_updated_today = True
-                            
-                            logger.info("✅ Universe 재구성 완료 (종목 수: %d)", len(self.universe))
-                            self._queue_or_send(f"✅ Universe 재구성 완료\n종목 수: {len(self.universe)}")
-                        except Exception as update_error:
-                            logger.error("Universe 재구성 실패: %s", update_error)
-                            self._queue_or_send(f"❌ Universe 재구성 실패\n{update_error}", parse_mode=None)
+                        self._run_universe_rebuild(now)
                 
                 # 날짜 롤오버(현재 날짜 변화)로 일일 플래그를 초기화합니다.
                 # (날짜 변경 감지 블록(current_date != self._last_rollover_date)에서 이미 처리되므로
@@ -1566,9 +1581,37 @@ class RSIStrategy(threading.Thread):
         except Exception:
             pass
 
-    @notify_on_exception(fallback_return=None)
+    def _run_universe_rebuild(self, now):
+        """Universe 재구성을 1회 시도하고 결과(성공/실패)에 맞게 상태와 알림을 갱신한다."""
+        # 하루 1회만 시도 (실패해도 같은 날 재시도 폭주 방지, 다음 날 03시에 재시도)
+        self.universe_update_attempted_today = True
+        try:
+            rebuilt = self.update_universe_with_holdings()
+            if rebuilt is True:
+                self.last_universe_update = now
+                self.universe_updated_today = True
+                logger.info("✅ Universe 재구성 완료 (종목 수: %d)", len(self.universe))
+                self._queue_or_send(f"✅ Universe 재구성 완료\n종목 수: {len(self.universe)}")
+            else:
+                # 실패: last_universe_update/universe_updated_today 갱신 금지, 성공 알림 금지
+                reason = self.last_universe_rebuild_error or "알 수 없는 오류 (로그 확인)"
+                logger.error("❌ Universe 재구성 실패 - 기존 Universe %d개 유지: %s", len(self.universe), reason)
+                self._queue_or_send(
+                    f"❌ Universe 재구성 실패\n기존 Universe {len(self.universe)}개 유지 (보유종목 청산 없음)\n사유: {reason}",
+                    parse_mode=None,
+                )
+        except Exception as update_error:
+            logger.error("Universe 재구성 실패: %s", update_error)
+            self._queue_or_send(f"❌ Universe 재구성 실패\n{update_error}", parse_mode=None)
+
+    @notify_on_exception(fallback_return=False)
     def update_universe_with_holdings(self):
-        """Universe 업데이트 및 제외된 보유 종목 청산"""
+        """Universe 업데이트 및 제외된 보유 종목 청산
+
+        Returns:
+            bool: 새 Universe로 실제 재구성에 성공했을 때만 True. 실패(기존 Universe 유지) 시 False.
+            실패 시에는 보유 종목 청산을 절대 수행하지 않는다.
+        """
         # 현재 보유 종목 백업
         holding_codes = set(self.kiwoom.balance.keys())
         holding_info = {code: self.universe.get(code, {'code_name': 'N/A'}) for code in holding_codes}
@@ -1576,11 +1619,37 @@ class RSIStrategy(threading.Thread):
         logger.info("현재 보유 종목 수: %d", len(holding_codes))
         
         # 새로운 universe 생성 (force_update=True)
-        self.check_and_get_universe(force_update=True)
+        rebuilt = self.check_and_get_universe(force_update=True)
+        if rebuilt is not True:
+            # 재구성 실패 → 기존 Universe 유지. 이 universe는 "새 Universe"가 아니므로 청산 판단 금지.
+            logger.error("Universe 재구성 실패: 기존 Universe 유지, 보유 종목 청산 생략 (%s)", self.last_universe_rebuild_error)
+            return False
         
         # 새 universe에 없는 보유 종목 찾기
         codes_to_liquidate = holding_codes - set(self.universe.keys())
+        self._liquidate_excluded_holdings(codes_to_liquidate, holding_info)
         
+        # 가격 데이터 업데이트
+        self.check_and_get_price_data()
+        
+        # 실시간 체결정보 재등록
+        self.set_universe_real_time()
+        return True
+
+    def _liquidate_excluded_holdings(self, codes_to_liquidate, holding_info):
+        """새 Universe에서 제외된 보유 종목을 시장가 청산한다.
+
+        UNIVERSE_LIQUIDATION_MODE=dry_run 이면 주문을 전송하지 않고 로그/알림만 남기며,
+        해당 종목은 Universe에 유지한다(검증/핫픽스용 안전장치). 기본값 'live'는 기존 동작과 동일.
+        """
+        if codes_to_liquidate and self.universe_liquidation_mode == 'dry_run':
+            for code in codes_to_liquidate:
+                self.universe[code] = holding_info[code]
+            names = ", ".join(f"{holding_info[c].get('code_name', 'N/A')}({c})" for c in sorted(codes_to_liquidate))
+            logger.warning("[DRY-RUN] Universe 제외 보유 종목 %d개 청산 생략 (주문 미전송): %s", len(codes_to_liquidate), names)
+            self._queue_or_send(f"🧪 [DRY-RUN] Universe 제외 보유 종목 {len(codes_to_liquidate)}개 청산 생략 (주문 미전송)\n{html.escape(names)}")
+            return
+
         if codes_to_liquidate:
             logger.info("🔴 Universe에서 제외된 보유 종목 %d개 청산 시작", len(codes_to_liquidate))
             self._queue_or_send(f"🔴 Universe 재구성\nUniverse에서 제외된 보유 종목 {len(codes_to_liquidate)}개 청산 시작")
@@ -1640,14 +1709,8 @@ class RSIStrategy(threading.Thread):
                     # 오류 발생 시에도 universe에 추가하여 다음에 다시 시도
                     self.universe[code] = holding_info[code]
         else:
-            logger.info("✅ Universe 재구성 완료 (청산할 종목 없음)")
-        
-        # 가격 데이터 업데이트
-        self.check_and_get_price_data()
-        
-        # 실시간 체결정보 재등록
-        self.set_universe_real_time()
-    
+            logger.info("Universe 재구성: 청산할 종목 없음")
+
     @notify_on_exception(fallback_return=None)
     def set_universe_real_time(self):
         """유니버스 실시간 체결정보 수신 등록하는 함수"""
