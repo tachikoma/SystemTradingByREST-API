@@ -67,6 +67,7 @@ def test_live_mode_sends_order_only_for_excluded_holding(env, monkeypatch):
     kw = ForbiddenKiwoom(balance=held)
     st = make_strategy(env, monkeypatch, kw)
     st.universe_liquidation_mode = 'live'
+    monkeypatch.setattr(rs, 'check_transaction_open', lambda: True)
     monkeypatch.setattr(rs, 'get_universe', lambda **k: _new_names(0, 250))
     st.update_universe_with_holdings()
     assert len(kw.orders_sent) == 1 and kw.orders_sent[0][0][3] == '001005'
@@ -78,3 +79,42 @@ def test_failed_rebuild_keeps_memory_unchanged(env, monkeypatch):
     monkeypatch.setattr(rs, 'get_universe', lambda **k: (_ for _ in ()).throw(Exception("x")))
     assert st.check_and_get_universe(force_update=True) is False
     assert set(st.universe) == before
+
+
+def test_holding_filled_during_rebuild_is_kept_monitored(env, monkeypatch):
+    """재구성 도중 체결되어 보유가 된 종목(시작 시점 스냅샷에 없음)도 감시에서 누락되지 않는다."""
+    kw = ForbiddenKiwoom(balance={})
+    kw.order = {'001009': {'미체결수량': 2}}
+    st = make_strategy(env, monkeypatch, kw)
+
+    def fake_get_universe(**k):
+        kw.order.pop('001009')                                    # 재구성 중 완전체결
+        kw.balance['001009'] = {'종목명': 'FILLED', '보유수량': 2, '매입가': 1000, '매매가능수량': 2}
+        return _new_names(0, 250)
+    monkeypatch.setattr(rs, 'get_universe', fake_get_universe)
+    assert st.update_universe_with_holdings() is True
+    assert '001009' in st.universe and kw.orders_sent == []
+
+
+def test_live_liquidation_respects_tradable_quantity(env, monkeypatch):
+    kw = ForbiddenKiwoom(balance={
+        '001005': {'종목명': 'A', '보유수량': 10, '매입가': 1000, '매매가능수량': 4},   # 가용 4주만
+        '001006': {'종목명': 'B', '보유수량': 5, '매입가': 1000, '매매가능수량': 0}})   # 가용 0
+    st = make_strategy(env, monkeypatch, kw)
+    st.universe_liquidation_mode = 'live'
+    monkeypatch.setattr(rs, 'check_transaction_open', lambda: True)
+    monkeypatch.setattr(rs, 'get_universe', lambda **k: _new_names(0, 250))
+    st.update_universe_with_holdings()
+    assert [(a[0][3], a[0][4]) for a in kw.orders_sent] == [('001005', 4)]       # 4주만, B는 주문 없음
+    assert '001006' in st.universe                                                  # 보류 종목은 감시 유지
+
+
+def test_live_mode_off_hours_defers_without_orders(env, monkeypatch):
+    kw = ForbiddenKiwoom(balance={'001005': {'종목명': 'A', '보유수량': 10, '매입가': 1000, '매매가능수량': 10}})
+    st = make_strategy(env, monkeypatch, kw)
+    st.universe_liquidation_mode = 'live'
+    monkeypatch.setattr(rs, 'check_transaction_open', lambda: False)             # 03:00 같은 장외
+    monkeypatch.setattr(rs, 'get_universe', lambda **k: _new_names(0, 250))
+    assert st.update_universe_with_holdings() is True
+    assert kw.orders_sent == [] and '001005' in st.universe
+    assert any('장외 시간 보류' in m for m in st.messages)

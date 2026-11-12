@@ -1687,9 +1687,11 @@ class RSIStrategy(threading.Thread):
         self._report_universe_diff(old_db_codes, new_codes, holding_codes, codes_to_liquidate, holding_info)
         self._liquidate_excluded_holdings(codes_to_liquidate, holding_info)
 
-        # 미체결 주문 종목은 체결/취소 확인을 위해 감시 목록에 유지한다 (보유 종목은 위 청산 처리에서 유지됨)
+        # 미체결 주문 종목과 "현재" 보유 종목(재구성 도중 체결된 종목 포함)은 감시 목록에 유지한다.
+        # (재구성 시작 시점의 holding_codes 스냅샷에 없던 종목이 누락되지 않도록 최신 balance/order를 다시 병합)
         try:
-            for code in set(self.kiwoom.order.keys()) - set(self.universe.keys()):
+            current = set(self.kiwoom.order.keys()) | set(self.kiwoom.balance.keys())
+            for code in current - set(self.universe.keys()):
                 self.universe[code] = holding_info.get(code) or pending_info.get(code) or {'code_name': code}
         except Exception as e:
             logger.warning("미체결 주문 종목 감시 유지 중 경고: %s", e)
@@ -1724,13 +1726,22 @@ class RSIStrategy(threading.Thread):
         해당 종목은 Universe에 유지한다(검증/핫픽스용 안전장치). 기본값 'live'는 기존 동작과 동일.
         """
         # fail-safe: 'live'가 아닌 모든 값(오타 포함)은 주문을 보내지 않는다.
-        if codes_to_liquidate and self.universe_liquidation_mode != 'live':
-            for code in codes_to_liquidate:
-                self.universe[code] = holding_info[code]
-            names = ", ".join(f"{holding_info[c].get('code_name', 'N/A')}({c})" for c in sorted(codes_to_liquidate))
-            logger.warning("[DRY-RUN] Universe 제외 보유 종목 %d개 청산 생략 (주문 미전송): %s", len(codes_to_liquidate), names)
-            self._queue_or_send(f"🧪 [DRY-RUN] Universe 제외 보유 종목 {len(codes_to_liquidate)}개 청산 생략 (주문 미전송)\n{html.escape(names)}")
-            return
+        # live여도 장외 시간(정기 재구성은 03시)에는 주문이 거절되고 재시도 경로가 없으므로 청산을 보류한다.
+        # 보류된 종목은 Universe에 남아 일반 전략 매도 판단은 계속 받는다.
+        if codes_to_liquidate:
+            if self.universe_liquidation_mode != 'live':
+                tag = "[DRY-RUN]"
+            elif not check_transaction_open():
+                tag = "[장외 시간 보류]"
+            else:
+                tag = None
+            if tag:
+                for code in codes_to_liquidate:
+                    self.universe[code] = holding_info[code]
+                names = ", ".join(f"{holding_info[c].get('code_name', 'N/A')}({c})" for c in sorted(codes_to_liquidate))
+                logger.warning("%s Universe 제외 보유 종목 %d개 청산 생략 (주문 미전송): %s", tag, len(codes_to_liquidate), names)
+                self._queue_or_send(f"🧪 {tag} Universe 제외 보유 종목 {len(codes_to_liquidate)}개 청산 생략 (주문 미전송)\n{html.escape(names)}")
+                return
 
         if codes_to_liquidate:
             logger.info("🔴 Universe에서 제외된 보유 종목 %d개 청산 시작", len(codes_to_liquidate))
@@ -1740,7 +1751,15 @@ class RSIStrategy(threading.Thread):
             for code in codes_to_liquidate:
                 try:
                     code_name = holding_info[code].get('code_name', 'N/A')
-                    quantity = self.kiwoom.balance[code]['보유수량']
+                    balance_item = self.kiwoom.balance[code]
+                    # 일반 매도(order_sell)와 동일하게 매매가능수량을 넘지 않도록 제한
+                    quantity = min(int(balance_item['보유수량']),
+                                   int(balance_item.get('매매가능수량', balance_item['보유수량']) or 0))
+                    if quantity <= 0:
+                        logger.warning("청산 보류(매매가능수량 0): %s(%s)", code_name, code)
+                        self._queue_or_send(f"⚠️ 청산 보류(매매가능수량 0)\n종목: {code_name}({code})", parse_mode=None)
+                        self.universe[code] = holding_info[code]
+                        continue
                     
                     logger.info("청산 주문: %s(%s) %d주", code_name, code, quantity)
                     
