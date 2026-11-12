@@ -479,3 +479,52 @@ def test_filter_from_cache_fallback_returns_none_when_all_fail(env, monkeypatch)
                         lambda *a, **k: (_ for _ in ()).throw(UniverseDataError("항상 실패")))
     out, err = mu._filter_from_cache_fallback(max_codes=30, universe_output_file=None)
     assert out is None and isinstance(err, UniverseDataError)
+
+
+# ---------------------------------------------------------------- check_and_cache_if_needed (PR 리뷰 반영)
+def _cache_check_setup(env, monkeypatch):
+    monkeypatch.setenv('DB_DIR', str(env.dir))
+    monkeypatch.delenv('DISABLE_INITIAL_CACHE', raising=False)
+    st = make_strategy(env, monkeypatch)
+    st.last_full_cache_time = None
+    calls = []
+    monkeypatch.setattr(mu, 'cache_daily_data', lambda kw: calls.append(1))  # 실제 API 수집 차단
+    return st, calls
+
+
+def test_fresh_empty_canonical_is_ignored_and_valid_kiwoom_cache_used(env, monkeypatch):
+    """운영 재현: 방금 생성된 0건 canonical + 12일 전 정상 키움 캐시(4,314건) → 재수집 없이 키움 캐시 사용."""
+    st, calls = _cache_check_setup(env, monkeypatch)
+    pd.DataFrame().to_parquet(env.dir / 'all_stocks_canonical.parquet')  # mtime=지금
+    kiwoom = env.dir / 'all_stocks_kiwoom.parquet'
+    make_kiwoom_df(4314).to_parquet(kiwoom, index=True)
+    t = time.time() - 12 * 86400
+    os.utime(kiwoom, (t, t))
+    st.check_and_cache_if_needed()
+    assert calls == []                                   # 전체 재수집(API) 불필요
+    assert st.last_full_cache_time is not None
+    assert abs(st.last_full_cache_time.timestamp() - t) < 5  # 키움 캐시의 mtime 기준
+
+
+def test_canonical_missing_columns_is_ignored(env, monkeypatch):
+    st, calls = _cache_check_setup(env, monkeypatch)
+    make_kiwoom_df(1000).drop(columns=['거래량']).to_parquet(env.dir / 'all_stocks_canonical.parquet', index=True)
+    make_kiwoom_df(1000).to_parquet(env.dir / 'all_stocks_kiwoom.parquet', index=True)
+    st.check_and_cache_if_needed()
+    assert calls == []
+
+
+def test_valid_fresh_canonical_still_used(env, monkeypatch):
+    st, calls = _cache_check_setup(env, monkeypatch)
+    make_kiwoom_df(4314).to_parquet(env.dir / 'all_stocks_canonical.parquet', index=True)
+    st.check_and_cache_if_needed()
+    assert calls == [] and st.last_full_cache_time is not None
+
+
+def test_all_caches_invalid_triggers_recache_not_trust(env, monkeypatch):
+    st, calls = _cache_check_setup(env, monkeypatch)
+    pd.DataFrame().to_parquet(env.dir / 'all_stocks_canonical.parquet')
+    pd.DataFrame().to_parquet(env.dir / 'all_stocks_kiwoom.parquet')
+    st.check_and_cache_if_needed()
+    assert calls == [1]                                  # 유효 캐시가 없으므로 재수집 경로
+    assert st.kiwoom.orders_sent == []

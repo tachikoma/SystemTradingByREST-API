@@ -587,6 +587,20 @@ class RSIStrategy(threading.Thread):
         except Exception:
             logger.exception("apply_sensitive_updates failed")
 
+    def _is_source_cache_valid(self, path):
+        """전체 종목 캐시 파일이 내용상 사용 가능한지 판정한다.
+
+        mtime만으로 신선도를 판정하면, 장애 때 생성된 0건/컬럼 누락 파일을 최대
+        UNIVERSE_UPDATE_DAYS일간 정상 캐시로 오인한다. 읽기 실패나 검증 실패는 무효로 본다.
+        (무효이면 다음 후보 캐시를 확인하거나 키움 API로 재수집한다. 주문과는 무관.)
+        """
+        try:
+            validate_source_df(pd.read_parquet(path), os.path.basename(path))
+            return True
+        except Exception as e:
+            logger.warning("캐시 파일 내용 검증 실패, 사용하지 않음: %s (%s)", path, e)
+            return False
+
     @notify_on_exception(fallback_return=None)
     def check_and_cache_if_needed(self):
         """캐시 상태 체크 및 필요 시 전체 캐싱"""
@@ -621,26 +635,30 @@ class RSIStrategy(threading.Thread):
             file_mod_time = datetime.fromtimestamp(os.path.getmtime(canonical_file), tz=ZoneInfo("Asia/Seoul"))
             days_old = (now.date() - file_mod_time.date()).days
             logger.info(f"Canonical 캐시 발견: {canonical_file}, {days_old}일 전 데이터")
-            # UNIVERSE_UPDATE_DAYS 이내면 canonical 사용
-            if days_old < self.UNIVERSE_UPDATE_DAYS:
+            # UNIVERSE_UPDATE_DAYS 이내이고 내용이 유효하면 canonical 사용
+            if days_old >= self.UNIVERSE_UPDATE_DAYS:
+                logger.warning(f"⚠️ Canonical 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
+            elif not self._is_source_cache_valid(canonical_file):
+                logger.warning(f"⚠️ Canonical 파일 내용이 비정상(0건/컬럼 누락 등): {canonical_file} — 캐시로 사용하지 않습니다.")
+            else:
                 logger.info(f"✅ Canonical 파일 사용 가능 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 이내)")
                 self.last_full_cache_time = file_mod_time
                 return
-            else:
-                logger.warning(f"⚠️ Canonical 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
 
         # canonical이 없거나 오래되었으면 기존 키움 캐시를 확인
         if os.path.exists(cache_file):
             file_mod_time = datetime.fromtimestamp(os.path.getmtime(cache_file), tz=ZoneInfo("Asia/Seoul"))
             days_old = (now.date() - file_mod_time.date()).days
             logger.info(f"캐시 파일 발견: {cache_file}, {days_old}일 전 데이터")
-            # UNIVERSE_UPDATE_DAYS 이내 캐시는 사용 가능
-            if days_old < self.UNIVERSE_UPDATE_DAYS:
+            # UNIVERSE_UPDATE_DAYS 이내이고 내용이 유효하면 캐시 사용 가능
+            if days_old >= self.UNIVERSE_UPDATE_DAYS:
+                logger.warning(f"⚠️ 캐시 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
+            elif not self._is_source_cache_valid(cache_file):
+                logger.warning(f"⚠️ 캐시 파일 내용이 비정상(0건/컬럼 누락 등): {cache_file} — 캐시로 사용하지 않습니다.")
+            else:
                 logger.info(f"✅ 캐시 파일 사용 가능 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 이내)")
                 self.last_full_cache_time = file_mod_time
                 return
-            else:
-                logger.warning(f"⚠️ 캐시 파일이 너무 오래됨 ({days_old}일 전, {self.UNIVERSE_UPDATE_DAYS}일 초과)")
         else:
             logger.warning(f"⚠️ 캐시 파일: {cache_file} 없음")
         

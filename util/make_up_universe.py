@@ -31,6 +31,9 @@ MOCK_TRADE_BLACKLIST_CODES = [
 
 logger = get_logger(__name__)
 
+# Universe 최소 종목 수 (빈 결과/비정상 데이터로 기존 유니버스를 덮어쓰는 것을 방지)
+MIN_UNIVERSE_SIZE = 10
+
 
 ETF_NAME_PREFIXES = (
     '1Q',
@@ -1678,7 +1681,6 @@ def _filter_and_create_universe(
         df = df.loc[: max_codes - 1]
     
     # Universe 최소 개수 검증 (비정상 데이터 방지)
-    MIN_UNIVERSE_SIZE = 10
     if len(df) < MIN_UNIVERSE_SIZE:
         error_msg = f"Universe 크기가 너무 작습니다 ({len(df)}개). 최소 {MIN_UNIVERSE_SIZE}개 필요."
         logger.error(error_msg)
