@@ -832,6 +832,7 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
             try:
                 cached = pd.read_parquet(cache_path)
                 validate_source_df(cached, f'키움 캐시({Path(cache_path).name})')
+                cached.attrs['cache_file'] = Path(cache_path).name
                 return cached
             except Exception as e:
                 logger.warning(f"캐시 Parquet 읽기/검증 실패: {e}. API로 새로 조회합니다.")
@@ -929,6 +930,7 @@ def fetch_all_stocks_from_kiwoom(kiwoom_client, use_cache=True, save_cache=True,
         try:
             # Prefer Parquet for compactness and speed (검증 통과분만, 원자적 교체)
             _atomic_to_parquet(df, cache_path, index=True)
+            df.attrs['cache_file'] = Path(cache_path).name  # 이 df가 곧 해당 캐시 내용
             logger.info(f"캐시 파일 저장: {Path(cache_path).resolve()}")
         except Exception as e:
             logger.error(f"캐시 Parquet 저장 실패: {e}")
@@ -1153,8 +1155,10 @@ def get_universe(
     if kiwoom_client and (use_kiwoom_api or check_transaction_closed()):
         mode = "강제 모드" if use_kiwoom_api else "장 종료 후 자동 갱신"
         logger.info(f"키움 API로 유니버스 생성을 시도합니다... ({mode})")
+        src_cache = None  # 이번 시도에서 사용한 캐시 파일명 (폴백 시 재선택 방지)
         try:
             df = fetch_all_stocks_from_kiwoom(kiwoom_client)
+            src_cache = df.attrs.get('cache_file')
             logger.info(f"✅ 키움 API로 {len(df)}개 종목 정보 획득 및 캐싱 완료")
             universe = _filter_and_create_universe(
                 df,
@@ -1174,20 +1178,14 @@ def get_universe(
                 logger.info("네이버 크롤링으로 fallback합니다...")
             else:  # 장 종료 후 자동 모드였다면 캐시 우선 시도
                 logger.info("캐시 파일 확인합니다...")
-                cached_df = _try_load_cache()
-                if cached_df is not None:
-                    logger.info(f"✅ 캐시 파일 사용: {len(cached_df)}개 종목")
-                    universe = _filter_and_create_universe(
-                        cached_df,
-                        max_codes=max_codes,
-                        universe_output_file=universe_output_file,
-                        etf_policy_overrides=etf_policy_overrides,
-                    )
-                    try:
-                        del cached_df
-                        gc.collect()
-                    except Exception:
-                        pass
+                universe, _ = _filter_from_cache_fallback(
+                    exclude={src_cache} - {None},
+                    max_codes=max_codes,
+                    universe_output_file=universe_output_file,
+                    etf_policy_overrides=etf_policy_overrides,
+                )
+                if universe is not None:
+                    logger.info(f"✅ 캐시 파일로 Universe 생성: {len(universe)}개 종목")
                     return universe
             # 아래 네이버 크롤링 로직으로 계속 진행
     all_stock_cache_file = 'all_stocks_naver.parquet'
@@ -1208,6 +1206,7 @@ def get_universe(
                 df = pd.read_parquet(all_stock_cache_path)
                 # 필수 컬럼 누락/0건 등 비정상 캐시는 NaN으로 보완하지 않고 폐기(크롤링 재시도)
                 validate_source_df(df, '오늘자 네이버 캐시')
+                df.attrs['cache_file'] = Path(all_stock_cache_path).name
                 # 네이버 캐시로부터 읽은 데이터는 정규화 후(옵션) canonical로 저장할 수 있습니다.
                 try:
                     save_canonical = str(os.getenv('SAVE_CANONICAL', '1')).lower() in ('1', 'true', 'yes')
@@ -1269,22 +1268,43 @@ def get_universe(
         # 소스가 검증은 통과했지만 필터 단계에서 실패한 경우에도 유효한 캐시로 폴백
         logger.warning(f"Universe 필터링 실패: {filter_err}. 캐시 폴백을 시도합니다.")
         # 이미 사용해 실패한 캐시(df가 캐시에서 온 경우)는 제외하고 다음 후보를 시도
-        tried = {df.attrs.get('cache_file')} - {None}
-        cached_df = _try_load_cache(exclude=tried)
-        if cached_df is None:
-            raise
-        universe = _filter_and_create_universe(
-            cached_df,
+        universe, _ = _filter_from_cache_fallback(
+            exclude={df.attrs.get('cache_file')} - {None},
             max_codes=max_codes,
             universe_output_file=universe_output_file,
             etf_policy_overrides=etf_policy_overrides,
         )
+        if universe is None:
+            raise
     try:
         del df
         gc.collect()
     except Exception:
         pass
     return universe
+
+
+def _filter_from_cache_fallback(exclude=None, **filter_kwargs):
+    """유효한 폴백 캐시 후보를 순서대로 시도해 Universe를 만든다.
+
+    소스 검증은 통과했지만 필터 단계에서 실패한 캐시는 제외하고 다음 후보로 넘어간다.
+    Returns: (universe_list or None, last_error or None). 후보가 모두 실패/없으면 (None, last_error).
+    """
+    tried = set(exclude or ())
+    last_err = None
+    while True:
+        cached_df = _try_load_cache(exclude=tried)
+        if cached_df is None:
+            return None, last_err
+        name = cached_df.attrs.get('cache_file')
+        try:
+            return _filter_and_create_universe(cached_df, **filter_kwargs), None
+        except Exception as e:
+            last_err = e
+            logger.warning(f"폴백 캐시({name}) 필터링 실패: {e}. 다음 캐시를 시도합니다.")
+            if name is None or name in tried:
+                return None, last_err
+            tried.add(name)
 
 
 def _try_load_cache(exclude=None):
