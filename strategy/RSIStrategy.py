@@ -132,7 +132,7 @@ class RSIStrategy(threading.Thread):
         self.universe_update_attempted_today = False  # 오늘 재구성을 이미 시도했는지 (실패 시 재시도 폭주 방지)
         self.last_universe_rebuild_error = None  # 마지막 재구성 실패 사유
         # Universe 청산 모드: 'live'(기본, 기존 동작) | 'dry_run'(주문 전송 없이 로그/알림만)
-        self.universe_liquidation_mode = str(os.getenv('UNIVERSE_LIQUIDATION_MODE', 'live')).strip().lower()
+        self.universe_liquidation_mode = str(os.getenv('UNIVERSE_LIQUIDATION_MODE', 'live')).strip().lower().replace('-', '_')
         # 새 Universe가 기존 대비 이 비율 미만이면 비정상으로 보고 교체하지 않음
         self.UNIVERSE_MIN_RATIO = float(os.getenv('UNIVERSE_MIN_RATIO', '0.5'))
         
@@ -1074,11 +1074,13 @@ class RSIStrategy(threading.Thread):
                 # 비정상(빈/지나치게 작은) Universe로 기존 Universe/DB를 덮어쓰지 않도록 검증
                 if len(temp_universe) < 10:
                     raise ValueError(f"Universe 종목 수가 비정상적으로 적습니다 ({len(temp_universe)}개)")
-                if table_exists and self.universe:
-                    min_expected = int(len(self.universe) * self.UNIVERSE_MIN_RATIO)
+                if table_exists:
+                    # 기준은 메모리(누적됨)가 아니라 DB에 저장된 기존 Universe 행 수
+                    existing_count = execute_sql(self.strategy_name, "select count(*) from universe").fetchone()[0]
+                    min_expected = int(existing_count * self.UNIVERSE_MIN_RATIO)
                     if len(temp_universe) < min_expected:
                         raise ValueError(
-                            f"새 Universe({len(temp_universe)}개)가 기존({len(self.universe)}개)의 "
+                            f"새 Universe({len(temp_universe)}개)가 기존({existing_count}개)의 "
                             f"{self.UNIVERSE_MIN_RATIO:.0%} 미만입니다"
                         )
             except Exception as e:
@@ -1642,7 +1644,8 @@ class RSIStrategy(threading.Thread):
         UNIVERSE_LIQUIDATION_MODE=dry_run 이면 주문을 전송하지 않고 로그/알림만 남기며,
         해당 종목은 Universe에 유지한다(검증/핫픽스용 안전장치). 기본값 'live'는 기존 동작과 동일.
         """
-        if codes_to_liquidate and self.universe_liquidation_mode == 'dry_run':
+        # fail-safe: 'live'가 아닌 모든 값(오타 포함)은 주문을 보내지 않는다.
+        if codes_to_liquidate and self.universe_liquidation_mode != 'live':
             for code in codes_to_liquidate:
                 self.universe[code] = holding_info[code]
             names = ", ".join(f"{holding_info[c].get('code_name', 'N/A')}({c})" for c in sorted(codes_to_liquidate))

@@ -60,7 +60,7 @@ _FDR_ETF_SYMBOLS = None
 # ---------------------------------------------------------------------------
 # Universe 구성에 반드시 필요한 컬럼. 하나라도 없으면 캐시/Universe 갱신에 사용 금지.
 REQUIRED_SOURCE_COLUMNS = ['종목코드', '종목명', '시장구분', '거래량', '거래대금', '시가총액', '등락률', '외국인비율']
-_NUMERIC_SOURCE_COLUMNS = ['거래량', '거래대금', '시가총액']
+_NUMERIC_SOURCE_COLUMNS = ['거래량', '거래대금', '시가총액', '등락률', '외국인비율']
 
 
 def _env_int(name, default):
@@ -1030,13 +1030,12 @@ def execute_crawler(output_file='all_stocks_naver.parquet'):
                 f"네이버 크롤링 페이지 실패 과다 (market={code}, {failed_pages}/{total_page_num})"
             )
         df = pd.concat(result, axis=0, ignore_index=True)
-        if len(df) < MIN_CRAWL_ROWS_PER_MARKET:
-            raise UniverseDataError(
-                f"네이버 크롤링 행 수 부족 (market={code}, {len(df)}건 < {MIN_CRAWL_ROWS_PER_MARKET}건)"
-            )
         
         # 시장구분 컬럼 추가 (0=코스피, 1=코스닥)
         df['시장구분'] = '코스피' if code == 0 else '코스닥'
+
+        # 시장별로 스키마/행 수/수치 유효성 검증 (합산 후에는 한쪽 시장의 결손이 가려지므로)
+        validate_source_df(df, f'네이버 크롤링(market={code})', min_rows=MIN_CRAWL_ROWS_PER_MARKET)
 
         # 변수 df는 KOSPI, KOSDAQ별로 크롤링한 종목 정보이고 이를 하나로 합치기 위해 df_total에 추가
         df_total.append(df)
@@ -1259,12 +1258,25 @@ def get_universe(
                 logger.error(f"크롤링 실패이고 사용 가능한 캐시도 없습니다.")
                 raise Exception(f"크롤링 실패이고 사용 가능한 캐시도 없습니다: {e}")
 
-    universe = _filter_and_create_universe(
-        df,
-        max_codes=max_codes,
-        universe_output_file=universe_output_file,
-        etf_policy_overrides=etf_policy_overrides,
-    )
+    try:
+        universe = _filter_and_create_universe(
+            df,
+            max_codes=max_codes,
+            universe_output_file=universe_output_file,
+            etf_policy_overrides=etf_policy_overrides,
+        )
+    except Exception as filter_err:
+        # 소스가 검증은 통과했지만 필터 단계에서 실패한 경우에도 유효한 캐시로 폴백
+        logger.warning(f"Universe 필터링 실패: {filter_err}. 캐시 폴백을 시도합니다.")
+        cached_df = _try_load_cache()
+        if cached_df is None:
+            raise
+        universe = _filter_and_create_universe(
+            cached_df,
+            max_codes=max_codes,
+            universe_output_file=universe_output_file,
+            etf_policy_overrides=etf_policy_overrides,
+        )
     try:
         del df
         gc.collect()
