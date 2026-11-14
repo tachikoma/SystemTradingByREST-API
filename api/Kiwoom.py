@@ -45,6 +45,7 @@ class Kiwoom:
         # 서버 측 토큰 무효화(8005) 대응용: 재인증 직렬화, 최소 간격, 알림 쓰로틀
         self._auth_lock = threading.Lock()
         self._last_auth_attempt_ts = float('-inf')
+        self._last_auth_ok = True
         self._last_auth_alert_ts = float('-inf')
 
         # HTTP 세션과 재시도 정책 설정
@@ -139,7 +140,12 @@ class Kiwoom:
             return False
         if res_data.get('return_code') != 3:
             return False
-        msg = str(res_data.get('return_msg', ''))
+        return Kiwoom._is_token_invalid_message(res_data.get('return_msg', ''))
+
+    @staticmethod
+    def _is_token_invalid_message(msg):
+        """메시지 문자열이 8005(Token이 유효하지 않습니다)를 가리키는지 판별합니다 (REST/WebSocket 공용)."""
+        msg = str(msg or '')
         return '8005' in msg or 'Token이 유효하지 않습니다' in msg
 
     def _refresh_token(self, stale_token=None, force=False):
@@ -162,7 +168,10 @@ class Kiwoom:
                     return True  # 유효함(다른 스레드가 이미 갱신했거나 갱신 불필요)
             now = time.monotonic()
             if now - self._last_auth_attempt_ts < TOKEN_REAUTH_MIN_INTERVAL_SEC:
-                return False if force else bool(self.access_token)
+                # force: 방금 발급받은 토큰이 또 무효라면 인증 엔드포인트를 두드리지 않음
+                # 일반 갱신: 직전 인증이 실패했다면 반복 호출을 억제 (정상 만료 갱신은 막지 않음)
+                if force or not self._last_auth_ok:
+                    return False
             self._last_auth_attempt_ts = now
             if force:
                 logger.warning("토큰이 서버에서 무효화되어 재인증합니다.")
@@ -172,6 +181,7 @@ class Kiwoom:
                 logger.error(f"토큰 인증 중 예외: {e}")
                 self.access_token = None
             ok = bool(self.access_token)
+            self._last_auth_ok = ok
         if not ok:
             self._alert_auth_problem("키움 토큰 인증 실패: 재시도 대기 중")
         return ok
@@ -1266,10 +1276,17 @@ class Kiwoom:
                         self.is_websocket_connected = True
                         logger.info("WebSocket connected.")
                         # Ensure token is valid before attempting LOGIN
+                        refreshed = False
                         try:
-                            await self._ensure_valid_token_async()
+                            refreshed = await self._ensure_valid_token_async()
                         except Exception as e:
                             logger.warning(f"Token refresh before websocket login failed: {e}")
+                        if not refreshed:
+                            # 유효한 토큰이 없으면 null/만료 토큰으로 LOGIN 하지 않고 재연결 루프에서 다시 시도
+                            logger.warning("유효한 토큰이 없어 WebSocket LOGIN을 보류하고 재연결합니다.")
+                            await self._drop_connection_for_reconnect()
+                            await asyncio.sleep(2)
+                            continue
                         # 다른 경로에서 `_send_websocket_message`를 호출하며 경쟁 상태가 발생하지 않도록
                         # 메인 루프의 연결 경로에서 직접 LOGIN을 전송합니다.
                         try:
@@ -1360,10 +1377,15 @@ class Kiwoom:
     async def _websocket_connect(self):
         try:
             # 연결하기 전에 토큰이 유효한지 확인합니다
+            refreshed = False
             try:
-                await self._ensure_valid_token_async()
+                refreshed = await self._ensure_valid_token_async()
             except Exception as e:
                 logger.warning(f"Token refresh before single websocket connect failed: {e}")
+            if not refreshed:
+                logger.warning("유효한 토큰이 없어 WebSocket 연결을 보류합니다.")
+                self.is_websocket_connected = False
+                return
             self.websocket = await websockets.connect(self.socket_url)
             self.is_websocket_connected = True
             # Reset login flags - LOGIN must be performed after connect
@@ -1533,13 +1555,15 @@ class Kiwoom:
                     logger.warning(f"WebSocket login failed: {msg}")
                     # detect token-related failures and try re-authenticate + relogin
                     lower = msg.lower()
-                    token_issue = (
+                    # 8005(서버 측 무효화)만 강제 재인증하고, 그 외 토큰 관련 메시지는 기존처럼 만료 시에만 갱신
+                    server_invalidated = self._is_token_invalid_message(msg)
+                    token_issue = server_invalidated or (
                         '토큰' in msg or '만료' in msg or '인증' in msg or 'expired' in lower or 'invalid token' in lower
                     )
                     if token_issue and self._websocket_login_retries < self._websocket_max_login_retries:
                         try:
                             # 토큰이 서버에서 무효화됐을 수 있으므로 만료 시각과 무관하게 재인증
-                            refreshed = await self._ensure_valid_token_async(force=True)
+                            refreshed = await self._ensure_valid_token_async(force=server_invalidated)
                             if refreshed:
                                 # 실제로 새 토큰을 받은 시도만 재시도 횟수에 포함
                                 self._websocket_login_retries += 1
@@ -1549,12 +1573,12 @@ class Kiwoom:
                             else:
                                 # 인증 실패/쓰로틀: null 토큰으로 LOGIN 하지 않고 끊어 재연결 루프에서 다시 시도
                                 logger.warning("토큰 재발급 불가(인증 실패 또는 쓰로틀): 연결을 종료하고 재연결 시 재시도합니다.")
-                                await self.disconnect()
+                                await self._drop_connection_for_reconnect()
                         except Exception as e:
                             logger.exception(f"Re-login attempt failed: {e}")
                     else:
-                        # unrecoverable: disconnect
-                        await self.disconnect()
+                        # unrecoverable: 연결을 끊고 재연결 루프에 맡김
+                        await self._drop_connection_for_reconnect()
                     
             elif trnm == 'PING':
                 # PING 메시지에 대한 PONG 응답
@@ -1596,6 +1620,22 @@ class Kiwoom:
             logger.warning(f"Failed to decode WebSocket message: {message}")
         except Exception as e:
             logger.exception(f"Error handling WebSocket message: {e}")
+
+    async def _drop_connection_for_reconnect(self):
+        """WebSocket 스레드 안에서 연결만 끊고 로그인 상태를 초기화해 재연결 루프가 다시 LOGIN 하도록 합니다.
+
+        동기 `disconnect()`는 스레드 `join()`을 하므로 WebSocket 스레드 자신에서 호출하면
+        RuntimeError(cannot join current thread)로 로그인 플래그 초기화가 누락됩니다.
+        """
+        self.is_websocket_connected = False
+        self._websocket_logged_in = False
+        self._websocket_login_sent = False
+        ws = getattr(self, 'websocket', None)
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception as e:
+                logger.debug(f"Error closing websocket for reconnect: {e}")
 
     def disconnect(self):
         """WebSocket 연결을 종료합니다."""

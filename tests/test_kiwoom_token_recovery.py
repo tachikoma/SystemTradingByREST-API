@@ -249,10 +249,21 @@ def make_ws_client(tokens):
     c._websocket_login_retries = 0
     c._websocket_max_login_retries = 3
     c._websocket_logged_in = False
-    c._websocket_login_sent = False
+    c._websocket_login_sent = True        # 방금 LOGIN 을 보낸 상태
+    c.is_websocket_connected = True
+    c.websocket = AsyncMock()
     c._send_websocket_message = AsyncMock()
-    c.disconnect = AsyncMock()
+    # 실제 disconnect() 는 스레드 join 때문에 WebSocket 스레드에서 호출하면 실패하므로,
+    # 핸들러가 이를 호출하지 않는지 확인하기 위해 호출 시 실패하는 mock 으로 둔다.
+    c.disconnect = MagicMock(side_effect=AssertionError('disconnect() must not be called from ws thread'))
     return c, calls
+
+
+def assert_dropped_for_reconnect(c):
+    c.websocket.close.assert_awaited_once()
+    assert c.is_websocket_connected is False
+    assert c._websocket_login_sent is False   # 다음 연결에서 LOGIN 을 다시 보내야 함
+    assert c._websocket_logged_in is False
 
 
 LOGIN_FAIL = json.dumps({'trnm': 'LOGIN', 'return_code': 3, 'return_msg': '토큰 인증에 실패했습니다[CODE=8005, MESSAGE=Token이 유효하지 않습니다]'})
@@ -264,7 +275,7 @@ def test_websocket_login_failure_reauths_and_relogins_with_new_token():
     assert calls['auth'] == 1
     c._send_websocket_message.assert_awaited_once_with({'trnm': 'LOGIN', 'token': 'ws-new'})
     assert c._websocket_login_retries == 1
-    c.disconnect.assert_not_awaited()
+    c.websocket.close.assert_not_awaited()
 
 
 def test_websocket_login_failure_when_reauth_fails_does_not_send_null_login_or_burn_retries():
@@ -272,7 +283,7 @@ def test_websocket_login_failure_when_reauth_fails_does_not_send_null_login_or_b
     asyncio.run(c._handle_websocket_message(LOGIN_FAIL))
     c._send_websocket_message.assert_not_awaited()
     assert c._websocket_login_retries == 0      # 재시도 횟수 소진하지 않음
-    c.disconnect.assert_awaited_once()          # 끊고 재연결 루프에서 재시도
+    assert_dropped_for_reconnect(c)             # 끊고 로그인 플래그를 초기화해 재연결 루프에서 재시도
 
 
 def test_websocket_login_failure_when_throttled_does_not_burn_retries():
@@ -282,6 +293,96 @@ def test_websocket_login_failure_when_throttled_does_not_burn_retries():
     assert calls['auth'] == 0
     c._send_websocket_message.assert_not_awaited()
     assert c._websocket_login_retries == 0
+    assert_dropped_for_reconnect(c)
+
+
+def test_websocket_login_failure_other_auth_error_does_not_force_reauth():
+    """8010 등 8005 가 아닌 인증 오류는 강제 재인증하지 않는다."""
+    c, calls = make_ws_client(['ws-new'])
+    msg = json.dumps({'trnm': 'LOGIN', 'return_code': 3,
+                      'return_msg': '인증에 실패했습니다[8010:Token을 발급받은 IP와 서비스를 요청한 IP가 동일하지 않습니다]'})
+    asyncio.run(c._handle_websocket_message(msg))
+    assert calls['auth'] == 0
+
+
+def test_websocket_login_retries_exhausted_drops_connection_and_resets_flags():
+    c, calls = make_ws_client(['ws-new'])
+    c._websocket_login_retries = 3
+    asyncio.run(c._handle_websocket_message(LOGIN_FAIL))
+    assert calls['auth'] == 0
+    assert_dropped_for_reconnect(c)
+
+
+def test_non_forced_refresh_not_blocked_by_recent_success_when_expired():
+    """직전에 인증 성공했더라도(30초 이내) 만료됐다면 일반 갱신은 막히지 않는다."""
+    c, calls = make_client(['n1', 'n2'])
+    c.token_expires_in = get_korea_time() - datetime.timedelta(seconds=1)
+    assert c._refresh_token() is True and calls['auth'] == 1
+    c.token_expires_in = get_korea_time() - datetime.timedelta(seconds=1)  # 곧바로 다시 만료
+    assert c._refresh_token() is True and calls['auth'] == 2
+
+
+def test_non_forced_refresh_after_recent_failure_returns_false_not_stale_true():
+    c, calls = make_client([])
+    c.token_expires_in = get_korea_time() - datetime.timedelta(seconds=1)
+    assert c._refresh_token() is False and calls['auth'] == 1   # 실패
+    c.access_token = 'expired-but-present'
+    assert c._refresh_token() is False and calls['auth'] == 1   # 쓰로틀, 만료 토큰을 사용 가능하다고 반환하지 않음
+
+
+def test_forced_refresh_after_recent_success_with_same_token_is_throttled():
+    c, calls = make_client(['n1'])
+    c.token_expires_in = get_korea_time() - datetime.timedelta(seconds=1)
+    assert c._refresh_token() is True and calls['auth'] == 1
+    assert c._refresh_token('n1', force=True) is False and calls['auth'] == 1
+
+
+def test_single_connect_skips_when_no_valid_token(monkeypatch):
+    c, calls = make_client([])
+    c.access_token = None
+    c.websocket = None
+    c.is_websocket_connected = False
+    c.socket_url = 'wss://example.invalid'
+    connect = AsyncMock()
+    monkeypatch.setattr(kiwoom_module.websockets, 'connect', connect)
+    asyncio.run(c._websocket_connect())
+    connect.assert_not_awaited()
+    assert c.is_websocket_connected is False
+
+
+def test_main_loop_does_not_login_without_valid_token(monkeypatch):
+    """재연결 시 토큰을 확보하지 못하면 null/만료 토큰으로 LOGIN 하지 않는다."""
+    c, calls = make_client([])
+    c.access_token = None
+    c.socket_url = 'wss://example.invalid'
+    c.websocket = None
+    c.is_websocket_connected = False
+    c._websocket_stop_event = threading.Event()
+    c._login_send_lock = None
+    c._websocket_login_sent = False
+    c._websocket_logged_in = False
+    c._reregister_real_data = AsyncMock()
+    ws = AsyncMock()
+
+    class FakeConnect:
+        def __init__(self, url):
+            pass
+
+        async def __aenter__(self):
+            return ws
+
+        async def __aexit__(self, *a):
+            return False
+
+    async def fake_sleep(_):
+        c._websocket_stop_event.set()   # 첫 재연결 대기에서 루프 종료
+
+    monkeypatch.setattr(kiwoom_module.websockets, 'connect', FakeConnect)
+    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', fake_sleep)
+    asyncio.run(c._websocket_main_loop())
+    ws.send.assert_not_awaited()
+    ws.close.assert_awaited()
+    assert c._websocket_login_sent is False
 
 
 def test_alert_throttle():
