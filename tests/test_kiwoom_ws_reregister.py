@@ -16,6 +16,27 @@ REG_FAIL = json.dumps({'trnm': 'REG', 'return_code': 1, 'return_msg': '실패'})
 REG_OK = json.dumps({'trnm': 'REG', 'return_code': 0})
 
 
+class FakeClock:
+    """time.monotonic / asyncio.sleep 을 가짜 시계로 대체: sleep(d) 는 시계를 d 만큼 진행하고 루프에 양보한다."""
+
+    def __init__(self, monkeypatch):
+        self.now = 1000.0
+        self.sleeps = []
+        self.real_sleep = asyncio.sleep
+        clock = self
+
+        async def fake_sleep(d):
+            clock.sleeps.append(d)
+            clock.now += d
+            await clock.real_sleep(0)
+
+        monkeypatch.setattr(kiwoom_module.time, 'monotonic', lambda: clock.now)
+        monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', fake_sleep)
+
+    def total(self):
+        return sum(self.sleeps)
+
+
 def make_client(real_reg=True):
     c = Kiwoom.__new__(Kiwoom)
     c.access_token = 'tok'
@@ -32,6 +53,8 @@ def make_client(real_reg=True):
     c.websocket = AsyncMock()
     c._reregister_task = None
     c._reg_backoff_until = 0.0
+    c._reg_backoff_key = None
+    c._reg_last_key = None
     c._login_gen = 0
     c._reg_sent = None
     c._reg_fail_gen = 0
@@ -94,12 +117,8 @@ def test_reg_failure_retries_limited_times(monkeypatch):
     c = make_client()
     c._websocket_logged_in = True
 
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(_):
-        await real_sleep(0)       # 지연은 없애되 이벤트 루프에는 양보
-
-    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', fast_sleep)
+    clock = FakeClock(monkeypatch)
+    real_sleep = clock.real_sleep
 
     async def scenario():
         for _ in range(kiwoom_module.REG_MAX_RETRIES + 2):
@@ -170,12 +189,8 @@ def test_reg_failure_during_inflight_reregister_is_not_lost(monkeypatch):
     c = make_client()
     c._websocket_logged_in = True
 
-    real_sleep = asyncio.sleep
-
-    async def fast_sleep(_):
-        await real_sleep(0)       # 지연은 없애되 이벤트 루프에는 양보
-
-    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', fast_sleep)
+    clock = FakeClock(monkeypatch)
+    real_sleep = clock.real_sleep
     gate = asyncio.Event()
     sends = []
 
@@ -409,14 +424,9 @@ def test_failure_chain_inside_one_worker_respects_retry_budget(monkeypatch):
     """전송 중 REG 실패 응답이 연속으로 도착해도 최초 1회 + 재시도 한도(3회)를 넘기지 않는다."""
     c = make_client()
     c._websocket_logged_in = True
-    sleeps = []
-    real_sleep = asyncio.sleep
-
-    async def rec_sleep(d):
-        sleeps.append(d)
-        await real_sleep(0)
-
-    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', rec_sleep)
+    clock = FakeClock(monkeypatch)
+    sleeps = clock.sleeps
+    real_sleep = clock.real_sleep
     sent = []
 
     async def send(m):
@@ -431,20 +441,15 @@ def test_failure_chain_inside_one_worker_respects_retry_budget(monkeypatch):
 
     asyncio.run(scenario())
     assert len(sent) == 1 + kiwoom_module.REG_MAX_RETRIES
-    assert [d for d in sleeps if d and d > 0.5]          # 재시도 사이에 백오프 대기가 실제로 적용됨
+    assert clock.total() >= kiwoom_module.REG_RETRY_DELAY_SEC * kiwoom_module.REG_MAX_RETRIES - 0.5   # 재시도 사이 백오프 적용
 
 
 def test_retry_backoff_not_erased_by_concurrent_same_subscription_request(monkeypatch):
     c = make_client()
     c._websocket_logged_in = True
-    sleeps = []
-    real_sleep = asyncio.sleep
-
-    async def rec_sleep(d):
-        sleeps.append(d)
-        await real_sleep(0)
-
-    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', rec_sleep)
+    clock = FakeClock(monkeypatch)
+    sleeps = clock.sleeps
+    real_sleep = clock.real_sleep
     gate = asyncio.Event()
     sent = []
 
@@ -466,7 +471,7 @@ def test_retry_backoff_not_erased_by_concurrent_same_subscription_request(monkey
 
     asyncio.run(scenario())
     assert len(sent) == 2
-    assert any(d and d > 0.5 for d in sleeps)             # 즉시 재전송되지 않고 백오프를 지킴
+    assert clock.total() >= kiwoom_module.REG_RETRY_DELAY_SEC - 0.01   # 즉시 재전송되지 않고 백오프를 지킴
 
 
 def test_many_subscription_changes_during_sends_end_with_latest(monkeypatch):
@@ -492,3 +497,106 @@ def test_many_subscription_changes_during_sends_end_with_latest(monkeypatch):
     asyncio.run(scenario())
     assert sent[-1] == 'c8' and len(sent) == 9
     assert c._reg_sent == (c._login_gen, ('c8', '0'))
+
+
+def test_give_up_marker_applies_to_failed_key_not_newer_subscription():
+    """재시도 한도가 소진된 A 의 실패가, 아직 전송하지 않은 최신 구독 B 를 포기 처리하지 않는다."""
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    c._real_reg_info = {'code_list': 'A', 'opt_type': '0'}
+    c._reg_retry_count = kiwoom_module.REG_MAX_RETRIES      # A 의 재시도 예산은 이미 소진
+    gate = asyncio.Event()
+    sent = []
+
+    async def send(m):
+        sent.append(m['data'][0]['item'][0])
+        if len(sent) == 1:
+            await gate.wait()
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._schedule_reregister()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        c._real_reg_info = {'code_list': 'B', 'opt_type': '0'}   # A 전송 중 구독이 B 로 변경
+        c._schedule_reregister()
+        await c._handle_websocket_message(REG_FAIL)              # A 의 실패 응답 → A 포기
+        gate.set()
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert sent == ['A', 'B']                                    # B 는 포기되지 않고 전송됨
+    assert c._reg_sent == (c._login_gen, ('B', '0'))
+
+
+def test_new_login_resets_backoff_while_worker_is_waiting(monkeypatch):
+    c = make_client()
+    c._websocket_logged_in = True
+    clock = FakeClock(monkeypatch)
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._reg_last_key = ('005930;000660', '0')
+        await c._handle_websocket_message(REG_FAIL)        # 백오프 2초 + 워커 시작(대기)
+        await clock.real_sleep(0)
+        await c._handle_websocket_message(LOGIN_OK)        # 새 로그인 세션: 백오프 해제
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert len(sent) == 1
+    assert clock.total() < kiwoom_module.REG_RETRY_DELAY_SEC    # 남은 백오프 전체를 기다리지 않음
+
+
+def test_backoff_extended_while_waiting_is_respected(monkeypatch):
+    c = make_client()
+    c._websocket_logged_in = True
+    clock = FakeClock(monkeypatch)
+    sent_at = []
+
+    async def send(m):
+        sent_at.append(clock.now)
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._reg_last_key = ('005930;000660', '0')
+        start = clock.now
+        await c._handle_websocket_message(REG_FAIL)        # 기한 = start + 2
+        await clock.real_sleep(0)
+        clock.now += 0.5                                   # 대기 중 시간이 흐른 뒤
+        await c._handle_websocket_message(REG_FAIL)        # 다음 실패가 기한을 연장 (= start + 2.5)
+        await c._reregister_task
+        return start
+
+    start = asyncio.run(scenario())
+    assert sent_at[0] >= start + 2.5 - 1e-6                # 연장된 기한 이전에 전송하지 않음
+
+
+def test_backoff_does_not_delay_a_different_subscription(monkeypatch):
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    clock = FakeClock(monkeypatch)
+    sent = []
+
+    async def send(m):
+        sent.append(m['data'][0]['item'][0])
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._real_reg_info = {'code_list': 'A', 'opt_type': '0'}
+        c._reg_last_key = ('A', '0')
+        await c._handle_websocket_message(REG_FAIL)        # A 에 백오프 (재시도 예약)
+        c._real_reg_info = {'code_list': 'B', 'opt_type': '0'}   # 구독 변경: 새 구독은 백오프 대상이 아님
+        c._schedule_reregister()
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert sent == ['B']
+    assert clock.total() == 0

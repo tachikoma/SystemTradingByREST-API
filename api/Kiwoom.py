@@ -26,6 +26,7 @@ AUTH_ALERT_MIN_INTERVAL_SEC = 3600
 # 실시간 등록(REG) 실패 시 재시도 최대 횟수/간격(초)
 REG_MAX_RETRIES = 3
 REG_RETRY_DELAY_SEC = 2
+REG_BACKOFF_TICK_SEC = 0.25   # 백오프 대기 중 만료 시각을 다시 확인하는 간격
 
 # 참고: 로깅 설정은 애플리케이션(`main.py`)에서 환경변수 로드 후 초기화해야 합니다.
 # 모듈 임포트 시점에 `configure_logging()`을 호출하면 초기화 순서가 불명확해질 수 있으므로 지양합니다.
@@ -86,6 +87,8 @@ class Kiwoom:
         # LOGIN 성공 후 실시간 재등록 태스크/REG 실패 재시도 횟수
         self._reregister_task = None
         self._reg_backoff_until = 0.0    # REG 실패 후 재시도를 기다릴 시각(time.monotonic 기준)
+        self._reg_backoff_key = None     # 백오프가 적용되는(실패한) 구독 키
+        self._reg_last_key = None        # 가장 최근에 전송한 구독 키 (실패 응답이 어느 구독에 대한 것인지 추정)
         self._login_gen = 0              # LOGIN 성공 누적 횟수(로그인 세션 세대)
         self._reg_sent = None            # (로그인 세대, 구독 정보 키): 이 세션에서 이미 전송한 REG
         self._reg_fail_gen = 0           # REG 실패 응답 누적 횟수 (전송 중 도착한 실패를 구분하기 위함)
@@ -1430,12 +1433,17 @@ class Kiwoom:
         # 반복은 외부 이벤트(구독 변경, 새 로그인 세션, REG 실패)로만 발생하며,
         # REG 실패는 핸들러의 재시도 한도(REG_MAX_RETRIES)로 제한됩니다.
         while True:
-            wait = self._reg_backoff_until - time.monotonic()
-            if wait > 0:
-                await asyncio.sleep(wait)       # REG 실패 후 재시도 간격
+            # REG 실패 후 재시도 간격: 실패한 구독에만 적용하고, 짧은 단위로 대기하며 만료 시각을 다시 읽어
+            # (백오프 연장·새 LOGIN 초기화·구독 변경이 대기 중에도 반영되도록 함)
+            while True:
+                wait = self._reg_backoff_until - time.monotonic()
+                if wait <= 0 or self._reg_key() != self._reg_backoff_key:
+                    break
+                await asyncio.sleep(min(wait, REG_BACKOFF_TICK_SEC))
             if not self._reg_wanted():
                 return
             gen, key, fail_gen = self._login_gen, self._reg_key(), self._reg_fail_gen
+            self._reg_last_key = key
             await self._reregister_real_data()
             # 전송하는 동안 새 로그인 세션이 시작됐거나 REG 실패가 도착했다면 '보낸 것'으로 기록하지 않음
             if gen == self._login_gen and fail_gen == self._reg_fail_gen:
@@ -1630,6 +1638,7 @@ class Kiwoom:
                     self._login_gen += 1        # 새 로그인 세션: 구독을 다시 보내야 함
                     self._reg_sent = None
                     self._reg_backoff_until = 0.0
+                    self._reg_backoff_key = None
                     self._schedule_reregister()
                 else:
                     msg = str(data.get('return_msg', ''))
@@ -1679,12 +1688,14 @@ class Kiwoom:
                         self._reg_retry_count += 1
                         logger.info(f"실시간 등록 재시도 예약 ({self._reg_retry_count}/{REG_MAX_RETRIES})")
                         self._reg_backoff_until = time.monotonic() + REG_RETRY_DELAY_SEC
+                        self._reg_backoff_key = self._reg_last_key
                         self._schedule_reregister()
                     elif self._real_reg_info:
                         # 재시도 한도 소진: 이 로그인 세션에서는 같은 구독을 더 보내지 않음
                         # (구독 목록이 바뀌거나 새로 LOGIN 하면 다시 시도)
                         logger.error("실시간 등록 재시도 한도를 초과했습니다. 다음 LOGIN 또는 구독 변경 시 다시 시도합니다.")
-                        self._reg_sent = (self._login_gen, self._reg_key())
+                        # 포기 처리는 실패한 전송의 구독에 적용 (그 사이 바뀐 최신 구독은 계속 전송 대상)
+                        self._reg_sent = (self._login_gen, self._reg_last_key)
 
             elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
