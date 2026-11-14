@@ -116,6 +116,7 @@ def test_reregister_not_duplicated_while_task_running():
 def test_reg_failure_retries_limited_times(monkeypatch):
     c = make_client()
     c._websocket_logged_in = True
+    c._reg_last_key = ('005930;000660', '0')    # 실패 응답은 직전에 전송한 구독에 대한 것
 
     clock = FakeClock(monkeypatch)
     real_sleep = clock.real_sleep
@@ -600,3 +601,35 @@ def test_backoff_does_not_delay_a_different_subscription(monkeypatch):
     asyncio.run(scenario())
     assert sent == ['B']
     assert clock.total() == 0
+
+
+def test_new_subscription_gets_its_own_retry_budget(monkeypatch):
+    """A 가 재시도 예산을 소진한 뒤 B 로 바뀌면, B 의 첫 실패는 재시도 대상이 된다."""
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    FakeClock(monkeypatch)
+    sent = []
+
+    async def send(m):
+        sent.append(m['data'][0]['item'][0])
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._real_reg_info = {'code_list': 'A', 'opt_type': '0'}
+        c._schedule_reregister()
+        await c._reregister_task
+        for _ in range(kiwoom_module.REG_MAX_RETRIES + 1):       # A: 재시도 예산 소진
+            await c._handle_websocket_message(REG_FAIL)
+            if c._reregister_task is not None:
+                await c._reregister_task
+        n_a = len(sent)
+        c._real_reg_info = {'code_list': 'B', 'opt_type': '0'}   # 구독 변경
+        c._schedule_reregister()
+        await c._reregister_task
+        await c._handle_websocket_message(REG_FAIL)              # B 의 일시적 실패
+        await c._reregister_task
+        return n_a
+
+    n_a = asyncio.run(scenario())
+    assert sent[n_a:] == ['B', 'B']                              # B 최초 전송 + 재시도 1회
