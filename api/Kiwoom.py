@@ -19,6 +19,10 @@ from util.db_helper import upsert_purchase_date, delete_purchase_date, get_purch
 # Kiwoom API 응답에서 사용되는 요청 한도 초과 메시지 키워드
 RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
 
+# 서버 측 토큰 무효화(8005) 시 강제 재인증 최소 간격(초), 인증 문제 텔레그램 알림 최소 간격(초)
+TOKEN_REAUTH_MIN_INTERVAL_SEC = 30
+AUTH_ALERT_MIN_INTERVAL_SEC = 3600
+
 # 참고: 로깅 설정은 애플리케이션(`main.py`)에서 환경변수 로드 후 초기화해야 합니다.
 # 모듈 임포트 시점에 `configure_logging()`을 호출하면 초기화 순서가 불명확해질 수 있으므로 지양합니다.
 logger = get_logger('kiwoom')
@@ -38,6 +42,10 @@ class Kiwoom:
         self.secretkey = secretkey
         self.access_token = None
         self.token_expires_in = None
+        # 서버 측 토큰 무효화(8005) 대응용: 재인증 직렬화, 최소 간격, 알림 쓰로틀
+        self._auth_lock = threading.Lock()
+        self._last_forced_auth_ts = float('-inf')
+        self._last_auth_alert_ts = float('-inf')
 
         # HTTP 세션과 재시도 정책 설정
         self.session = requests.Session()
@@ -115,15 +123,72 @@ class Kiwoom:
             # handled in exception branch or above
             self.access_token = None
 
-    def _request(self, path, api_id, params, method="POST", extra_headers=None):
+    @staticmethod
+    def _is_token_invalid_response(res_data):
+        """응답이 '토큰 무효/만료' 인증 오류(예: 8005)인지 판별합니다.
+
+        return_code가 3이고 메시지에 8005 코드 또는 토큰 관련 문구가 있을 때만 True 입니다.
+        (rate limit 등 다른 오류는 재인증 대상이 아닙니다.)
+        """
+        if not isinstance(res_data, dict):
+            return False
+        if res_data.get('return_code') != 3:
+            return False
+        msg = str(res_data.get('return_msg', ''))
+        return '8005' in msg or 'Token' in msg or '토큰' in msg
+
+    def _force_reauthenticate(self, stale_token):
+        """서버가 토큰을 무효화한 경우 토큰을 다시 발급받습니다(스레드 안전).
+
+        - `stale_token`: 실패한 요청이 사용한 토큰. 그 사이 다른 스레드가 이미 갱신했다면 재발급하지 않습니다.
+        - 인증 엔드포인트 과호출을 막기 위해 강제 재인증은 TOKEN_REAUTH_MIN_INTERVAL_SEC 간격을 둡니다.
+        반환값: 사용 가능한 (새) 토큰이 준비되었으면 True.
+        """
+        with self._auth_lock:
+            if stale_token is not None and self.access_token and self.access_token != stale_token:
+                return True  # 다른 스레드가 이미 갱신함
+            now = time.monotonic()
+            if now - self._last_forced_auth_ts < TOKEN_REAUTH_MIN_INTERVAL_SEC:
+                return False
+            self._last_forced_auth_ts = now
+            logger.warning("토큰이 서버에서 무효화되어 재인증합니다.")
+            try:
+                self._authenticate()
+            except Exception as e:
+                logger.error(f"토큰 재인증 실패: {e}")
+                self.access_token = None
+            ok = bool(self.access_token)
+        if not ok:
+            self._alert_auth_problem("키움 토큰 재인증 실패: 재시도 대기 중")
+        return ok
+
+    def _alert_auth_problem(self, message):
+        """인증 문제를 텔레그램으로 알립니다(AUTH_ALERT_MIN_INTERVAL_SEC 쓰로틀, 실패해도 무시)."""
+        now = time.monotonic()
+        if now - self._last_auth_alert_ts < AUTH_ALERT_MIN_INTERVAL_SEC:
+            return
+        self._last_auth_alert_ts = now
+        try:
+            from util.notifier import send_telegram_message
+            send_telegram_message(f"⚠️ {message}")
+        except Exception as e:
+            logger.warning(f"인증 알림 전송 실패: {e}")
+
+    def _request(self, path, api_id, params, method="POST", extra_headers=None, _auth_retry=True):
         """
         API 요청을 수행하는 래퍼입니다.
+
+        토큰은 만료 시각이 지나면 갱신합니다. 또한 서버가 토큰을 먼저 무효화해
+        8005(Token이 유효하지 않습니다)를 반환하면 재인증 후 1회만 재시도합니다.
         """
-        # TODO: 토큰 갱신 로직 추가
         # 한국 시간 헬퍼(`get_korea_time()`)를 일관되게 사용
         if self.token_expires_in is None or self.token_expires_in < get_korea_time():
             self._authenticate()
+        elif not self.access_token:
+            # 이전 인증이 실패해 토큰이 없는 경우: 최소 간격을 두고 재인증
+            self._force_reauthenticate(None)
 
+        used_token = self.access_token
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.access_token}",
@@ -143,19 +208,28 @@ class Kiwoom:
             if res.status_code == 200:
                 # 정상 응답
                 try:
-                    return res.json(), res.headers
+                    res_json = res.json()
                 except Exception:
                     logger.error(f"Failed to parse JSON response from {url}")
                     return None, res.headers
             else:
                 logger.error(f"Request failed: {res.text}, {res.headers}")
                 try:
-                    return res.json(), res.headers
+                    res_json = res.json()
                 except Exception:
                     return None, res.headers
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP request exception for {url}: {e}")
             return None, {}
+
+        # 서버 측 토큰 무효화(8005): 재인증 후 1회 재시도 (무한 루프 방지)
+        if self._is_token_invalid_response(res_json):
+            if _auth_retry and self._force_reauthenticate(used_token):
+                return self._request(path, api_id, params, method=method,
+                                     extra_headers=extra_headers, _auth_retry=False)
+            if not _auth_retry:
+                self._alert_auth_problem("키움 토큰 재인증 후에도 인증 오류(8005)가 지속됩니다")
+        return res_json, res.headers
 
 
 
@@ -1290,7 +1364,7 @@ class Kiwoom:
             self.websocket = None
 
     @notify_on_exception(fallback_return=None)
-    async def _ensure_valid_token_async(self):
+    async def _ensure_valid_token_async(self, force=False):
         """`self.access_token`이 유효한지 확인합니다. 만료되었으면 블로킹 되는 `_authenticate`를
         쓰레드풀에서 실행하여 토큰을 갱신합니다.
 
@@ -1298,7 +1372,12 @@ class Kiwoom:
         """
         # 토큰이 없거나 짧은 시간 내에 만료될 예정이면 갱신합니다.
         try:
-            if self.token_expires_in is None or self.token_expires_in < (get_korea_time() + datetime.timedelta(seconds=5)):
+            if force:
+                # 서버가 토큰을 무효화한 경우(8005): 만료 시각과 무관하게 재인증
+                stale = self.access_token
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._force_reauthenticate, stale)
+            elif self.token_expires_in is None or self.token_expires_in < (get_korea_time() + datetime.timedelta(seconds=5)):
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._authenticate)
         except Exception as e:
@@ -1453,7 +1532,8 @@ class Kiwoom:
                         self._websocket_login_retries += 1
                         logger.info(f"Attempting to refresh token and re-login (attempt {self._websocket_login_retries})...")
                         try:
-                            await self._ensure_valid_token_async()
+                            # 토큰이 서버에서 무효화됐을 수 있으므로 만료 시각과 무관하게 재인증
+                            await self._ensure_valid_token_async(force=True)
                             await asyncio.sleep(0.2)
                             await self._send_websocket_message({'trnm': 'LOGIN', 'token': self.access_token})
                         except Exception as e:
