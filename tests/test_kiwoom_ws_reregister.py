@@ -31,8 +31,9 @@ def make_client(real_reg=True):
     c.is_websocket_connected = True
     c.websocket = AsyncMock()
     c._reregister_task = None
-    c._reregister_pending = None
-    c._reg_sent_key = None
+    c._reregister_delay = None
+    c._login_gen = 0
+    c._reg_sent = None
     c._reg_fail_gen = 0
     c._websocket_stop_event = threading.Event()
     c._reg_retry_count = 0
@@ -322,7 +323,6 @@ def test_changed_registration_is_sent_again_after_same_session():
 def test_cancelled_reregister_does_not_spawn_followup_task():
     c = make_client()
     c._websocket_logged_in = True
-    gate_started = asyncio.Event
 
     async def scenario():
         started = asyncio.Event()
@@ -335,16 +335,71 @@ def test_cancelled_reregister_does_not_spawn_followup_task():
         c._schedule_reregister()
         task = c._reregister_task
         await started.wait()
-        c._schedule_reregister(delay=0, retry=True)          # 실행 중 retry 요청이 pending 으로 보존됨
-        assert c._reregister_pending == 0
+        c._schedule_reregister(delay=0)                      # 실행 중에 들어온 추가 요청
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert c._reregister_pending is None
-        assert c._reregister_task is task                    # 새 태스크가 만들어지지 않음
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert c._reregister_task is task                    # 취소 후 새 태스크가 만들어지지 않음
+        assert task.cancelled()
 
     asyncio.run(scenario())
+
+
+def test_registration_changed_during_inflight_send_is_not_lost():
+    """A 목록을 전송하는 동안 set_real_reg(B) 가 들어와도 B 가 이어서 전송된다."""
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    c._real_reg_info = {'code_list': '005930', 'opt_type': '0'}
+    gate = asyncio.Event()
+    sent = []
+
+    async def slow_send(m):
+        sent.append(m)
+        if len(sent) == 1:
+            await gate.wait()
+
+    c._send_websocket_message = slow_send
+
+    async def scenario():
+        c._schedule_reregister()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        # 전송 대기 중에 구독 목록 변경 (set_real_reg 의 저장 + 스케줄링 단계)
+        c._real_reg_info = {'code_list': '005930;000660', 'opt_type': '0'}
+        c._schedule_reregister()
+        gate.set()
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert [m['data'][0]['item'] for m in sent] == [['005930'], ['005930', '000660']]
+
+
+def test_new_login_session_during_inflight_send_is_not_masked_by_old_send():
+    """이전 세션의 REG 전송이 끝나기 전에 새 LOGIN 이 성공해도, 새 세션의 구독이 복구된다."""
+    c = make_client()
+    c._websocket_logged_in = True
+    gate = asyncio.Event()
+    sent = []
+
+    async def slow_send(m):
+        sent.append(m)
+        if len(sent) == 1:
+            await gate.wait()
+
+    c._send_websocket_message = slow_send
+
+    async def scenario():
+        c._schedule_reregister()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await c._handle_websocket_message(LOGIN_OK)         # 새 로그인 세션 시작 (이전 전송은 아직 진행 중)
+        gate.set()
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert len(sent) == 2                                    # 새 세션용 REG 가 다시 전송됨
+    assert c._reg_sent == (c._login_gen, ('005930;000660', '0'))

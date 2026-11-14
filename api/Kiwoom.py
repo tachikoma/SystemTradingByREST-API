@@ -85,8 +85,9 @@ class Kiwoom:
         self._real_reg_info = None
         # LOGIN 성공 후 실시간 재등록 태스크/REG 실패 재시도 횟수
         self._reregister_task = None
-        self._reregister_pending = None  # 재등록 태스크 실행 중 들어온 예약(지연 초)
-        self._reg_sent_key = None        # 현재 로그인 세션에서 이미 전송한 REG 정보 (중복 전송 방지)
+        self._reregister_delay = None    # 예약된 재등록의 대기 시간(초). None 이면 예약 없음
+        self._login_gen = 0              # LOGIN 성공 누적 횟수(로그인 세션 세대)
+        self._reg_sent = None            # (로그인 세대, 구독 정보 키): 이 세션에서 이미 전송한 REG
         self._reg_fail_gen = 0           # REG 실패 응답 누적 횟수 (전송 중 도착한 실패를 구분하기 위함)
         self._reg_retry_count = 0
 
@@ -1399,50 +1400,49 @@ class Kiwoom:
             logger.info("Re-registering real-time data after login...")
             info = dict(self._real_reg_info)
             message = self._build_reg_message(info['code_list'], info['opt_type'])
-            fail_gen = self._reg_fail_gen
             await self._send_websocket_message(message)
-            # 전송하는 동안 REG 실패 응답이 도착했다면 '보낸 것'으로 기록하지 않아 재시도가 건너뛰어지지 않게 함
-            if fail_gen == self._reg_fail_gen:
-                self._reg_sent_key = (info['code_list'], info['opt_type'])
             logger.info(f"Real-time data re-registered for codes: {info['code_list']}")
 
-    def _schedule_reregister(self, delay=0.0, retry=False):
-        """실시간 재등록을 이벤트 루프에서 예약합니다. LOGIN 성공/REG 실패 응답 처리 시 호출합니다.
+    def _reg_key(self):
+        info = self._real_reg_info
+        return (info['code_list'], info['opt_type']) if info else None
 
-        이미 재등록 태스크가 실행 중이면 새 태스크를 만들지 않습니다. 다만 REG 실패에 따른 재시도(retry=True)는
-        요청을 보존했다가 실행 중인 태스크가 끝난 뒤 다시 예약합니다 (전송 중 도착한 REG 실패의 재시도 유실 방지).
-        LOGIN 성공 등 일반 예약은 중복이므로 버립니다.
+    def _reg_wanted(self):
+        """지금 REG 를 (다시) 보내야 하는가: 로그인된 연결이고, 이 로그인 세션에서 같은 구독을 아직 보내지 않았을 때."""
+        key = self._reg_key()
+        return (key is not None and self.is_websocket_connected and self._websocket_logged_in
+                and self._reg_sent != (self._login_gen, key))
+
+    def _schedule_reregister(self, delay=0.0):
+        """실시간 재등록을 예약합니다 (이벤트 루프 스레드에서만 호출).
+
+        단일 워커가 '지금 보낼 필요가 있는지(_reg_wanted)'를 매번 다시 판정하므로, LOGIN 성공·set_real_reg·
+        REG 실패 재시도가 겹쳐도 같은 구독은 로그인 세션당 한 번만 전송되고, 전송 중 바뀐 구독/새 로그인
+        세션은 유실되지 않습니다. 워커가 이미 실행 중이면 새 태스크를 만들지 않고 대기 시간만 갱신합니다.
         """
         if not self._real_reg_info:
             return
+        self._reregister_delay = delay if self._reregister_delay is None else min(self._reregister_delay, delay)
         task = self._reregister_task
-        if task is not None and not task.done():
-            if retry:
-                self._reregister_pending = delay if self._reregister_pending is None else min(self._reregister_pending, delay)
-            return
-        self._reregister_task = asyncio.ensure_future(self._reregister_after(delay))
+        if task is None or task.done():
+            self._reregister_task = asyncio.ensure_future(self._reregister_worker())
 
-    async def _reregister_after(self, delay):
-        cancelled = False
-        try:
+    async def _reregister_worker(self):
+        sends = 0
+        while sends <= REG_MAX_RETRIES + 1:   # 안전 상한: 한 번의 워커 실행에서 무한 반복 방지
+            delay, self._reregister_delay = (self._reregister_delay or 0.0), None
             if delay:
                 await asyncio.sleep(delay)
-            info = self._real_reg_info
-            key = (info['code_list'], info['opt_type']) if info else None
-            # 로그인되지 않은 연결에는 REG 를 보내지 않습니다 (다음 LOGIN 성공 시 다시 예약됨).
-            # 이 로그인 세션에서 같은 정보를 이미 보냈다면 다시 보내지 않습니다.
-            if (key is not None and self.is_websocket_connected and self._websocket_logged_in
-                    and key != self._reg_sent_key):
-                await self._reregister_real_data()
-        except asyncio.CancelledError:
-            cancelled = True
-            raise
-        finally:
-            pending, self._reregister_pending = self._reregister_pending, None
-            if pending is not None and not cancelled and not self._websocket_stop_event.is_set():
-                # 이 태스크가 끝난 다음 루프 반복에서 예약하므로 done() 상태에서 새 태스크가 만들어짐
-                # (취소/종료 중에는 후속 태스크를 만들지 않음)
-                asyncio.get_running_loop().call_soon(self._schedule_reregister, pending, True)
+            if not self._reg_wanted():
+                return
+            gen, key, fail_gen = self._login_gen, self._reg_key(), self._reg_fail_gen
+            await self._reregister_real_data()
+            sends += 1
+            # 전송하는 동안 새 로그인 세션이 시작됐거나 REG 실패가 도착했다면 '보낸 것'으로 기록하지 않음
+            if gen == self._login_gen and fail_gen == self._reg_fail_gen:
+                self._reg_sent = (gen, key)
+            if not self._reg_wanted():
+                return
 
     @notify_on_exception(fallback_return=None)
     async def _websocket_connect(self):
@@ -1627,7 +1627,8 @@ class Kiwoom:
                     self._websocket_login_sent = True
                     # LOGIN 이 성공한 뒤에야 이전 실시간 구독을 복구합니다
                     self._reg_retry_count = 0
-                    self._reg_sent_key = None   # 새 로그인 세션: 구독을 다시 보내야 함
+                    self._login_gen += 1        # 새 로그인 세션: 구독을 다시 보내야 함
+                    self._reg_sent = None
                     self._schedule_reregister()
                 else:
                     msg = str(data.get('return_msg', ''))
@@ -1671,13 +1672,12 @@ class Kiwoom:
                 else:
                     logger.warning(f"Real-time registration failed: {data}")
                     self._reg_fail_gen += 1
-                    self._reg_sent_key = None
+                    self._reg_sent = None       # 거부된 등록은 '보낸 것'으로 취급하지 않음
                     # 구독 실패 시 시세가 끊기므로 제한적으로 재등록을 시도합니다 (재연결·LOGIN 성공 시에도 다시 예약됨)
                     if self._real_reg_info and self._reg_retry_count < REG_MAX_RETRIES:
                         self._reg_retry_count += 1
-                        self._reg_sent_key = None   # 거부된 등록은 '보낸 것'으로 취급하지 않음
                         logger.info(f"실시간 등록 재시도 예약 ({self._reg_retry_count}/{REG_MAX_RETRIES})")
-                        self._schedule_reregister(delay=REG_RETRY_DELAY_SEC, retry=True)
+                        self._schedule_reregister(delay=REG_RETRY_DELAY_SEC)
                     
             elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
