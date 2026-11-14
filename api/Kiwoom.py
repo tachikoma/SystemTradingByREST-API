@@ -215,7 +215,7 @@ class Kiwoom:
         used_token = self.access_token
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {used_token}",
             "api-id": api_id
         }
 
@@ -1632,8 +1632,9 @@ class Kiwoom:
 
     def _login_payload(self):
         """LOGIN 메시지를 현재 토큰으로 만들고, 사용한 토큰을 기록합니다."""
-        self._last_login_token = self.access_token
-        return json.dumps({'trnm': 'LOGIN', 'token': self.access_token})
+        token = self.access_token  # 기록과 전송에 같은 값을 쓰기 위해 한 번만 읽습니다
+        self._last_login_token = token
+        return json.dumps({'trnm': 'LOGIN', 'token': token})
 
     async def _drop_connection_for_reconnect(self):
         """WebSocket 스레드 안에서 연결만 끊고 로그인 상태를 초기화해 재연결 루프가 다시 LOGIN 하도록 합니다.
