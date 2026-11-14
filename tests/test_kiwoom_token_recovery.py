@@ -428,3 +428,39 @@ def test_alert_throttle():
     finally:
         notifier.send_telegram_message = orig
     assert len(sent) == 1
+
+
+class _FlippingToken(Kiwoom):
+    """첫 읽기는 'old', 이후 읽기는 'new' 를 돌려주는 access_token (읽기 사이 갱신 경쟁 재현)."""
+    _reads = 0
+
+    @property
+    def access_token(self):
+        type(self)._reads += 1
+        return 'old' if type(self)._reads == 1 else 'new'
+
+    @access_token.setter
+    def access_token(self, v):
+        pass
+
+
+def test_login_payload_records_the_token_it_sends():
+    _FlippingToken._reads = 0
+    c = _FlippingToken.__new__(_FlippingToken)
+    payload = json.loads(c._login_payload())
+    assert payload['token'] == c._last_login_token
+
+
+def test_request_authorization_uses_the_token_it_recorded():
+    _FlippingToken._reads = 0
+    c = _FlippingToken.__new__(_FlippingToken)
+    c.base_url = 'https://example.invalid'
+    c.token_expires_in = get_korea_time() + datetime.timedelta(hours=1)
+    c._auth_lock = threading.Lock()
+    c._last_auth_attempt_ts = float('-inf')
+    c._last_auth_ok = True
+    c.session = MagicMock()
+    c.session.post.return_value = Resp(OK)
+    c._request('/p', 'ka1', {})
+    # 사전 검사에서 1회, used_token 에서 1회 읽음 → 요청 헤더는 used_token(=두 번째 읽기) 과 일치해야 함
+    assert c.session.post.call_args.kwargs['headers']['Authorization'] == 'Bearer new'
