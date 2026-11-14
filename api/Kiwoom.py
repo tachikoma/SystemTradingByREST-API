@@ -1443,6 +1443,8 @@ class Kiwoom:
             if not self._reg_wanted():
                 return
             gen, key, fail_gen = self._login_gen, self._reg_key(), self._reg_fail_gen
+            if key != self._reg_last_key:
+                self._reg_retry_count = 0       # 새 구독은 이전 구독이 소진한 재시도 예산을 물려받지 않음
             self._reg_last_key = key
             await self._reregister_real_data()
             # 전송하는 동안 새 로그인 세션이 시작됐거나 REG 실패가 도착했다면 '보낸 것'으로 기록하지 않음
