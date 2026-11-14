@@ -31,6 +31,7 @@ def make_client(real_reg=True):
     c.is_websocket_connected = True
     c.websocket = AsyncMock()
     c._reregister_task = None
+    c._reregister_pending = None
     c._reg_retry_count = 0
     c._real_reg_info = {'code_list': '005930;000660', 'opt_type': '0'} if real_reg else None
     c._send_websocket_message = AsyncMock()
@@ -156,3 +157,80 @@ def test_main_loop_does_not_send_reg_before_login_response(monkeypatch):
     sent = [json.loads(call.args[0]) for call in ws.send.await_args_list]
     assert [m['trnm'] for m in sent] == ['LOGIN']
     c._reregister_real_data.assert_not_awaited()
+
+
+def test_reg_failure_during_inflight_reregister_is_not_lost(monkeypatch):
+    """전송 중(태스크 실행 중) 도착한 REG 실패의 재시도 요청을 보존했다가 종료 후 다시 예약한다."""
+    c = make_client()
+    c._websocket_logged_in = True
+
+    async def fast_sleep(_):
+        return None
+
+    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', fast_sleep)
+    gate = asyncio.Event()
+    sends = []
+
+    async def slow_send(msg):
+        sends.append(msg)
+        if len(sends) == 1:
+            await gate.wait()       # 첫 전송이 흐름 제어 등으로 대기 중
+
+    c._send_websocket_message = slow_send
+
+    async def scenario():
+        c._schedule_reregister()
+        await asyncio.sleep(0)                      # 첫 태스크가 전송 대기 상태로 진입
+        await c._handle_websocket_message(REG_FAIL)  # 전송 중 도착한 REG 실패
+        assert c._reg_retry_count == 1
+        gate.set()
+        for _ in range(10):                          # 보존된 재시도가 새 태스크로 실행되도록 양보
+            await asyncio.sleep(0)
+        t = c._reregister_task
+        if t is not None:
+            await t
+
+    asyncio.run(scenario())
+    assert len(sends) == 2                           # 첫 전송 + 보존된 재시도
+
+
+def test_set_real_reg_before_login_defers_to_login_success_without_duplicate_reg():
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = False
+    c.asyncio_loop = MagicMock()
+    sent = []
+    c._send_websocket_message = AsyncMock(side_effect=lambda m: sent.append(m))
+    c.set_real_reg('005930;000660', '0')
+    c.asyncio_loop.call_soon_threadsafe.assert_not_called()
+    assert c._real_reg_info == {'code_list': '005930;000660', 'opt_type': '0'}
+    assert sent == []
+
+    async def scenario():
+        await c._handle_websocket_message(LOGIN_OK)   # LOGIN 성공 → 한 번만 전송
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert len(sent) == 1 and sent[0] == Kiwoom._build_reg_message('005930;000660', '0')
+
+
+def test_set_real_reg_when_logged_in_sends_immediately():
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    loop = asyncio.new_event_loop()
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    try:
+        c.asyncio_loop = loop
+        done = threading.Event()
+
+        async def send(msg):
+            c._sent = msg
+            done.set()
+
+        c._send_websocket_message = send
+        c.set_real_reg('005930', '0')
+        assert done.wait(2)
+        assert c._sent == Kiwoom._build_reg_message('005930', '0')
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        t.join(2)
