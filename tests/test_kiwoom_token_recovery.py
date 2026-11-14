@@ -39,6 +39,8 @@ def make_client(tokens):
     c._auth_lock = threading.Lock()
     c._last_auth_attempt_ts = float('-inf')
     c._last_auth_alert_ts = float('-inf')
+    c._last_auth_ok = True
+    c._last_login_token = None
     c.session = MagicMock()
     issued = list(tokens)
     calls = {'auth': 0}
@@ -361,6 +363,7 @@ def test_main_loop_does_not_login_without_valid_token(monkeypatch):
     c._login_send_lock = None
     c._websocket_login_sent = False
     c._websocket_logged_in = False
+    c._websocket_login_retries = 3         # 이전 연결에서 소진된 상태
     c._reregister_real_data = AsyncMock()
     ws = AsyncMock()
 
@@ -383,6 +386,33 @@ def test_main_loop_does_not_login_without_valid_token(monkeypatch):
     ws.send.assert_not_awaited()
     ws.close.assert_awaited()
     assert c._websocket_login_sent is False
+    assert c._websocket_login_retries == 0     # 새 연결에서는 재시도 예산이 초기화됨
+
+
+def test_websocket_stale_8005_after_rest_refresh_resends_login_with_new_token():
+    """LOGIN(old) 전송 후 REST 가 토큰을 갱신하고 old 의 8005 가 도착하면, 재인증 없이 new 로 재전송한다."""
+    c, calls = make_ws_client(['should-not-be-used'])
+    c._last_login_token = 'old'
+    c.access_token = 'new'
+    asyncio.run(c._handle_websocket_message(LOGIN_FAIL))
+    assert calls['auth'] == 0
+    c._send_websocket_message.assert_awaited_once_with({'trnm': 'LOGIN', 'token': 'new'})
+    c.websocket.close.assert_not_awaited()
+
+
+def test_explicit_login_message_uses_token_at_send_time():
+    """재연결 중 토큰이 갱신돼도 LOGIN 은 직렬화 시점이 아닌 전송 시점의 최신 토큰을 쓴다."""
+    c, _ = make_client([])
+    c.access_token = 'fresh'
+    c.is_websocket_connected = True
+    c.websocket = AsyncMock()
+    c._login_send_lock = None
+    c._websocket_logged_in = False
+    c._websocket_login_sent = False
+    asyncio.run(c._send_websocket_message({'trnm': 'LOGIN', 'token': 'old'}))
+    sent = json.loads(c.websocket.send.await_args.args[0])
+    assert sent == {'trnm': 'LOGIN', 'token': 'fresh'}
+    assert c._last_login_token == 'fresh'
 
 
 def test_alert_throttle():

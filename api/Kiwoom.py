@@ -46,6 +46,8 @@ class Kiwoom:
         self._auth_lock = threading.Lock()
         self._last_auth_attempt_ts = float('-inf')
         self._last_auth_ok = True
+        # 마지막으로 WebSocket LOGIN 에 사용한 토큰(8005 응답이 어느 토큰에 대한 것인지 추적)
+        self._last_login_token = None
         self._last_auth_alert_ts = float('-inf')
 
         # HTTP 세션과 재시도 정책 설정
@@ -1274,6 +1276,8 @@ class Kiwoom:
                     async with websockets.connect(self.socket_url) as websocket:
                         self.websocket = websocket
                         self.is_websocket_connected = True
+                        # 새 연결마다 LOGIN 재시도 예산을 초기화합니다 (이전 연결에서 소진돼도 복구 가능하도록)
+                        self._websocket_login_retries = 0
                         logger.info("WebSocket connected.")
                         # Ensure token is valid before attempting LOGIN
                         refreshed = False
@@ -1293,14 +1297,14 @@ class Kiwoom:
                             if self._login_send_lock is not None:
                                 async with self._login_send_lock:
                                     if not self._websocket_login_sent:
-                                        await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                        await self.websocket.send(self._login_payload())
                                         self._websocket_login_sent = True
                                             # LOGIN 응답이 `_handle_websocket_message`에서 도착하면 logged_in이 설정됩니다
                                         self._websocket_logged_in = False
                             else:
                                 # fallback: send without lock
                                 if not self._websocket_login_sent:
-                                    await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                    await self.websocket.send(self._login_payload())
                                     self._websocket_login_sent = True
                                     self._websocket_logged_in = False
                         except Exception as e:
@@ -1388,6 +1392,7 @@ class Kiwoom:
                 return
             self.websocket = await websockets.connect(self.socket_url)
             self.is_websocket_connected = True
+            self._websocket_login_retries = 0
             # Reset login flags - LOGIN must be performed after connect
             self._websocket_logged_in = False
             self._websocket_login_sent = False
@@ -1398,7 +1403,7 @@ class Kiwoom:
             self.websocket = None
 
     @notify_on_exception(fallback_return=None)
-    async def _ensure_valid_token_async(self, force=False):
+    async def _ensure_valid_token_async(self, force=False, stale_token=None):
         """`self.access_token`이 유효한지 확인하고, 필요하면 쓰레드풀에서 갱신합니다.
 
         블로킹 `_refresh_token`을 executor에서 실행해 asyncio 이벤트 루프를 차단하지 않습니다.
@@ -1406,7 +1411,7 @@ class Kiwoom:
         반환값: 사용 가능한 토큰이 준비되었으면 True (인증 실패/쓰로틀 시 False).
         """
         try:
-            stale = self.access_token
+            stale = stale_token if stale_token is not None else self.access_token
             loop = asyncio.get_running_loop()
             return bool(await loop.run_in_executor(None, self._refresh_token, stale, force))
         except Exception as e:
@@ -1508,11 +1513,11 @@ class Kiwoom:
                             if self._login_send_lock is not None:
                                 async with self._login_send_lock:
                                     if not self._websocket_login_sent:
-                                        await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                        await self.websocket.send(self._login_payload())
                                         self._websocket_login_sent = True
                             else:
                                 if not self._websocket_login_sent:
-                                    await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                    await self.websocket.send(self._login_payload())
                                     self._websocket_login_sent = True
                             # 로그인 확인을 위해 최대 약 1초(0.1s * 10회) 까지 대기합니다
                             for _ in range(10):
@@ -1522,6 +1527,9 @@ class Kiwoom:
                         except Exception as e:
                             logger.warning(f"사전 LOGIN 전송 실패: {e}")
 
+                    if trnm == 'LOGIN':
+                        # 재연결 중 토큰이 갱신됐을 수 있으므로 전송 시점의 최신 토큰으로 다시 만듭니다
+                        message = self._login_payload()
                     await self.websocket.send(message)
                     send_attempted = True
                     break
@@ -1563,7 +1571,8 @@ class Kiwoom:
                     if token_issue and self._websocket_login_retries < self._websocket_max_login_retries:
                         try:
                             # 토큰이 서버에서 무효화됐을 수 있으므로 만료 시각과 무관하게 재인증
-                            refreshed = await self._ensure_valid_token_async(force=server_invalidated)
+                            refreshed = await self._ensure_valid_token_async(
+                                force=server_invalidated, stale_token=self._last_login_token)
                             if refreshed:
                                 # 실제로 새 토큰을 받은 시도만 재시도 횟수에 포함
                                 self._websocket_login_retries += 1
@@ -1620,6 +1629,11 @@ class Kiwoom:
             logger.warning(f"Failed to decode WebSocket message: {message}")
         except Exception as e:
             logger.exception(f"Error handling WebSocket message: {e}")
+
+    def _login_payload(self):
+        """LOGIN 메시지를 현재 토큰으로 만들고, 사용한 토큰을 기록합니다."""
+        self._last_login_token = self.access_token
+        return json.dumps({'trnm': 'LOGIN', 'token': self.access_token})
 
     async def _drop_connection_for_reconnect(self):
         """WebSocket 스레드 안에서 연결만 끊고 로그인 상태를 초기화해 재연결 루프가 다시 LOGIN 하도록 합니다.
