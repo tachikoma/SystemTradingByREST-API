@@ -85,6 +85,7 @@ class Kiwoom:
         self._real_reg_info = None
         # LOGIN 성공 후 실시간 재등록 태스크/REG 실패 재시도 횟수
         self._reregister_task = None
+        self._reregister_pending = None  # 재등록 태스크 실행 중 들어온 예약(지연 초)
         self._reg_retry_count = 0
 
         self._authenticate()
@@ -1059,6 +1060,11 @@ class Kiwoom:
         message = self._build_reg_message(str_code_list, str_opt_type)
 
         if self.is_websocket_connected and self.asyncio_loop:
+            if not self._websocket_logged_in:
+                # LOGIN 진행 중: 등록 정보는 위에서 저장했으므로 LOGIN 성공 응답 처리 시 한 번만 전송됩니다
+                # (여기서도 보내면 같은 REG 가 두 번 전송됨)
+                logger.info(f"LOGIN 완료 전이므로 실시간 등록은 LOGIN 성공 후 전송합니다: {str_code_list}")
+                return
             asyncio.run_coroutine_threadsafe(self._send_websocket_message(message), self.asyncio_loop)
             logger.info(f"Real-time registration sent for codes: {str_code_list}")
         else:
@@ -1396,21 +1402,34 @@ class Kiwoom:
             await self._send_websocket_message(message)
             logger.info(f"Real-time data re-registered for codes: {self._real_reg_info['code_list']}")
 
-    def _schedule_reregister(self, delay=0.0):
-        """실시간 재등록을 이벤트 루프에서 (중복 없이) 예약합니다. LOGIN 성공 응답 처리 시 호출합니다."""
+    def _schedule_reregister(self, delay=0.0, retry=False):
+        """실시간 재등록을 이벤트 루프에서 예약합니다. LOGIN 성공/REG 실패 응답 처리 시 호출합니다.
+
+        이미 재등록 태스크가 실행 중이면 새 태스크를 만들지 않습니다. 다만 REG 실패에 따른 재시도(retry=True)는
+        요청을 보존했다가 실행 중인 태스크가 끝난 뒤 다시 예약합니다 (전송 중 도착한 REG 실패의 재시도 유실 방지).
+        LOGIN 성공 등 일반 예약은 중복이므로 버립니다.
+        """
         if not self._real_reg_info:
             return
         task = self._reregister_task
         if task is not None and not task.done():
+            if retry:
+                self._reregister_pending = delay if self._reregister_pending is None else min(self._reregister_pending, delay)
             return
         self._reregister_task = asyncio.ensure_future(self._reregister_after(delay))
 
     async def _reregister_after(self, delay):
-        if delay:
-            await asyncio.sleep(delay)
-        # 로그인되지 않은 연결에는 REG 를 보내지 않습니다 (다음 LOGIN 성공 시 다시 예약됨)
-        if self.is_websocket_connected and self._websocket_logged_in:
-            await self._reregister_real_data()
+        try:
+            if delay:
+                await asyncio.sleep(delay)
+            # 로그인되지 않은 연결에는 REG 를 보내지 않습니다 (다음 LOGIN 성공 시 다시 예약됨)
+            if self.is_websocket_connected and self._websocket_logged_in:
+                await self._reregister_real_data()
+        finally:
+            pending, self._reregister_pending = self._reregister_pending, None
+            if pending is not None:
+                # 이 태스크가 끝난 다음 루프 반복에서 예약하므로 done() 상태에서 새 태스크가 만들어짐
+                asyncio.get_running_loop().call_soon(self._schedule_reregister, pending, True)
 
     @notify_on_exception(fallback_return=None)
     async def _websocket_connect(self):
@@ -1641,7 +1660,7 @@ class Kiwoom:
                     if self._real_reg_info and self._reg_retry_count < REG_MAX_RETRIES:
                         self._reg_retry_count += 1
                         logger.info(f"실시간 등록 재시도 예약 ({self._reg_retry_count}/{REG_MAX_RETRIES})")
-                        self._schedule_reregister(delay=REG_RETRY_DELAY_SEC)
+                        self._schedule_reregister(delay=REG_RETRY_DELAY_SEC, retry=True)
                     
             elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
