@@ -32,6 +32,9 @@ def make_client(real_reg=True):
     c.websocket = AsyncMock()
     c._reregister_task = None
     c._reregister_pending = None
+    c._reg_sent_key = None
+    c._reg_fail_gen = 0
+    c._websocket_stop_event = threading.Event()
     c._reg_retry_count = 0
     c._real_reg_info = {'code_list': '005930;000660', 'opt_type': '0'} if real_reg else None
     c._send_websocket_message = AsyncMock()
@@ -90,8 +93,10 @@ def test_reg_failure_retries_limited_times(monkeypatch):
     c = make_client()
     c._websocket_logged_in = True
 
+    real_sleep = asyncio.sleep
+
     async def fast_sleep(_):
-        return None
+        await real_sleep(0)       # 지연은 없애되 이벤트 루프에는 양보
 
     monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', fast_sleep)
 
@@ -164,8 +169,10 @@ def test_reg_failure_during_inflight_reregister_is_not_lost(monkeypatch):
     c = make_client()
     c._websocket_logged_in = True
 
+    real_sleep = asyncio.sleep
+
     async def fast_sleep(_):
-        return None
+        await real_sleep(0)       # 지연은 없애되 이벤트 루프에는 양보
 
     monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', fast_sleep)
     gate = asyncio.Event()
@@ -184,7 +191,7 @@ def test_reg_failure_during_inflight_reregister_is_not_lost(monkeypatch):
         await c._handle_websocket_message(REG_FAIL)  # 전송 중 도착한 REG 실패
         assert c._reg_retry_count == 1
         gate.set()
-        for _ in range(10):                          # 보존된 재시도가 새 태스크로 실행되도록 양보
+        for _ in range(20):                          # 보존된 재시도가 새 태스크로 실행되도록 양보
             await asyncio.sleep(0)
         t = c._reregister_task
         if t is not None:
@@ -194,43 +201,150 @@ def test_reg_failure_during_inflight_reregister_is_not_lost(monkeypatch):
     assert len(sends) == 2                           # 첫 전송 + 보존된 재시도
 
 
-def test_set_real_reg_before_login_defers_to_login_success_without_duplicate_reg():
-    c = make_client(real_reg=False)
-    c._websocket_logged_in = False
-    c.asyncio_loop = MagicMock()
-    sent = []
-    c._send_websocket_message = AsyncMock(side_effect=lambda m: sent.append(m))
-    c.set_real_reg('005930;000660', '0')
-    c.asyncio_loop.call_soon_threadsafe.assert_not_called()
-    assert c._real_reg_info == {'code_list': '005930;000660', 'opt_type': '0'}
-    assert sent == []
-
-    async def scenario():
-        await c._handle_websocket_message(LOGIN_OK)   # LOGIN 성공 → 한 번만 전송
-        await c._reregister_task
-
-    asyncio.run(scenario())
-    assert len(sent) == 1 and sent[0] == Kiwoom._build_reg_message('005930;000660', '0')
+import contextlib
+import time
 
 
-def test_set_real_reg_when_logged_in_sends_immediately():
-    c = make_client(real_reg=False)
-    c._websocket_logged_in = True
+@contextlib.contextmanager
+def loop_thread():
     loop = asyncio.new_event_loop()
     t = threading.Thread(target=loop.run_forever, daemon=True)
     t.start()
     try:
-        c.asyncio_loop = loop
-        done = threading.Event()
-
-        async def send(msg):
-            c._sent = msg
-            done.set()
-
-        c._send_websocket_message = send
-        c.set_real_reg('005930', '0')
-        assert done.wait(2)
-        assert c._sent == Kiwoom._build_reg_message('005930', '0')
+        yield loop
     finally:
         loop.call_soon_threadsafe(loop.stop)
         t.join(2)
+        loop.close()
+
+
+def run_in_loop(loop, coro):
+    return asyncio.run_coroutine_threadsafe(coro, loop).result(2)
+
+
+def wait_until(cond, timeout=2.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return cond()
+
+
+def settle(loop):
+    """루프에 예약된 콜백/태스크가 모두 소화될 때까지 잠시 양보."""
+    async def _spin():
+        for _ in range(20):
+            await asyncio.sleep(0)
+    run_in_loop(loop, _spin())
+
+
+def test_set_real_reg_before_login_defers_to_login_success_without_duplicate_reg():
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = False
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    c._send_websocket_message = send
+    with loop_thread() as loop:
+        c.asyncio_loop = loop
+        c.set_real_reg('005930;000660', '0')
+        settle(loop)
+        assert c._real_reg_info == {'code_list': '005930;000660', 'opt_type': '0'}
+        assert sent == []                                   # 로그인 전에는 전송하지 않음
+        run_in_loop(loop, c._handle_websocket_message(LOGIN_OK))   # LOGIN 성공 → 한 번만 전송
+        assert wait_until(lambda: len(sent) == 1)
+        settle(loop)
+    assert sent == [Kiwoom._build_reg_message('005930;000660', '0')]
+
+
+def test_set_real_reg_when_logged_in_sends_once():
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    c._send_websocket_message = send
+    with loop_thread() as loop:
+        c.asyncio_loop = loop
+        c.set_real_reg('005930', '0')
+        assert wait_until(lambda: len(sent) == 1)
+        settle(loop)
+    assert sent == [Kiwoom._build_reg_message('005930', '0')]
+
+
+def test_race_login_success_then_set_real_reg_sends_once():
+    """LOGIN 성공 처리와 set_real_reg 가 어느 순서로 겹쳐도 같은 REG 는 한 번만 전송된다."""
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = False
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    c._send_websocket_message = send
+    with loop_thread() as loop:
+        c.asyncio_loop = loop
+        # 등록 정보가 저장된 직후(호출 스레드가 멈춘 상태)에 LOGIN 성공이 먼저 처리되는 순서를 재현
+        c._real_reg_info = {'code_list': '005930', 'opt_type': '0'}
+        run_in_loop(loop, c._handle_websocket_message(LOGIN_OK))
+        assert wait_until(lambda: len(sent) == 1)
+        settle(loop)
+        # 이어서 set_real_reg 의 스케줄링 단계가 실행됨 (이미 로그인됨, 같은 정보)
+        c.asyncio_loop.call_soon_threadsafe(c._schedule_reregister)
+        settle(loop)
+    assert len(sent) == 1
+
+
+def test_changed_registration_is_sent_again_after_same_session():
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+
+    c._send_websocket_message = send
+    with loop_thread() as loop:
+        c.asyncio_loop = loop
+        c.set_real_reg('005930', '0')
+        assert wait_until(lambda: len(sent) == 1)
+        settle(loop)
+        c.set_real_reg('005930;000660', '0')                # 구독 목록이 바뀌면 다시 전송
+        assert wait_until(lambda: len(sent) == 2)
+    assert sent[1] == Kiwoom._build_reg_message('005930;000660', '0')
+
+
+def test_cancelled_reregister_does_not_spawn_followup_task():
+    c = make_client()
+    c._websocket_logged_in = True
+    gate_started = asyncio.Event
+
+    async def scenario():
+        started = asyncio.Event()
+
+        async def hang(_):
+            started.set()
+            await asyncio.sleep(3600)
+
+        c._send_websocket_message = hang
+        c._schedule_reregister()
+        task = c._reregister_task
+        await started.wait()
+        c._schedule_reregister(delay=0, retry=True)          # 실행 중 retry 요청이 pending 으로 보존됨
+        assert c._reregister_pending == 0
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert c._reregister_pending is None
+        assert c._reregister_task is task                    # 새 태스크가 만들어지지 않음
+
+    asyncio.run(scenario())
