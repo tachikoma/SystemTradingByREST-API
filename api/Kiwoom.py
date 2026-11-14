@@ -23,6 +23,10 @@ RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
 TOKEN_REAUTH_MIN_INTERVAL_SEC = 30
 AUTH_ALERT_MIN_INTERVAL_SEC = 3600
 
+# 실시간 등록(REG) 실패 시 재시도 최대 횟수/간격(초)
+REG_MAX_RETRIES = 3
+REG_RETRY_DELAY_SEC = 2
+
 # 참고: 로깅 설정은 애플리케이션(`main.py`)에서 환경변수 로드 후 초기화해야 합니다.
 # 모듈 임포트 시점에 `configure_logging()`을 호출하면 초기화 순서가 불명확해질 수 있으므로 지양합니다.
 logger = get_logger('kiwoom')
@@ -79,6 +83,9 @@ class Kiwoom:
         
         # 실시간 데이터 등록 정보 저장 (재연결 시 사용)
         self._real_reg_info = None
+        # LOGIN 성공 후 실시간 재등록 태스크/REG 실패 재시도 횟수
+        self._reregister_task = None
+        self._reg_retry_count = 0
 
         self._authenticate()
         self._start_websocket_thread()
@@ -1016,6 +1023,23 @@ class Kiwoom:
 
         return results
 
+    @staticmethod
+    def _build_reg_message(str_code_list, str_opt_type):
+        """실시간 등록(REG) 메시지를 만듭니다. 최초 등록과 재연결 후 재등록이 같은 구독 집합을 쓰도록 공유합니다.
+
+        '0B': 주식체결(시세), '00': 주문체결(계좌 전체, 종목코드 불필요)
+        """
+        codes = str_code_list.split(';')
+        return {
+            'trnm': 'REG',
+            'grp_no': '1',  # 기본 그룹 번호 사용
+            'refresh': str_opt_type,  # '0': 기존 해지 후 추가, '1': 기존 유지 후 추가
+            'data': [
+                {'item': codes, 'type': ['0B']},
+                {'item': [], 'type': ['00']},
+            ],
+        }
+
     def set_real_reg(self, str_code_list, str_opt_type='0'):
         """
         WebSocket을 통해 실시간 데이터 구독을 등록합니다.
@@ -1032,28 +1056,8 @@ class Kiwoom:
             'opt_type': str_opt_type
         }
         
-        # REST API에서는 종목 코드와 타입으로 구독합니다
-        # '0B': 주식체결 (시세 정보)
-        # '00': 주문체결 (주문/체결 정보)
-        
-        subscription_data = [
-            {
-                'item': codes,
-                'type': ['0B']  # 주식 실시간 체결 데이터
-            },
-            {
-                'item': [],  # 주문체결은 종목코드 불필요 (계좌 전체)
-                'type': ['00']  # 주문체결 실시간 데이터
-            }
-        ]
+        message = self._build_reg_message(str_code_list, str_opt_type)
 
-        message = {
-            'trnm': 'REG',
-            'grp_no': '1',  # 기본 그룹 번호 사용
-            'refresh': str_opt_type, # '0' or '1'
-            'data': subscription_data
-        }
-        
         if self.is_websocket_connected and self.asyncio_loop:
             asyncio.run_coroutine_threadsafe(self._send_websocket_message(message), self.asyncio_loop)
             logger.info(f"Real-time registration sent for codes: {str_code_list}")
@@ -1339,8 +1343,8 @@ class Kiwoom:
                         except Exception as e:
                             logger.exception(f"Failed to send LOGIN directly: {e}")
 
-                        # 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다
-                        await self._reregister_real_data()
+                        # 실시간 데이터 재등록은 LOGIN 성공 응답을 받은 뒤(_handle_websocket_message)에 수행합니다.
+                        # LOGIN 응답 전에 REG 를 보내면 거부될 수 있고, 전송을 기다리는 동안 LOGIN 응답 처리도 지연됩니다.
 
                         while self.is_websocket_connected and not self._websocket_stop_event.is_set():
                             try:
@@ -1385,26 +1389,28 @@ class Kiwoom:
 
     @notify_on_exception(fallback_return=None)
     async def _reregister_real_data(self):
-        """WebSocket 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다."""
+        """LOGIN 성공 후 이전에 등록했던 실시간 데이터(시세 '0B' + 주문체결 '00')를 재등록합니다."""
         if self._real_reg_info:
-            logger.info("Re-registering real-time data after reconnection...")
-            await asyncio.sleep(0.5)  # LOGIN 완료 대기
-            
-            codes = self._real_reg_info['code_list'].split(';')
-            subscription_data = [{
-                'item': codes,
-                'type': ['0B']
-            }]
-            
-            message = {
-                'trnm': 'REG',
-                'grp_no': '1',
-                'refresh': self._real_reg_info['opt_type'],
-                'data': subscription_data
-            }
-            
+            logger.info("Re-registering real-time data after login...")
+            message = self._build_reg_message(self._real_reg_info['code_list'], self._real_reg_info['opt_type'])
             await self._send_websocket_message(message)
             logger.info(f"Real-time data re-registered for codes: {self._real_reg_info['code_list']}")
+
+    def _schedule_reregister(self, delay=0.0):
+        """실시간 재등록을 이벤트 루프에서 (중복 없이) 예약합니다. LOGIN 성공 응답 처리 시 호출합니다."""
+        if not self._real_reg_info:
+            return
+        task = self._reregister_task
+        if task is not None and not task.done():
+            return
+        self._reregister_task = asyncio.ensure_future(self._reregister_after(delay))
+
+    async def _reregister_after(self, delay):
+        if delay:
+            await asyncio.sleep(delay)
+        # 로그인되지 않은 연결에는 REG 를 보내지 않습니다 (다음 LOGIN 성공 시 다시 예약됨)
+        if self.is_websocket_connected and self._websocket_logged_in:
+            await self._reregister_real_data()
 
     @notify_on_exception(fallback_return=None)
     async def _websocket_connect(self):
@@ -1587,6 +1593,9 @@ class Kiwoom:
                     # mark login success
                     self._websocket_logged_in = True
                     self._websocket_login_sent = True
+                    # LOGIN 이 성공한 뒤에야 이전 실시간 구독을 복구합니다
+                    self._reg_retry_count = 0
+                    self._schedule_reregister()
                 else:
                     msg = str(data.get('return_msg', ''))
                     logger.warning(f"WebSocket login failed: {msg}")
@@ -1625,8 +1634,14 @@ class Kiwoom:
             elif trnm == 'REG':
                 if data.get('return_code') == 0:
                     logger.info(f"Real-time registration successful.")
+                    self._reg_retry_count = 0
                 else:
                     logger.warning(f"Real-time registration failed: {data}")
+                    # 구독 실패 시 시세가 끊기므로 제한적으로 재등록을 시도합니다 (재연결·LOGIN 성공 시에도 다시 예약됨)
+                    if self._real_reg_info and self._reg_retry_count < REG_MAX_RETRIES:
+                        self._reg_retry_count += 1
+                        logger.info(f"실시간 등록 재시도 예약 ({self._reg_retry_count}/{REG_MAX_RETRIES})")
+                        self._schedule_reregister(delay=REG_RETRY_DELAY_SEC)
                     
             elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
