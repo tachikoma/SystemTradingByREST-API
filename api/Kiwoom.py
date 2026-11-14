@@ -19,6 +19,10 @@ from util.db_helper import upsert_purchase_date, delete_purchase_date, get_purch
 # Kiwoom API 응답에서 사용되는 요청 한도 초과 메시지 키워드
 RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
 
+# 서버 측 토큰 무효화(8005) 시 강제 재인증 최소 간격(초), 인증 문제 텔레그램 알림 최소 간격(초)
+TOKEN_REAUTH_MIN_INTERVAL_SEC = 30
+AUTH_ALERT_MIN_INTERVAL_SEC = 3600
+
 # 참고: 로깅 설정은 애플리케이션(`main.py`)에서 환경변수 로드 후 초기화해야 합니다.
 # 모듈 임포트 시점에 `configure_logging()`을 호출하면 초기화 순서가 불명확해질 수 있으므로 지양합니다.
 logger = get_logger('kiwoom')
@@ -38,6 +42,13 @@ class Kiwoom:
         self.secretkey = secretkey
         self.access_token = None
         self.token_expires_in = None
+        # 서버 측 토큰 무효화(8005) 대응용: 재인증 직렬화, 최소 간격, 알림 쓰로틀
+        self._auth_lock = threading.Lock()
+        self._last_auth_attempt_ts = float('-inf')
+        self._last_auth_ok = True
+        # 마지막으로 WebSocket LOGIN 에 사용한 토큰(8005 응답이 어느 토큰에 대한 것인지 추적)
+        self._last_login_token = None
+        self._last_auth_alert_ts = float('-inf')
 
         # HTTP 세션과 재시도 정책 설정
         self.session = requests.Session()
@@ -54,6 +65,10 @@ class Kiwoom:
 
         self.order = {}
         self.balance = {}
+        # 마지막 잔고/미체결 조회가 완전히 성공했는지 (실패 시 기존 상태를 보존하고 False)
+        self.balance_sync_ok = True
+        self.order_sync_ok = True
+        self._last_no_token_log_ts = float('-inf')
         self.universe_realtime_transaction_info = {}
 
         self.websocket = None
@@ -103,6 +118,10 @@ class Kiwoom:
         if response_data:
             if return_code := response_data.get("return_code") != 0:
                 logger.warning(response_data.get("return_msg"))
+            if not response_data.get("token"):
+                logger.error(f"Authentication response has no token: {response_data.get('return_msg')}")
+                self.access_token = None
+                return
             self.access_token = response_data["token"]
                 # `token_expires_in`을 한국 시간대(tz-aware)로 설정하여 `get_korea_time()`과 일치시킵니다
             try:
@@ -115,18 +134,99 @@ class Kiwoom:
             # handled in exception branch or above
             self.access_token = None
 
-    def _request(self, path, api_id, params, method="POST", extra_headers=None):
+    @staticmethod
+    def _is_token_invalid_response(res_data):
+        """응답이 '토큰 무효' 인증 오류(8005: Token이 유효하지 않습니다)인지 판별합니다.
+
+        return_code가 3이고 메시지에 8005 코드(또는 해당 문구)가 있을 때만 True 입니다.
+        IP 불일치(8010), 투자구분 불일치(8030/8031), 단말기 인증(8040/8050/8103) 등
+        재발급으로 해결되지 않는 오류와 rate limit 등은 재인증 대상이 아닙니다.
+        """
+        if not isinstance(res_data, dict):
+            return False
+        if res_data.get('return_code') != 3:
+            return False
+        return Kiwoom._is_token_invalid_message(res_data.get('return_msg', ''))
+
+    @staticmethod
+    def _is_token_invalid_message(msg):
+        """메시지 문자열이 8005(Token이 유효하지 않습니다)를 가리키는지 판별합니다 (REST/WebSocket 공용)."""
+        msg = str(msg or '')
+        return '8005' in msg or 'Token이 유효하지 않습니다' in msg
+
+    def _refresh_token(self, stale_token=None, force=False):
+        """모든 토큰 갱신의 단일 진입점(스레드 안전). 사용 가능한 토큰이 준비되면 True.
+
+        - 락 획득 후 갱신 필요성을 다시 검사하므로, 다른 스레드가 이미 갱신했다면 재발급하지 않습니다.
+        - force=True: 서버가 토큰을 무효화한 경우(8005). `stale_token`은 실패한 요청이 사용한 토큰이며,
+          그 사이 토큰이 바뀌었다면 이미 갱신된 것으로 보고 True를 반환합니다.
+        - 직전 인증 시도로부터 TOKEN_REAUTH_MIN_INTERVAL_SEC 이내이면 인증 엔드포인트를 호출하지 않습니다
+          (인증 실패가 반복돼도 요청마다 인증을 두드리지 않도록 함). 이때 force 요청은 False를 반환합니다.
+        - 인증 중 예외가 나도 호출자에게 전파하지 않고 access_token=None 으로 둡니다.
+        """
+        with self._auth_lock:
+            if force:
+                if stale_token is not None and self.access_token and self.access_token != stale_token:
+                    return True  # 다른 스레드가 이미 갱신함
+            else:
+                if (self.access_token and self.token_expires_in is not None
+                        and self.token_expires_in >= get_korea_time() + datetime.timedelta(seconds=5)):
+                    return True  # 유효함(다른 스레드가 이미 갱신했거나 갱신 불필요)
+            now = time.monotonic()
+            if now - self._last_auth_attempt_ts < TOKEN_REAUTH_MIN_INTERVAL_SEC:
+                # force: 방금 발급받은 토큰이 또 무효라면 인증 엔드포인트를 두드리지 않음
+                # 일반 갱신: 직전 인증이 실패했다면 반복 호출을 억제 (정상 만료 갱신은 막지 않음)
+                if force or not self._last_auth_ok:
+                    return False
+            self._last_auth_attempt_ts = now
+            if force:
+                logger.warning("토큰이 서버에서 무효화되어 재인증합니다.")
+            try:
+                self._authenticate()
+            except Exception as e:
+                logger.error(f"토큰 인증 중 예외: {e}")
+                self.access_token = None
+            ok = bool(self.access_token)
+            self._last_auth_ok = ok
+        if not ok:
+            self._alert_auth_problem("키움 토큰 인증 실패: 재시도 대기 중")
+        return ok
+
+    def _alert_auth_problem(self, message):
+        """인증 문제를 텔레그램으로 알립니다(AUTH_ALERT_MIN_INTERVAL_SEC 쓰로틀, 실패해도 무시)."""
+        now = time.monotonic()
+        if now - self._last_auth_alert_ts < AUTH_ALERT_MIN_INTERVAL_SEC:
+            return
+        self._last_auth_alert_ts = now
+        try:
+            from util.notifier import send_telegram_message
+            send_telegram_message(f"⚠️ {message}")
+        except Exception as e:
+            logger.warning(f"인증 알림 전송 실패: {e}")
+
+    def _request(self, path, api_id, params, method="POST", extra_headers=None, _auth_retry=True):
         """
         API 요청을 수행하는 래퍼입니다.
-        """
-        # TODO: 토큰 갱신 로직 추가
-        # 한국 시간 헬퍼(`get_korea_time()`)를 일관되게 사용
-        if self.token_expires_in is None or self.token_expires_in < get_korea_time():
-            self._authenticate()
 
+        토큰은 만료 시각이 지나면 갱신합니다. 또한 서버가 토큰을 먼저 무효화해
+        8005(Token이 유효하지 않습니다)를 반환하면 재인증 후 1회만 재시도합니다.
+        """
+        # 한국 시간 헬퍼(`get_korea_time()`)를 일관되게 사용
+        if (self.token_expires_in is None or self.token_expires_in < get_korea_time()
+                or not self.access_token):
+            self._refresh_token()
+
+        used_token = self.access_token
+        if not used_token:
+            # 인증 불가: 'Bearer None' 으로 요청을 보내지 않고 즉시 실패 처리 (통신 예외와 동일한 반환값)
+            now = time.monotonic()
+            if now - self._last_no_token_log_ts >= TOKEN_REAUTH_MIN_INTERVAL_SEC:
+                self._last_no_token_log_ts = now
+                logger.error(f"유효한 토큰이 없어 요청을 보내지 않습니다: {path} ({api_id})")
+            return None, {}
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {used_token}",
             "api-id": api_id
         }
 
@@ -143,19 +243,28 @@ class Kiwoom:
             if res.status_code == 200:
                 # 정상 응답
                 try:
-                    return res.json(), res.headers
+                    res_json = res.json()
                 except Exception:
                     logger.error(f"Failed to parse JSON response from {url}")
                     return None, res.headers
             else:
                 logger.error(f"Request failed: {res.text}, {res.headers}")
                 try:
-                    return res.json(), res.headers
+                    res_json = res.json()
                 except Exception:
                     return None, res.headers
         except requests.exceptions.RequestException as e:
             logger.error(f"HTTP request exception for {url}: {e}")
             return None, {}
+
+        # 서버 측 토큰 무효화(8005): 재인증 후 1회 재시도 (무한 루프 방지)
+        if self._is_token_invalid_response(res_json):
+            if _auth_retry and self._refresh_token(used_token, force=True):
+                return self._request(path, api_id, params, method=method,
+                                     extra_headers=extra_headers, _auth_retry=False)
+            if not _auth_retry:
+                self._alert_auth_problem("키움 토큰 재인증 후에도 인증 오류(8005)가 지속됩니다")
+        return res_json, res.headers
 
 
 
@@ -587,8 +696,8 @@ class Kiwoom:
         api_id = "ka10075"
         
         all_unexecuted_orders = []
+        sync_ok = True
         next_key = ""
-        first = True
         loop_count = 0
         while True:
             params = {
@@ -627,6 +736,7 @@ class Kiwoom:
 
             if not page_res or not isinstance(page_res, dict) or "oso" not in page_res:
                 logger.warning(f"Stopping retrieval of unexecuted orders due to page request failure.")
+                sync_ok = False
                 break
 
             for item in page_res["oso"]:
@@ -651,17 +761,25 @@ class Kiwoom:
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
-            if not first and cont_yn != "Y":
+            # 첫 페이지부터 연속 조회 종료 조건을 적용합니다 (마지막 페이지 뒤에 불필요한 추가 요청을 하지 않음)
+            if cont_yn != "Y":
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                logger.info(f"Loop limit ({max_loops}) reached for get_order, breaking")
+                # 다음 페이지가 남아 있는데 상한에 도달: 불완전한 조회이므로 성공으로 취급하지 않음
+                logger.warning(f"Loop limit ({max_loops}) reached for get_order with remaining pages; treating as incomplete")
+                sync_ok = False
                 break
-            first = False
             
             # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             if cont_yn == "Y":
                 time.sleep(0.2)
+        if not sync_ok:
+            # 조회 실패/부분 조회: 빈(또는 일부) 결과로 덮어쓰면 미체결 주문을 놓쳐 중복 주문 위험이 있으므로 기존 상태 유지
+            self.order_sync_ok = False
+            logger.warning(f"미체결 주문 조회 실패: 기존 미체결 주문 {len(self.order)}건을 유지합니다.")
+            return list(self.order.values())
+        self.order_sync_ok = True
         self.order = {order['종목코드']: order for order in all_unexecuted_orders}
         return all_unexecuted_orders
 
@@ -673,8 +791,8 @@ class Kiwoom:
         api_id = "kt00018"
         
         all_holdings = []
+        sync_ok = True
         next_key = ""
-        first = True
         loop_count = 0
         while True:
             params = {
@@ -711,6 +829,7 @@ class Kiwoom:
 
             if not page_res or not isinstance(page_res, dict) or "acnt_evlt_remn_indv_tot" not in page_res:
                 logger.warning(f"Stopping retrieval of balance due to page request failure.")
+                sync_ok = False
                 break
 
             for item in page_res["acnt_evlt_remn_indv_tot"]:
@@ -729,17 +848,25 @@ class Kiwoom:
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
-            if not first and cont_yn != "Y":
+            # 첫 페이지부터 연속 조회 종료 조건을 적용합니다 (마지막 페이지 뒤에 불필요한 추가 요청을 하지 않음)
+            if cont_yn != "Y":
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                logger.info(f"Loop limit ({max_loops}) reached for get_balance, breaking")
+                # 다음 페이지가 남아 있는데 상한에 도달: 불완전한 조회이므로 성공으로 취급하지 않음
+                logger.warning(f"Loop limit ({max_loops}) reached for get_balance with remaining pages; treating as incomplete")
+                sync_ok = False
                 break
-            first = False
             
             # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             if cont_yn == "Y":
                 time.sleep(0.2)
+        if not sync_ok:
+            # 조회 실패/부분 조회: 빈(또는 일부) 결과로 덮어쓰면 실제 보유종목이 없는 것으로 오인하므로 기존 상태 유지
+            self.balance_sync_ok = False
+            logger.warning(f"잔고 조회 실패: 기존 보유종목 {len(self.balance)}개를 유지합니다.")
+            return self.balance
+        self.balance_sync_ok = True
         # 기존 balance에서 매수일 정보 보존 (API 조회로 초기화되지 않도록)
         # 종목코드 포맷 불일치(A 접두사 등)를 방지하기 위해 키를 정규화(lstrip 'A')하여 보존한다.
         existing_dates = {code.lstrip('A'): info.get('매수일') for code, info in self.balance.items()}
@@ -1178,26 +1305,35 @@ class Kiwoom:
                     async with websockets.connect(self.socket_url) as websocket:
                         self.websocket = websocket
                         self.is_websocket_connected = True
+                        # 새 연결마다 LOGIN 재시도 예산을 초기화합니다 (이전 연결에서 소진돼도 복구 가능하도록)
+                        self._websocket_login_retries = 0
                         logger.info("WebSocket connected.")
                         # Ensure token is valid before attempting LOGIN
+                        refreshed = False
                         try:
-                            await self._ensure_valid_token_async()
+                            refreshed = await self._ensure_valid_token_async()
                         except Exception as e:
                             logger.warning(f"Token refresh before websocket login failed: {e}")
+                        if not refreshed:
+                            # 유효한 토큰이 없으면 null/만료 토큰으로 LOGIN 하지 않고 재연결 루프에서 다시 시도
+                            logger.warning("유효한 토큰이 없어 WebSocket LOGIN을 보류하고 재연결합니다.")
+                            await self._drop_connection_for_reconnect()
+                            await asyncio.sleep(2)
+                            continue
                         # 다른 경로에서 `_send_websocket_message`를 호출하며 경쟁 상태가 발생하지 않도록
                         # 메인 루프의 연결 경로에서 직접 LOGIN을 전송합니다.
                         try:
                             if self._login_send_lock is not None:
                                 async with self._login_send_lock:
                                     if not self._websocket_login_sent:
-                                        await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                        await self.websocket.send(self._login_payload())
                                         self._websocket_login_sent = True
                                             # LOGIN 응답이 `_handle_websocket_message`에서 도착하면 logged_in이 설정됩니다
                                         self._websocket_logged_in = False
                             else:
                                 # fallback: send without lock
                                 if not self._websocket_login_sent:
-                                    await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                    await self.websocket.send(self._login_payload())
                                     self._websocket_login_sent = True
                                     self._websocket_logged_in = False
                         except Exception as e:
@@ -1274,12 +1410,18 @@ class Kiwoom:
     async def _websocket_connect(self):
         try:
             # 연결하기 전에 토큰이 유효한지 확인합니다
+            refreshed = False
             try:
-                await self._ensure_valid_token_async()
+                refreshed = await self._ensure_valid_token_async()
             except Exception as e:
                 logger.warning(f"Token refresh before single websocket connect failed: {e}")
+            if not refreshed:
+                logger.warning("유효한 토큰이 없어 WebSocket 연결을 보류합니다.")
+                self.is_websocket_connected = False
+                return
             self.websocket = await websockets.connect(self.socket_url)
             self.is_websocket_connected = True
+            self._websocket_login_retries = 0
             # Reset login flags - LOGIN must be performed after connect
             self._websocket_logged_in = False
             self._websocket_login_sent = False
@@ -1290,19 +1432,20 @@ class Kiwoom:
             self.websocket = None
 
     @notify_on_exception(fallback_return=None)
-    async def _ensure_valid_token_async(self):
-        """`self.access_token`이 유효한지 확인합니다. 만료되었으면 블로킹 되는 `_authenticate`를
-        쓰레드풀에서 실행하여 토큰을 갱신합니다.
+    async def _ensure_valid_token_async(self, force=False, stale_token=None):
+        """`self.access_token`이 유효한지 확인하고, 필요하면 쓰레드풀에서 갱신합니다.
 
-        이렇게 하면 동기 `_authenticate`가 asyncio 이벤트 루프를 차단하지 않도록 합니다.
+        블로킹 `_refresh_token`을 executor에서 실행해 asyncio 이벤트 루프를 차단하지 않습니다.
+        force=True 는 서버가 토큰을 무효화한 경우(8005)로, 만료 시각과 무관하게 재인증합니다.
+        반환값: 사용 가능한 토큰이 준비되었으면 True (인증 실패/쓰로틀 시 False).
         """
-        # 토큰이 없거나 짧은 시간 내에 만료될 예정이면 갱신합니다.
         try:
-            if self.token_expires_in is None or self.token_expires_in < (get_korea_time() + datetime.timedelta(seconds=5)):
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, self._authenticate)
+            stale = stale_token if stale_token is not None else self.access_token
+            loop = asyncio.get_running_loop()
+            return bool(await loop.run_in_executor(None, self._refresh_token, stale, force))
         except Exception as e:
             logger.exception(f"Token refresh failed in _ensure_valid_token_async: {e}")
+            return False
 
     def stop_websocket(self):
         """WebSocket 스레드와 이벤트 루프를 안전하게 중지합니다."""
@@ -1399,11 +1542,11 @@ class Kiwoom:
                             if self._login_send_lock is not None:
                                 async with self._login_send_lock:
                                     if not self._websocket_login_sent:
-                                        await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                        await self.websocket.send(self._login_payload())
                                         self._websocket_login_sent = True
                             else:
                                 if not self._websocket_login_sent:
-                                    await self.websocket.send(json.dumps({'trnm': 'LOGIN', 'token': self.access_token}))
+                                    await self.websocket.send(self._login_payload())
                                     self._websocket_login_sent = True
                             # 로그인 확인을 위해 최대 약 1초(0.1s * 10회) 까지 대기합니다
                             for _ in range(10):
@@ -1413,6 +1556,9 @@ class Kiwoom:
                         except Exception as e:
                             logger.warning(f"사전 LOGIN 전송 실패: {e}")
 
+                    if trnm == 'LOGIN':
+                        # 재연결 중 토큰이 갱신됐을 수 있으므로 전송 시점의 최신 토큰으로 다시 만듭니다
+                        message = self._login_payload()
                     await self.websocket.send(message)
                     send_attempted = True
                     break
@@ -1446,21 +1592,31 @@ class Kiwoom:
                     logger.warning(f"WebSocket login failed: {msg}")
                     # detect token-related failures and try re-authenticate + relogin
                     lower = msg.lower()
-                    token_issue = (
+                    # 8005(서버 측 무효화)만 강제 재인증하고, 그 외 토큰 관련 메시지는 기존처럼 만료 시에만 갱신
+                    server_invalidated = self._is_token_invalid_message(msg)
+                    token_issue = server_invalidated or (
                         '토큰' in msg or '만료' in msg or '인증' in msg or 'expired' in lower or 'invalid token' in lower
                     )
                     if token_issue and self._websocket_login_retries < self._websocket_max_login_retries:
-                        self._websocket_login_retries += 1
-                        logger.info(f"Attempting to refresh token and re-login (attempt {self._websocket_login_retries})...")
                         try:
-                            await self._ensure_valid_token_async()
-                            await asyncio.sleep(0.2)
-                            await self._send_websocket_message({'trnm': 'LOGIN', 'token': self.access_token})
+                            # 토큰이 서버에서 무효화됐을 수 있으므로 만료 시각과 무관하게 재인증
+                            refreshed = await self._ensure_valid_token_async(
+                                force=server_invalidated, stale_token=self._last_login_token)
+                            if refreshed:
+                                # 실제로 새 토큰을 받은 시도만 재시도 횟수에 포함
+                                self._websocket_login_retries += 1
+                                logger.info(f"Attempting to re-login with refreshed token (attempt {self._websocket_login_retries})...")
+                                await asyncio.sleep(0.2)
+                                await self._send_websocket_message({'trnm': 'LOGIN', 'token': self.access_token})
+                            else:
+                                # 인증 실패/쓰로틀: null 토큰으로 LOGIN 하지 않고 끊어 재연결 루프에서 다시 시도
+                                logger.warning("토큰 재발급 불가(인증 실패 또는 쓰로틀): 연결을 종료하고 재연결 시 재시도합니다.")
+                                await self._drop_connection_for_reconnect()
                         except Exception as e:
                             logger.exception(f"Re-login attempt failed: {e}")
                     else:
-                        # unrecoverable: disconnect
-                        await self.disconnect()
+                        # unrecoverable: 연결을 끊고 재연결 루프에 맡김
+                        await self._drop_connection_for_reconnect()
                     
             elif trnm == 'PING':
                 # PING 메시지에 대한 PONG 응답
@@ -1502,6 +1658,28 @@ class Kiwoom:
             logger.warning(f"Failed to decode WebSocket message: {message}")
         except Exception as e:
             logger.exception(f"Error handling WebSocket message: {e}")
+
+    def _login_payload(self):
+        """LOGIN 메시지를 현재 토큰으로 만들고, 사용한 토큰을 기록합니다."""
+        token = self.access_token  # 기록과 전송에 같은 값을 쓰기 위해 한 번만 읽습니다
+        self._last_login_token = token
+        return json.dumps({'trnm': 'LOGIN', 'token': token})
+
+    async def _drop_connection_for_reconnect(self):
+        """WebSocket 스레드 안에서 연결만 끊고 로그인 상태를 초기화해 재연결 루프가 다시 LOGIN 하도록 합니다.
+
+        동기 `disconnect()`는 스레드 `join()`을 하므로 WebSocket 스레드 자신에서 호출하면
+        RuntimeError(cannot join current thread)로 로그인 플래그 초기화가 누락됩니다.
+        """
+        self.is_websocket_connected = False
+        self._websocket_logged_in = False
+        self._websocket_login_sent = False
+        ws = getattr(self, 'websocket', None)
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception as e:
+                logger.debug(f"Error closing websocket for reconnect: {e}")
 
     def disconnect(self):
         """WebSocket 연결을 종료합니다."""
