@@ -20,10 +20,10 @@ OK = {'return_code': 0, 'return_msg': '정상', 'data': 1}
 
 
 class Resp:
-    def __init__(self, body, status=200):
+    def __init__(self, body, status=200, headers=None):
         self._body = body
         self.status_code = status
-        self.headers = {}
+        self.headers = headers or {}
         self.text = str(body)
 
     def json(self):
@@ -41,6 +41,11 @@ def make_client(tokens):
     c._last_auth_alert_ts = float('-inf')
     c._last_auth_ok = True
     c._last_login_token = None
+    c._last_no_token_log_ts = float('-inf')
+    c.balance = {}
+    c.order = {}
+    c.balance_sync_ok = True
+    c.order_sync_ok = True
     c.session = MagicMock()
     issued = list(tokens)
     calls = {'auth': 0}
@@ -464,3 +469,104 @@ def test_request_authorization_uses_the_token_it_recorded():
     c._request('/p', 'ka1', {})
     # 사전 검사에서 1회, used_token 에서 1회 읽음 → 요청 헤더는 used_token(=두 번째 읽기) 과 일치해야 함
     assert c.session.post.call_args.kwargs['headers']['Authorization'] == 'Bearer new'
+
+
+def test_request_without_token_fails_fast_and_never_sends_bearer_none():
+    c, calls = make_client([])      # 인증은 항상 실패
+    c.access_token = None
+    res, headers = c._request('/p', 'ka1', {})
+    assert res is None and headers == {}
+    c.session.post.assert_not_called()
+    c.session.get.assert_not_called()
+
+
+# ---- 잔고/미체결: 조회 실패 시 기존 상태 보존 ----
+
+BAL_KEY = 'acnt_evlt_remn_indv_tot'
+HOLD = {'stk_cd': 'A005930', 'stk_nm': '삼성전자', 'rmnd_qty': '3', 'pur_pric': '70000',
+        'prft_rt': '1.5', 'cur_prc': '71000', 'pur_amt': '210000', 'trde_able_qty': '3'}
+OSO = {'stk_cd': '005930', 'stk_nm': '삼성전자', 'ord_no': '1', 'ord_stt': '접수', 'ord_qty': '1',
+       'ord_pric': '70000', 'cur_prc': '+71000', 'io_tp_nm': '매수', 'oso_qty': '1', 'cntr_qty': '0',
+       'tm': '090000', 'tdy_trde_cmsn': '0', 'tdy_trde_tax': '0'}
+
+
+@pytest.fixture
+def fast(monkeypatch):
+    monkeypatch.setattr(kiwoom_module.time, 'sleep', lambda *_: None)
+    monkeypatch.setattr(kiwoom_module, 'get_purchase_date', lambda code: None)
+
+
+def test_get_balance_failure_keeps_existing_holdings(fast):
+    c, _ = make_client([])
+    c.balance = {'005930': {'종목명': '삼성전자', '보유수량': 3, '매수일': '20261101'}}
+    c.session.post.side_effect = [Resp(TOKEN_INVALID)] * 10   # 재인증도 실패 → 조회 실패
+    out = c.get_balance()
+    assert c.balance == {'005930': {'종목명': '삼성전자', '보유수량': 3, '매수일': '20261101'}}
+    assert out is c.balance
+    assert c.balance_sync_ok is False
+
+
+def test_get_balance_without_token_keeps_existing_holdings(fast):
+    c, _ = make_client([])
+    c.access_token = None
+    c.balance = {'005930': {'종목명': '삼성전자', '보유수량': 3}}
+    c.get_balance()
+    assert '005930' in c.balance and c.balance_sync_ok is False
+    c.session.post.assert_not_called()
+
+
+def test_get_balance_partial_pages_are_not_treated_as_success(fast):
+    c, _ = make_client([])
+    c.balance = {'000660': {'종목명': 'SK하이닉스', '보유수량': 1}, '005930': {'종목명': '삼성전자', '보유수량': 3}}
+    c.session.post.side_effect = [
+        Resp({'return_code': 0, BAL_KEY: [HOLD]}, headers={'cont-yn': 'Y', 'next-key': 'k'}),
+        Resp({'return_code': 5, 'return_msg': '실패'}),    # 2페이지 실패
+    ]
+    c.get_balance()
+    assert set(c.balance) == {'000660', '005930'}          # 일부 페이지 결과로 교체하지 않음
+    assert c.balance_sync_ok is False
+
+
+def test_get_balance_success_replaces_and_empty_account_is_legitimate(fast):
+    c, _ = make_client([])
+    c.balance = {'000660': {'종목명': 'SK하이닉스', '보유수량': 1, '매수일': '20261101'}}
+    # 기존 구현은 첫 페이지 후 항상 한 번 더 조회하므로 두 번째 응답(빈 페이지)을 함께 준비
+    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: [HOLD]}), Resp({'return_code': 0, BAL_KEY: []})]
+    c.get_balance()
+    assert set(c.balance) == {'005930'} and c.balance_sync_ok is True
+    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: []})] * 2   # 정상 조회 결과가 빈 계좌
+    c.get_balance()
+    assert c.balance == {} and c.balance_sync_ok is True
+
+
+def test_get_order_failure_keeps_existing_orders(fast):
+    c, _ = make_client([])
+    existing = {'005930': {'종목코드': '005930', '주문번호': '9'}}
+    c.order = dict(existing)
+    c.session.post.side_effect = [Resp(TOKEN_INVALID)] * 10
+    out = c.get_order()
+    assert c.order == existing and c.order_sync_ok is False
+    assert out == list(existing.values())
+
+
+def test_get_order_partial_pages_are_not_treated_as_success(fast):
+    c, _ = make_client([])
+    existing = {'000660': {'종목코드': '000660', '주문번호': '8'}}
+    c.order = dict(existing)
+    c.session.post.side_effect = [
+        Resp({'return_code': 0, 'oso': [OSO]}, headers={'cont-yn': 'Y', 'next-key': 'k'}),
+        Resp({'return_code': 5, 'return_msg': '실패'}),
+    ]
+    c.get_order()
+    assert c.order == existing and c.order_sync_ok is False
+
+
+def test_get_order_success_replaces_and_empty_is_legitimate(fast):
+    c, _ = make_client([])
+    c.order = {'000660': {'종목코드': '000660'}}
+    c.session.post.side_effect = [Resp({'return_code': 0, 'oso': [OSO]}), Resp({'return_code': 0, 'oso': []})]
+    c.get_order()
+    assert set(c.order) == {'005930'} and c.order_sync_ok is True
+    c.session.post.side_effect = [Resp({'return_code': 0, 'oso': []})] * 2
+    c.get_order()
+    assert c.order == {} and c.order_sync_ok is True

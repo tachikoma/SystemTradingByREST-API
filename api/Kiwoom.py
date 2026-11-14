@@ -65,6 +65,10 @@ class Kiwoom:
 
         self.order = {}
         self.balance = {}
+        # 마지막 잔고/미체결 조회가 완전히 성공했는지 (실패 시 기존 상태를 보존하고 False)
+        self.balance_sync_ok = True
+        self.order_sync_ok = True
+        self._last_no_token_log_ts = float('-inf')
         self.universe_realtime_transaction_info = {}
 
         self.websocket = None
@@ -213,6 +217,13 @@ class Kiwoom:
             self._refresh_token()
 
         used_token = self.access_token
+        if not used_token:
+            # 인증 불가: 'Bearer None' 으로 요청을 보내지 않고 즉시 실패 처리 (통신 예외와 동일한 반환값)
+            now = time.monotonic()
+            if now - self._last_no_token_log_ts >= TOKEN_REAUTH_MIN_INTERVAL_SEC:
+                self._last_no_token_log_ts = now
+                logger.error(f"유효한 토큰이 없어 요청을 보내지 않습니다: {path} ({api_id})")
+            return None, {}
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {used_token}",
@@ -685,6 +696,7 @@ class Kiwoom:
         api_id = "ka10075"
         
         all_unexecuted_orders = []
+        sync_ok = True
         next_key = ""
         first = True
         loop_count = 0
@@ -725,6 +737,7 @@ class Kiwoom:
 
             if not page_res or not isinstance(page_res, dict) or "oso" not in page_res:
                 logger.warning(f"Stopping retrieval of unexecuted orders due to page request failure.")
+                sync_ok = False
                 break
 
             for item in page_res["oso"]:
@@ -760,6 +773,12 @@ class Kiwoom:
             # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             if cont_yn == "Y":
                 time.sleep(0.2)
+        if not sync_ok:
+            # 조회 실패/부분 조회: 빈(또는 일부) 결과로 덮어쓰면 미체결 주문을 놓쳐 중복 주문 위험이 있으므로 기존 상태 유지
+            self.order_sync_ok = False
+            logger.warning(f"미체결 주문 조회 실패: 기존 미체결 주문 {len(self.order)}건을 유지합니다.")
+            return list(self.order.values())
+        self.order_sync_ok = True
         self.order = {order['종목코드']: order for order in all_unexecuted_orders}
         return all_unexecuted_orders
 
@@ -771,6 +790,7 @@ class Kiwoom:
         api_id = "kt00018"
         
         all_holdings = []
+        sync_ok = True
         next_key = ""
         first = True
         loop_count = 0
@@ -809,6 +829,7 @@ class Kiwoom:
 
             if not page_res or not isinstance(page_res, dict) or "acnt_evlt_remn_indv_tot" not in page_res:
                 logger.warning(f"Stopping retrieval of balance due to page request failure.")
+                sync_ok = False
                 break
 
             for item in page_res["acnt_evlt_remn_indv_tot"]:
@@ -838,6 +859,12 @@ class Kiwoom:
             # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             if cont_yn == "Y":
                 time.sleep(0.2)
+        if not sync_ok:
+            # 조회 실패/부분 조회: 빈(또는 일부) 결과로 덮어쓰면 실제 보유종목이 없는 것으로 오인하므로 기존 상태 유지
+            self.balance_sync_ok = False
+            logger.warning(f"잔고 조회 실패: 기존 보유종목 {len(self.balance)}개를 유지합니다.")
+            return self.balance
+        self.balance_sync_ok = True
         # 기존 balance에서 매수일 정보 보존 (API 조회로 초기화되지 않도록)
         # 종목코드 포맷 불일치(A 접두사 등)를 방지하기 위해 키를 정규화(lstrip 'A')하여 보존한다.
         existing_dates = {code.lstrip('A'): info.get('매수일') for code, info in self.balance.items()}
