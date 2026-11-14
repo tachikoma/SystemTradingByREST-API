@@ -698,7 +698,6 @@ class Kiwoom:
         all_unexecuted_orders = []
         sync_ok = True
         next_key = ""
-        first = True
         loop_count = 0
         while True:
             params = {
@@ -762,13 +761,15 @@ class Kiwoom:
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
-            if not first and cont_yn != "Y":
+            # 첫 페이지부터 연속 조회 종료 조건을 적용합니다 (마지막 페이지 뒤에 불필요한 추가 요청을 하지 않음)
+            if cont_yn != "Y":
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                logger.info(f"Loop limit ({max_loops}) reached for get_order, breaking")
+                # 다음 페이지가 남아 있는데 상한에 도달: 불완전한 조회이므로 성공으로 취급하지 않음
+                logger.warning(f"Loop limit ({max_loops}) reached for get_order with remaining pages; treating as incomplete")
+                sync_ok = False
                 break
-            first = False
             
             # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             if cont_yn == "Y":
@@ -792,7 +793,6 @@ class Kiwoom:
         all_holdings = []
         sync_ok = True
         next_key = ""
-        first = True
         loop_count = 0
         while True:
             params = {
@@ -848,13 +848,15 @@ class Kiwoom:
             if page_headers:
                 cont_yn = page_headers.get("cont-yn", cont_yn)
                 next_key = page_headers.get("next-key", "")
-            if not first and cont_yn != "Y":
+            # 첫 페이지부터 연속 조회 종료 조건을 적용합니다 (마지막 페이지 뒤에 불필요한 추가 요청을 하지 않음)
+            if cont_yn != "Y":
                 break
             loop_count += 1
             if loop_count >= max_loops:
-                logger.info(f"Loop limit ({max_loops}) reached for get_balance, breaking")
+                # 다음 페이지가 남아 있는데 상한에 도달: 불완전한 조회이므로 성공으로 취급하지 않음
+                logger.warning(f"Loop limit ({max_loops}) reached for get_balance with remaining pages; treating as incomplete")
+                sync_ok = False
                 break
-            first = False
             
             # 다음 페이지 조회가 있으므로 레이트 리밋 방지를 위해 대기
             if cont_yn == "Y":
