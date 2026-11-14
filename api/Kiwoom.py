@@ -23,6 +23,11 @@ RATE_LIMIT_MSG = "허용된 요청 개수를 초과하였습니다"
 TOKEN_REAUTH_MIN_INTERVAL_SEC = 30
 AUTH_ALERT_MIN_INTERVAL_SEC = 3600
 
+# 실시간 등록(REG) 실패 시 재시도 최대 횟수/간격(초)
+REG_MAX_RETRIES = 3
+REG_RETRY_DELAY_SEC = 2
+REG_BACKOFF_TICK_SEC = 0.25   # 백오프 대기 중 만료 시각을 다시 확인하는 간격
+
 # 참고: 로깅 설정은 애플리케이션(`main.py`)에서 환경변수 로드 후 초기화해야 합니다.
 # 모듈 임포트 시점에 `configure_logging()`을 호출하면 초기화 순서가 불명확해질 수 있으므로 지양합니다.
 logger = get_logger('kiwoom')
@@ -79,6 +84,15 @@ class Kiwoom:
         
         # 실시간 데이터 등록 정보 저장 (재연결 시 사용)
         self._real_reg_info = None
+        # LOGIN 성공 후 실시간 재등록 태스크/REG 실패 재시도 횟수
+        self._reregister_task = None
+        self._reg_backoff_until = 0.0    # REG 실패 후 재시도를 기다릴 시각(time.monotonic 기준)
+        self._reg_backoff_key = None     # 백오프가 적용되는(실패한) 구독 키
+        self._reg_last_key = None        # 가장 최근에 전송한 구독 키 (실패 응답이 어느 구독에 대한 것인지 추정)
+        self._login_gen = 0              # LOGIN 성공 누적 횟수(로그인 세션 세대)
+        self._reg_sent = None            # (로그인 세대, 구독 정보 키): 이 세션에서 이미 전송한 REG
+        self._reg_fail_gen = 0           # REG 실패 응답 누적 횟수 (전송 중 도착한 실패를 구분하기 위함)
+        self._reg_retry_count = 0
 
         self._authenticate()
         self._start_websocket_thread()
@@ -1016,6 +1030,23 @@ class Kiwoom:
 
         return results
 
+    @staticmethod
+    def _build_reg_message(str_code_list, str_opt_type):
+        """실시간 등록(REG) 메시지를 만듭니다. 최초 등록과 재연결 후 재등록이 같은 구독 집합을 쓰도록 공유합니다.
+
+        '0B': 주식체결(시세), '00': 주문체결(계좌 전체, 종목코드 불필요)
+        """
+        codes = str_code_list.split(';')
+        return {
+            'trnm': 'REG',
+            'grp_no': '1',  # 기본 그룹 번호 사용
+            'refresh': str_opt_type,  # '0': 기존 해지 후 추가, '1': 기존 유지 후 추가
+            'data': [
+                {'item': codes, 'type': ['0B']},
+                {'item': [], 'type': ['00']},
+            ],
+        }
+
     def set_real_reg(self, str_code_list, str_opt_type='0'):
         """
         WebSocket을 통해 실시간 데이터 구독을 등록합니다.
@@ -1032,31 +1063,13 @@ class Kiwoom:
             'opt_type': str_opt_type
         }
         
-        # REST API에서는 종목 코드와 타입으로 구독합니다
-        # '0B': 주식체결 (시세 정보)
-        # '00': 주문체결 (주문/체결 정보)
-        
-        subscription_data = [
-            {
-                'item': codes,
-                'type': ['0B']  # 주식 실시간 체결 데이터
-            },
-            {
-                'item': [],  # 주문체결은 종목코드 불필요 (계좌 전체)
-                'type': ['00']  # 주문체결 실시간 데이터
-            }
-        ]
-
-        message = {
-            'trnm': 'REG',
-            'grp_no': '1',  # 기본 그룹 번호 사용
-            'refresh': str_opt_type, # '0' or '1'
-            'data': subscription_data
-        }
-        
         if self.is_websocket_connected and self.asyncio_loop:
-            asyncio.run_coroutine_threadsafe(self._send_websocket_message(message), self.asyncio_loop)
-            logger.info(f"Real-time registration sent for codes: {str_code_list}")
+            # REG 전송 결정은 이벤트 루프에서 LOGIN 성공 핸들러와 함께 조정합니다.
+            # (호출 스레드에서 직접 보내면 LOGIN 성공 처리와 경합해 같은 REG 가 두 번 전송될 수 있음)
+            # - LOGIN 완료 전: 등록 정보만 저장된 상태로 두고, LOGIN 성공 시 한 번만 전송
+            # - LOGIN 완료 후: 즉시 전송 (이미 같은 정보를 보냈다면 건너뜀)
+            self.asyncio_loop.call_soon_threadsafe(self._schedule_reregister)
+            logger.info(f"Real-time registration scheduled for codes: {str_code_list}")
         else:
             logger.warning("WebSocket is not connected. Cannot register for real-time data.")
 
@@ -1339,8 +1352,8 @@ class Kiwoom:
                         except Exception as e:
                             logger.exception(f"Failed to send LOGIN directly: {e}")
 
-                        # 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다
-                        await self._reregister_real_data()
+                        # 실시간 데이터 재등록은 LOGIN 성공 응답을 받은 뒤(_handle_websocket_message)에 수행합니다.
+                        # LOGIN 응답 전에 REG 를 보내면 거부될 수 있고, 전송을 기다리는 동안 LOGIN 응답 처리도 지연됩니다.
 
                         while self.is_websocket_connected and not self._websocket_stop_event.is_set():
                             try:
@@ -1385,26 +1398,61 @@ class Kiwoom:
 
     @notify_on_exception(fallback_return=None)
     async def _reregister_real_data(self):
-        """WebSocket 재연결 시 이전에 등록했던 실시간 데이터를 재등록합니다."""
+        """LOGIN 성공 후 이전에 등록했던 실시간 데이터(시세 '0B' + 주문체결 '00')를 재등록합니다."""
         if self._real_reg_info:
-            logger.info("Re-registering real-time data after reconnection...")
-            await asyncio.sleep(0.5)  # LOGIN 완료 대기
-            
-            codes = self._real_reg_info['code_list'].split(';')
-            subscription_data = [{
-                'item': codes,
-                'type': ['0B']
-            }]
-            
-            message = {
-                'trnm': 'REG',
-                'grp_no': '1',
-                'refresh': self._real_reg_info['opt_type'],
-                'data': subscription_data
-            }
-            
+            logger.info("Re-registering real-time data after login...")
+            info = dict(self._real_reg_info)
+            message = self._build_reg_message(info['code_list'], info['opt_type'])
             await self._send_websocket_message(message)
-            logger.info(f"Real-time data re-registered for codes: {self._real_reg_info['code_list']}")
+            logger.info(f"Real-time data re-registered for codes: {info['code_list']}")
+
+    def _reg_key(self):
+        info = self._real_reg_info
+        return (info['code_list'], info['opt_type']) if info else None
+
+    def _reg_wanted(self):
+        """지금 REG 를 (다시) 보내야 하는가: 로그인된 연결이고, 이 로그인 세션에서 같은 구독을 아직 보내지 않았을 때."""
+        key = self._reg_key()
+        return (key is not None and self.is_websocket_connected and self._websocket_logged_in
+                and self._reg_sent != (self._login_gen, key))
+
+    def _schedule_reregister(self):
+        """실시간 재등록을 예약합니다 (이벤트 루프 스레드에서만 호출).
+
+        단일 워커가 '지금 보낼 필요가 있는지(_reg_wanted)'를 매번 다시 판정하므로, LOGIN 성공·set_real_reg·
+        REG 실패 재시도가 겹쳐도 같은 구독은 로그인 세션당 한 번만 전송되고, 전송 중 바뀐 구독/새 로그인
+        세션은 유실되지 않습니다. 워커가 이미 실행 중이면 새 태스크를 만들지 않습니다.
+        """
+        if not self._real_reg_info:
+            return
+        task = self._reregister_task
+        if task is None or task.done():
+            self._reregister_task = asyncio.ensure_future(self._reregister_worker())
+
+    async def _reregister_worker(self):
+        # 반복은 외부 이벤트(구독 변경, 새 로그인 세션, REG 실패)로만 발생하며,
+        # REG 실패는 핸들러의 재시도 한도(REG_MAX_RETRIES)로 제한됩니다.
+        while True:
+            # REG 실패 후 재시도 간격: 실패한 구독에만 적용하고, 짧은 단위로 대기하며 만료 시각을 다시 읽어
+            # (백오프 연장·새 LOGIN 초기화·구독 변경이 대기 중에도 반영되도록 함)
+            while True:
+                wait = self._reg_backoff_until - time.monotonic()
+                if wait <= 0 or self._reg_key() != self._reg_backoff_key:
+                    break
+                await asyncio.sleep(min(wait, REG_BACKOFF_TICK_SEC))
+            if not self._reg_wanted():
+                return
+            gen, key, fail_gen = self._login_gen, self._reg_key(), self._reg_fail_gen
+            if key != self._reg_last_key:
+                self._reg_retry_count = 0       # 새 구독은 이전 구독이 소진한 재시도 예산을 물려받지 않음
+            self._reg_last_key = key
+            await self._reregister_real_data()
+            # 전송하는 동안 새 로그인 세션이 시작됐거나 REG 실패가 도착했다면 '보낸 것'으로 기록하지 않음
+            if gen == self._login_gen and fail_gen == self._reg_fail_gen:
+                self._reg_sent = (gen, key)
+            if not self._reg_wanted():
+                return
+            await asyncio.sleep(0)              # 다른 태스크에 양보
 
     @notify_on_exception(fallback_return=None)
     async def _websocket_connect(self):
@@ -1587,6 +1635,13 @@ class Kiwoom:
                     # mark login success
                     self._websocket_logged_in = True
                     self._websocket_login_sent = True
+                    # LOGIN 이 성공한 뒤에야 이전 실시간 구독을 복구합니다
+                    self._reg_retry_count = 0
+                    self._login_gen += 1        # 새 로그인 세션: 구독을 다시 보내야 함
+                    self._reg_sent = None
+                    self._reg_backoff_until = 0.0
+                    self._reg_backoff_key = None
+                    self._schedule_reregister()
                 else:
                     msg = str(data.get('return_msg', ''))
                     logger.warning(f"WebSocket login failed: {msg}")
@@ -1625,9 +1680,25 @@ class Kiwoom:
             elif trnm == 'REG':
                 if data.get('return_code') == 0:
                     logger.info(f"Real-time registration successful.")
+                    self._reg_retry_count = 0
                 else:
                     logger.warning(f"Real-time registration failed: {data}")
-                    
+                    self._reg_fail_gen += 1
+                    self._reg_sent = None       # 거부된 등록은 '보낸 것'으로 취급하지 않음
+                    # 구독 실패 시 시세가 끊기므로 제한적으로 재등록을 시도합니다 (재연결·LOGIN 성공 시에는 다시 시도됨)
+                    if self._real_reg_info and self._reg_retry_count < REG_MAX_RETRIES:
+                        self._reg_retry_count += 1
+                        logger.info(f"실시간 등록 재시도 예약 ({self._reg_retry_count}/{REG_MAX_RETRIES})")
+                        self._reg_backoff_until = time.monotonic() + REG_RETRY_DELAY_SEC
+                        self._reg_backoff_key = self._reg_last_key
+                        self._schedule_reregister()
+                    elif self._real_reg_info:
+                        # 재시도 한도 소진: 이 로그인 세션에서는 같은 구독을 더 보내지 않음
+                        # (구독 목록이 바뀌거나 새로 LOGIN 하면 다시 시도)
+                        logger.error("실시간 등록 재시도 한도를 초과했습니다. 다음 LOGIN 또는 구독 변경 시 다시 시도합니다.")
+                        # 포기 처리는 실패한 전송의 구독에 적용 (그 사이 바뀐 최신 구독은 계속 전송 대상)
+                        self._reg_sent = (self._login_gen, self._reg_last_key)
+
             elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
                     logger.info(f"Real-time removal successful.")
