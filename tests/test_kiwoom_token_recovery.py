@@ -530,11 +530,12 @@ def test_get_balance_partial_pages_are_not_treated_as_success(fast):
 def test_get_balance_success_replaces_and_empty_account_is_legitimate(fast):
     c, _ = make_client([])
     c.balance = {'000660': {'종목명': 'SK하이닉스', '보유수량': 1, '매수일': '20261101'}}
-    # 기존 구현은 첫 페이지 후 항상 한 번 더 조회하므로 두 번째 응답(빈 페이지)을 함께 준비
-    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: [HOLD]}), Resp({'return_code': 0, BAL_KEY: []})]
+    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: [HOLD]}, headers={'cont-yn': 'N'})]
     c.get_balance()
     assert set(c.balance) == {'005930'} and c.balance_sync_ok is True
-    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: []})] * 2   # 정상 조회 결과가 빈 계좌
+    assert c.session.post.call_count == 1          # 마지막 페이지 뒤 불필요한 추가 요청 없음
+    c.session.post.reset_mock()
+    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: []}, headers={'cont-yn': 'N'})]   # 정상 조회 결과가 빈 계좌
     c.get_balance()
     assert c.balance == {} and c.balance_sync_ok is True
 
@@ -564,9 +565,49 @@ def test_get_order_partial_pages_are_not_treated_as_success(fast):
 def test_get_order_success_replaces_and_empty_is_legitimate(fast):
     c, _ = make_client([])
     c.order = {'000660': {'종목코드': '000660'}}
-    c.session.post.side_effect = [Resp({'return_code': 0, 'oso': [OSO]}), Resp({'return_code': 0, 'oso': []})]
+    c.session.post.side_effect = [Resp({'return_code': 0, 'oso': [OSO]}, headers={'cont-yn': 'N'})]
     c.get_order()
     assert set(c.order) == {'005930'} and c.order_sync_ok is True
-    c.session.post.side_effect = [Resp({'return_code': 0, 'oso': []})] * 2
+    assert c.session.post.call_count == 1
+    c.session.post.reset_mock()
+    c.session.post.side_effect = [Resp({'return_code': 0, 'oso': []}, headers={'cont-yn': 'N'})]
     c.get_order()
     assert c.order == {} and c.order_sync_ok is True
+
+
+def test_get_balance_multi_page_merges_and_stops_at_last_page(fast):
+    c, _ = make_client([])
+    other = dict(HOLD, stk_cd='A000660', stk_nm='SK하이닉스')
+    c.session.post.side_effect = [
+        Resp({'return_code': 0, BAL_KEY: [HOLD]}, headers={'cont-yn': 'Y', 'next-key': 'k'}),
+        Resp({'return_code': 0, BAL_KEY: [other]}, headers={'cont-yn': 'N'}),
+    ]
+    c.get_balance()
+    assert set(c.balance) == {'005930', '000660'} and c.balance_sync_ok is True
+    assert c.session.post.call_count == 2
+
+
+def test_get_balance_max_loops_with_remaining_pages_is_incomplete(fast):
+    c, _ = make_client([])
+    c.balance = {'000660': {'종목명': 'SK하이닉스', '보유수량': 1}}
+    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: [HOLD]}, headers={'cont-yn': 'Y', 'next-key': 'k'})] * 5
+    c.get_balance(max_loops=1)
+    assert set(c.balance) == {'000660'} and c.balance_sync_ok is False
+
+
+def test_get_order_max_loops_with_remaining_pages_is_incomplete(fast):
+    c, _ = make_client([])
+    c.order = {'000660': {'종목코드': '000660'}}
+    c.session.post.side_effect = [Resp({'return_code': 0, 'oso': [OSO]}, headers={'cont-yn': 'Y', 'next-key': 'k'})] * 5
+    c.get_order(max_loops=1)
+    assert set(c.order) == {'000660'} and c.order_sync_ok is False
+
+
+def test_empty_account_first_page_not_discarded_by_later_failure(fast):
+    """정상적인 빈 첫 페이지가 마지막이면 추가 요청이 없으므로 이후 실패에 영향받지 않는다."""
+    c, _ = make_client([])
+    c.balance = {'000660': {'종목명': 'SK하이닉스', '보유수량': 1}}
+    c.session.post.side_effect = [Resp({'return_code': 0, BAL_KEY: []}, headers={'cont-yn': 'N'}),
+                                  Resp(TOKEN_INVALID)]
+    c.get_balance()
+    assert c.balance == {} and c.balance_sync_ok is True
