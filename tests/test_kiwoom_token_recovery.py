@@ -4,8 +4,10 @@
 """
 import asyncio
 import datetime
+import json
 import threading
-from unittest.mock import MagicMock
+import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -35,7 +37,7 @@ def make_client(tokens):
     c.access_token = 'old'
     c.token_expires_in = get_korea_time() + datetime.timedelta(hours=1)
     c._auth_lock = threading.Lock()
-    c._last_forced_auth_ts = float('-inf')
+    c._last_auth_attempt_ts = float('-inf')
     c._last_auth_alert_ts = float('-inf')
     c.session = MagicMock()
     issued = list(tokens)
@@ -62,7 +64,10 @@ def sent_tokens(c):
 def test_is_token_invalid_response():
     f = Kiwoom._is_token_invalid_response
     assert f(TOKEN_INVALID)
-    assert f({'return_code': 3, 'return_msg': '토큰이 만료되었습니다'})
+    for msg in ('Token을 발급받은 IP와 서비스를 요청한 IP가 동일하지 않습니다[8010]',
+                '투자구분(실전/모의)이 달라서 Token를 사용할수가 없습니다[8031]',
+                '토큰 인증 또는 단말기인증에 실패했습니다[8103]'):
+        assert not f({'return_code': 3, 'return_msg': msg}), msg
     assert not f(OK)
     assert not f({'return_code': 5, 'return_msg': '허용된 요청 개수를 초과하였습니다'})
     assert not f({'return_code': 3, 'return_msg': '잘못된 요청입니다'})
@@ -135,7 +140,7 @@ def test_normal_response_unchanged():
 def test_stale_token_skips_reauth_when_another_thread_refreshed():
     c, calls = make_client(['new'])
     c.access_token = 'already-new'   # 다른 스레드가 이미 갱신
-    assert c._force_reauthenticate('old') is True
+    assert c._refresh_token('old', force=True) is True
     assert calls['auth'] == 0
 
 
@@ -146,6 +151,76 @@ def test_missing_token_reauths_with_throttle():
     c._request('/p', 'ka1', {})
     assert calls['auth'] == 1
     assert sent_tokens(c) == ['Bearer fresh']
+
+
+def test_repeated_auth_failure_is_throttled_across_requests():
+    """토큰이 없고 인증이 계속 실패해도 요청마다 인증을 호출하지 않는다."""
+    c, calls = make_client([])  # 인증은 항상 실패
+    c.access_token = None
+    c.session.post.side_effect = [Resp(TOKEN_INVALID)] * 5
+    for _ in range(3):
+        c._request('/p', 'ka1', {})
+    assert calls['auth'] == 1
+
+
+def test_expired_and_auth_failing_is_throttled():
+    c, calls = make_client([])
+    c.token_expires_in = get_korea_time() - datetime.timedelta(seconds=1)
+    c.session.post.side_effect = [Resp(TOKEN_INVALID)] * 5
+    for _ in range(3):
+        c._request('/p', 'ka1', {})
+    assert calls['auth'] == 1
+
+
+def test_concurrent_expiry_and_forced_refresh_do_not_clobber_token():
+    """만료 갱신(B)과 강제 재인증(A)이 동시에 와도 성공한 토큰을 None으로 덮어쓰지 않는다."""
+    c, _ = make_client([])
+    c.token_expires_in = get_korea_time() - datetime.timedelta(seconds=1)
+    started = threading.Event()
+    release = threading.Event()
+    n = {'auth': 0}
+
+    def slow_auth():
+        n['auth'] += 1
+        started.set()
+        release.wait(2)
+        c.access_token = 'ok-token'
+        c.token_expires_in = get_korea_time() + datetime.timedelta(hours=24)
+
+    c._authenticate = slow_auth
+    results = {}
+    t1 = threading.Thread(target=lambda: results.setdefault('b', c._refresh_token()))
+    t1.start()
+    assert started.wait(2)
+    t2 = threading.Thread(target=lambda: results.setdefault('a', c._refresh_token('old', force=True)))
+    t2.start()
+    time.sleep(0.1)
+    release.set()
+    t1.join(2); t2.join(2)
+    assert n['auth'] == 1              # 인증은 직렬화되어 한 번만
+    assert c.access_token == 'ok-token'
+    assert results['a'] is True and results['b'] is True
+
+
+def test_authenticate_handles_response_without_token():
+    c = Kiwoom.__new__(Kiwoom)
+    c.base_url = 'https://example.invalid'
+    c.appkey = 'k'; c.secretkey = 's'
+    c.access_token = 'old'
+    c.token_expires_in = None
+    c.session = MagicMock()
+    c.session.post.return_value = Resp({'return_code': 3, 'return_msg': '실패'})
+    c._authenticate()                     # KeyError 없이 종료
+    assert c.access_token is None
+
+
+def test_refresh_token_swallows_authenticate_exception():
+    c, _ = make_client([])
+    c.access_token = None
+    c._authenticate = MagicMock(side_effect=RuntimeError('boom'))
+    assert c._refresh_token() is False
+    assert c.access_token is None
+    assert c._alerts
 
 
 def test_expired_token_still_refreshes_by_time():
@@ -159,14 +234,54 @@ def test_expired_token_still_refreshes_by_time():
 
 def test_websocket_force_ensure_reauths_regardless_of_expiry():
     c, calls = make_client(['ws-new'])
-    asyncio.run(c._ensure_valid_token_async(force=True))
+    assert asyncio.run(c._ensure_valid_token_async(force=True)) is True
     assert calls['auth'] == 1 and c.access_token == 'ws-new'
 
 
 def test_websocket_normal_ensure_does_not_reauth_when_valid():
     c, calls = make_client(['ws-new'])
-    asyncio.run(c._ensure_valid_token_async())
+    assert asyncio.run(c._ensure_valid_token_async()) is True
     assert calls['auth'] == 0 and c.access_token == 'old'
+
+
+def make_ws_client(tokens):
+    c, calls = make_client(tokens)
+    c._websocket_login_retries = 0
+    c._websocket_max_login_retries = 3
+    c._websocket_logged_in = False
+    c._websocket_login_sent = False
+    c._send_websocket_message = AsyncMock()
+    c.disconnect = AsyncMock()
+    return c, calls
+
+
+LOGIN_FAIL = json.dumps({'trnm': 'LOGIN', 'return_code': 3, 'return_msg': '토큰 인증에 실패했습니다[CODE=8005, MESSAGE=Token이 유효하지 않습니다]'})
+
+
+def test_websocket_login_failure_reauths_and_relogins_with_new_token():
+    c, calls = make_ws_client(['ws-new'])
+    asyncio.run(c._handle_websocket_message(LOGIN_FAIL))
+    assert calls['auth'] == 1
+    c._send_websocket_message.assert_awaited_once_with({'trnm': 'LOGIN', 'token': 'ws-new'})
+    assert c._websocket_login_retries == 1
+    c.disconnect.assert_not_awaited()
+
+
+def test_websocket_login_failure_when_reauth_fails_does_not_send_null_login_or_burn_retries():
+    c, calls = make_ws_client([])  # 인증 실패
+    asyncio.run(c._handle_websocket_message(LOGIN_FAIL))
+    c._send_websocket_message.assert_not_awaited()
+    assert c._websocket_login_retries == 0      # 재시도 횟수 소진하지 않음
+    c.disconnect.assert_awaited_once()          # 끊고 재연결 루프에서 재시도
+
+
+def test_websocket_login_failure_when_throttled_does_not_burn_retries():
+    c, calls = make_ws_client(['ws-new'])
+    c._last_auth_attempt_ts = time.monotonic()  # 방금 인증 시도함
+    asyncio.run(c._handle_websocket_message(LOGIN_FAIL))
+    assert calls['auth'] == 0
+    c._send_websocket_message.assert_not_awaited()
+    assert c._websocket_login_retries == 0
 
 
 def test_alert_throttle():
