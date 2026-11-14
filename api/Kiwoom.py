@@ -85,7 +85,7 @@ class Kiwoom:
         self._real_reg_info = None
         # LOGIN 성공 후 실시간 재등록 태스크/REG 실패 재시도 횟수
         self._reregister_task = None
-        self._reregister_delay = None    # 예약된 재등록의 대기 시간(초). None 이면 예약 없음
+        self._reg_backoff_until = 0.0    # REG 실패 후 재시도를 기다릴 시각(time.monotonic 기준)
         self._login_gen = 0              # LOGIN 성공 누적 횟수(로그인 세션 세대)
         self._reg_sent = None            # (로그인 세대, 구독 정보 키): 이 세션에서 이미 전송한 REG
         self._reg_fail_gen = 0           # REG 실패 응답 누적 횟수 (전송 중 도착한 실패를 구분하기 위함)
@@ -1413,36 +1413,36 @@ class Kiwoom:
         return (key is not None and self.is_websocket_connected and self._websocket_logged_in
                 and self._reg_sent != (self._login_gen, key))
 
-    def _schedule_reregister(self, delay=0.0):
+    def _schedule_reregister(self):
         """실시간 재등록을 예약합니다 (이벤트 루프 스레드에서만 호출).
 
         단일 워커가 '지금 보낼 필요가 있는지(_reg_wanted)'를 매번 다시 판정하므로, LOGIN 성공·set_real_reg·
         REG 실패 재시도가 겹쳐도 같은 구독은 로그인 세션당 한 번만 전송되고, 전송 중 바뀐 구독/새 로그인
-        세션은 유실되지 않습니다. 워커가 이미 실행 중이면 새 태스크를 만들지 않고 대기 시간만 갱신합니다.
+        세션은 유실되지 않습니다. 워커가 이미 실행 중이면 새 태스크를 만들지 않습니다.
         """
         if not self._real_reg_info:
             return
-        self._reregister_delay = delay if self._reregister_delay is None else min(self._reregister_delay, delay)
         task = self._reregister_task
         if task is None or task.done():
             self._reregister_task = asyncio.ensure_future(self._reregister_worker())
 
     async def _reregister_worker(self):
-        sends = 0
-        while sends <= REG_MAX_RETRIES + 1:   # 안전 상한: 한 번의 워커 실행에서 무한 반복 방지
-            delay, self._reregister_delay = (self._reregister_delay or 0.0), None
-            if delay:
-                await asyncio.sleep(delay)
+        # 반복은 외부 이벤트(구독 변경, 새 로그인 세션, REG 실패)로만 발생하며,
+        # REG 실패는 핸들러의 재시도 한도(REG_MAX_RETRIES)로 제한됩니다.
+        while True:
+            wait = self._reg_backoff_until - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)       # REG 실패 후 재시도 간격
             if not self._reg_wanted():
                 return
             gen, key, fail_gen = self._login_gen, self._reg_key(), self._reg_fail_gen
             await self._reregister_real_data()
-            sends += 1
             # 전송하는 동안 새 로그인 세션이 시작됐거나 REG 실패가 도착했다면 '보낸 것'으로 기록하지 않음
             if gen == self._login_gen and fail_gen == self._reg_fail_gen:
                 self._reg_sent = (gen, key)
             if not self._reg_wanted():
                 return
+            await asyncio.sleep(0)              # 다른 태스크에 양보
 
     @notify_on_exception(fallback_return=None)
     async def _websocket_connect(self):
@@ -1629,6 +1629,7 @@ class Kiwoom:
                     self._reg_retry_count = 0
                     self._login_gen += 1        # 새 로그인 세션: 구독을 다시 보내야 함
                     self._reg_sent = None
+                    self._reg_backoff_until = 0.0
                     self._schedule_reregister()
                 else:
                     msg = str(data.get('return_msg', ''))
@@ -1673,12 +1674,18 @@ class Kiwoom:
                     logger.warning(f"Real-time registration failed: {data}")
                     self._reg_fail_gen += 1
                     self._reg_sent = None       # 거부된 등록은 '보낸 것'으로 취급하지 않음
-                    # 구독 실패 시 시세가 끊기므로 제한적으로 재등록을 시도합니다 (재연결·LOGIN 성공 시에도 다시 예약됨)
+                    # 구독 실패 시 시세가 끊기므로 제한적으로 재등록을 시도합니다 (재연결·LOGIN 성공 시에는 다시 시도됨)
                     if self._real_reg_info and self._reg_retry_count < REG_MAX_RETRIES:
                         self._reg_retry_count += 1
                         logger.info(f"실시간 등록 재시도 예약 ({self._reg_retry_count}/{REG_MAX_RETRIES})")
-                        self._schedule_reregister(delay=REG_RETRY_DELAY_SEC)
-                    
+                        self._reg_backoff_until = time.monotonic() + REG_RETRY_DELAY_SEC
+                        self._schedule_reregister()
+                    elif self._real_reg_info:
+                        # 재시도 한도 소진: 이 로그인 세션에서는 같은 구독을 더 보내지 않음
+                        # (구독 목록이 바뀌거나 새로 LOGIN 하면 다시 시도)
+                        logger.error("실시간 등록 재시도 한도를 초과했습니다. 다음 LOGIN 또는 구독 변경 시 다시 시도합니다.")
+                        self._reg_sent = (self._login_gen, self._reg_key())
+
             elif trnm == 'REMOVE':
                 if data.get('return_code') == 0:
                     logger.info(f"Real-time removal successful.")

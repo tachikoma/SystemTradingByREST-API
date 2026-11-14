@@ -31,7 +31,7 @@ def make_client(real_reg=True):
     c.is_websocket_connected = True
     c.websocket = AsyncMock()
     c._reregister_task = None
-    c._reregister_delay = None
+    c._reg_backoff_until = 0.0
     c._login_gen = 0
     c._reg_sent = None
     c._reg_fail_gen = 0
@@ -335,7 +335,7 @@ def test_cancelled_reregister_does_not_spawn_followup_task():
         c._schedule_reregister()
         task = c._reregister_task
         await started.wait()
-        c._schedule_reregister(delay=0)                      # 실행 중에 들어온 추가 요청
+        c._schedule_reregister()                             # 실행 중에 들어온 추가 요청
         task.cancel()
         try:
             await task
@@ -403,3 +403,92 @@ def test_new_login_session_during_inflight_send_is_not_masked_by_old_send():
     asyncio.run(scenario())
     assert len(sent) == 2                                    # 새 세션용 REG 가 다시 전송됨
     assert c._reg_sent == (c._login_gen, ('005930;000660', '0'))
+
+
+def test_failure_chain_inside_one_worker_respects_retry_budget(monkeypatch):
+    """전송 중 REG 실패 응답이 연속으로 도착해도 최초 1회 + 재시도 한도(3회)를 넘기지 않는다."""
+    c = make_client()
+    c._websocket_logged_in = True
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def rec_sleep(d):
+        sleeps.append(d)
+        await real_sleep(0)
+
+    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', rec_sleep)
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+        await c._handle_websocket_message(REG_FAIL)     # 전송 직후(워커 실행 중) 실패 응답 도착
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._schedule_reregister()
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert len(sent) == 1 + kiwoom_module.REG_MAX_RETRIES
+    assert [d for d in sleeps if d and d > 0.5]          # 재시도 사이에 백오프 대기가 실제로 적용됨
+
+
+def test_retry_backoff_not_erased_by_concurrent_same_subscription_request(monkeypatch):
+    c = make_client()
+    c._websocket_logged_in = True
+    sleeps = []
+    real_sleep = asyncio.sleep
+
+    async def rec_sleep(d):
+        sleeps.append(d)
+        await real_sleep(0)
+
+    monkeypatch.setattr(kiwoom_module.asyncio, 'sleep', rec_sleep)
+    gate = asyncio.Event()
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+        if len(sent) == 1:
+            await gate.wait()
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._schedule_reregister()
+        await real_sleep(0)
+        await real_sleep(0)
+        c._schedule_reregister()                          # 같은 구독의 set_real_reg 가 전송 중에 들어옴
+        await c._handle_websocket_message(REG_FAIL)       # 이어서 REG 실패 → 백오프 2초
+        gate.set()
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert len(sent) == 2
+    assert any(d and d > 0.5 for d in sleeps)             # 즉시 재전송되지 않고 백오프를 지킴
+
+
+def test_many_subscription_changes_during_sends_end_with_latest(monkeypatch):
+    """전송 중 구독이 계속 바뀌어도 (임의의 횟수 상한 없이) 마지막 구독까지 전송된다."""
+    c = make_client(real_reg=False)
+    c._websocket_logged_in = True
+    c._real_reg_info = {'code_list': 'c0', 'opt_type': '0'}
+    sent = []
+
+    async def send(m):
+        sent.append(m['data'][0]['item'][0])
+        n = len(sent)
+        if n <= 8:                                         # 전송할 때마다 구독 목록이 바뀜
+            c._real_reg_info = {'code_list': f'c{n}', 'opt_type': '0'}
+            c._schedule_reregister()
+
+    c._send_websocket_message = send
+
+    async def scenario():
+        c._schedule_reregister()
+        await c._reregister_task
+
+    asyncio.run(scenario())
+    assert sent[-1] == 'c8' and len(sent) == 9
+    assert c._reg_sent == (c._login_gen, ('c8', '0'))
